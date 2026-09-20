@@ -46,6 +46,7 @@ pre.config-view{background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto;
   <a href="/admin/emails">Emails</a>
   <a href="/admin/outbox">Outbox</a>
   <a href="/admin/suppressions">Suppressions</a>
+  <a href="/admin/room">Room</a>
   <a href="/admin/config">Config</a>
 </nav>
 <main class="container admin">
