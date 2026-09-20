@@ -1368,6 +1368,64 @@ async function main() {
     check('payment-success for Room still shows claim access (no regression)',
       psRoom.includes('/room/claim'));
 
+    /* ---- Phase B: admin driver pipeline ---------------------------- */
+    const pbEmail = `pipeline-${ts}@example.com`;
+    await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'Pipeline Driver'], ['email', pbEmail], ['phone', '4145550101'],
+      ['business_name', 'PB Hauling'], ['mc_number', '654321'],
+      ['vehicle_make_model', 'Chevy Express'], ['home_city', 'Milwaukee'],
+      ['work_prefs', 'local'], ['source', 'facebook'],
+    ]});
+    const pbDrv = db.prepare('SELECT id FROM drivers WHERE email = ?').get(pbEmail);
+
+    res = await req(`${BASE}/admin/drivers`, {});
+    check('admin pipeline requires token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/drivers?token=${ADMIN_TOKEN}`, {});
+    const pipeHtml = await res.text();
+    check('admin pipeline lists drivers with status filter tabs',
+      res.status === 200 && pipeHtml.includes('Driver Pipeline') && pipeHtml.includes('Pipeline Driver') &&
+      pipeHtml.includes('New (') && pipeHtml.includes('status=new'),
+      `status=${res.status}`);
+    check('pipeline shows business, vehicle, source columns',
+      pipeHtml.includes('PB Hauling') && pipeHtml.includes('Chevy Express') && pipeHtml.includes('Facebook'));
+    res = await req(`${BASE}/admin/drivers?token=${ADMIN_TOKEN}&status=ready`, {});
+    const pipeReady = await res.text();
+    check('pipeline status filter excludes non-matching drivers',
+      res.status === 200 && !pipeReady.includes('Pipeline Driver'));
+
+    res = await req(`${BASE}/admin/drivers/${pbDrv.id}?token=${ADMIN_TOKEN}`, {});
+    const detHtml = await res.text();
+    check('admin driver detail shows full profile + history + note form',
+      res.status === 200 && detHtml.includes('Status history') && detHtml.includes('Add a note') &&
+      detHtml.includes('PB Hauling') && detHtml.includes('654321'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/drivers/${pbDrv.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['status', 'reviewing'], ['note', 'Docs look good'], ['notify', '1'],
+    ]});
+    const afterStatus = db.prepare('SELECT status, last_contact FROM drivers WHERE id = ?').get(pbDrv.id);
+    const histRows = db.prepare('SELECT from_status, to_status, changed_by, note FROM driver_status_history WHERE driver_id = ? ORDER BY ts').all(pbDrv.id);
+    check('admin status change updates status, stamps last_contact, appends history',
+      res.status === 302 && afterStatus.status === 'reviewing' && !!afterStatus.last_contact &&
+      histRows.length === 2 && histRows[1].from_status === 'new' && histRows[1].to_status === 'reviewing' &&
+      histRows[1].changed_by === 'admin' && histRows[1].note === 'Docs look good',
+      `status=${res.status}`);
+    const scMail = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND step = 'status-change'").get(pbEmail).n;
+    check('admin status change with notify queues driver email', scMail === 1, `count=${scMail}`);
+
+    res = await req(`${BASE}/admin/drivers/${pbDrv.id}/note?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['note', 'Called, left voicemail'],
+    ]});
+    const notesAfter = db.prepare('SELECT notes FROM drivers WHERE id = ?').get(pbDrv.id).notes;
+    check('admin note appends timestamped note without overwriting',
+      res.status === 302 && notesAfter.includes('Called, left voicemail') && /admin/.test(notesAfter),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/drivers/${pbDrv.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['status', 'bogus']] });
+    check('admin rejects invalid status with 400', res.status === 400, `status=${res.status}`);
+    res = await req(`${BASE}/admin/drivers/999999?token=${ADMIN_TOKEN}`, {});
+    check('admin driver detail 404s for unknown id', res.status === 404, `status=${res.status}`);
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

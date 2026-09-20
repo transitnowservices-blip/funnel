@@ -37,6 +37,7 @@ const roomFunnelViews = require('./views/room-funnel');
 // TransitNow Driver Operations Platform (additive; existing routes untouched).
 const drivers = require('./lib/drivers');
 const driverViews = require('./views/drivers');
+const driverAdminViews = require('./views/driver-admin');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1314,6 +1315,49 @@ app.post('/drivers/onboard', ah(async (req, res) => {
   });
 
   page(res, 'Onboarding complete', driverViews.onboardDonePage({ site, driver, dashUrl }), site);
+}));
+
+// --- Phase B: admin driver pipeline -----------------------------------------
+// NOTE: these routes are registered before app.use('/admin', adminAuth), so
+// adminAuth is applied explicitly on each route (function is hoisted).
+app.get('/admin/drivers', adminAuth, ah(async (req, res) => {
+  const status = drivers.DRIVER_STATUSES.includes(req.query.status) ? req.query.status : null;
+  const source = req.query.source ? drivers.normalizeSource(req.query.source) : null;
+  const filters = { status, source: req.query.source ? source : null, search: req.query.q || '' };
+  const [list, counts] = await Promise.all([
+    drivers.listDrivers(filters),
+    drivers.countDriversByStatus(),
+  ]);
+  res.send(adminViews.adminLayout('Driver Pipeline', driverAdminViews.driverPipelineHtml({ list, counts, status, source: req.query.source || '', q: req.query.q || '' })));
+}));
+
+app.get('/admin/drivers/:id', adminAuth, ah(async (req, res) => {
+  const driver = await drivers.getDriverById(req.params.id);
+  if (!driver) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Driver not found.</p>'));
+  const history = await drivers.statusHistory(driver.id);
+  res.send(adminViews.adminLayout('Driver: ' + driver.full_name, driverAdminViews.driverDetailHtml({ driver, history })));
+}));
+
+app.post('/admin/drivers/:id/status', adminAuth, ah(async (req, res) => {
+  const driver = await drivers.getDriverById(req.params.id);
+  if (!driver) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Driver not found.</p>'));
+  const to = req.body.status;
+  if (!drivers.DRIVER_STATUSES.includes(to)) {
+    return res.status(400).send(adminViews.adminLayout('Error', '<p>Invalid status.</p>'));
+  }
+  await drivers.setDriverStatus(driver.id, to, {
+    by: 'admin',
+    note: req.body.note || '',
+    notify: !!req.body.notify,
+  });
+  res.redirect(`/admin/drivers/${driver.id}`);
+}));
+
+app.post('/admin/drivers/:id/note', adminAuth, ah(async (req, res) => {
+  const driver = await drivers.getDriverById(req.params.id);
+  if (!driver) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Driver not found.</p>'));
+  await drivers.addDriverNote(driver.id, req.body.note || '', 'admin');
+  res.redirect(`/admin/drivers/${driver.id}`);
 }));
 
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------
