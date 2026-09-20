@@ -1,0 +1,548 @@
+#!/usr/bin/env node
+/*
+ * Automated end-to-end test for the funnel app.
+ *
+ * SPEC-FIRST (contract 2026-09-19): the app is being built by sibling agents
+ * against the same contract. This test therefore DISCOVERS the SQLite schema
+ * (table/column names) at runtime instead of hard-coding it — see
+ * "SCHEMA DISCOVERY" below. If discovery fails it prints the actual schema
+ * so the map can be corrected in one place.
+ *
+ * What it does:
+ *   1. Spawns `node server.js` itself (ADMIN_TOKEN=test-token, PORT=3111,
+ *      EMAIL_PROVIDER=local), waits for /healthz.
+ *   2. Anonymous visit -> lead submit -> NEW_LEAD tag -> scheduler ->
+ *      welcome email HTML in data/outbox.
+ *   3. Sales view (VIEWED_OFFER) -> checkout start, no purchase ->
+ *      cart row + STARTED_CHECKOUT/HIGH_INTENT.
+ *   4. Ages the cart 2h via sqlite -> scheduler -> ABANDONED_CART tag +
+ *      cart email #1 -> forces all 4 cart emails due -> scheduler ->
+ *      asserts 4 cart emails sent.
+ *   5. Completes the demo purchase -> scheduler -> asserts cart emails
+ *      cancelled, ABANDONED_CART removed, PURCHASED/CUSTOMER tags,
+ *      confirmation + post-purchase emails.
+ *   6. Second lead: purchase immediately (no abandon) -> no cart tags/emails.
+ *   7. Third lead (pure prospect): weekly nurture sends; purchaser is
+ *      suppressed from featured-offer prospect promo.
+ *   8. Unsubscribe flow -> UNSUBSCRIBED + queue cancelled + no more mail.
+ *   9. Admin dashboard 200 + key metric labels.
+ *  10. Kills the server, prints PASS/FAIL per assertion, exits non-zero
+ *      on any failure.
+ *
+ * Only node built-ins + node:sqlite + global fetch. No npm dependencies.
+ */
+
+const { spawn } = require('node:child_process');
+const { DatabaseSync } = require('node:sqlite');
+const fs = require('node:fs');
+const path = require('node:path');
+
+const APP_ROOT = path.resolve(__dirname, '..');
+const PORT = 3111;
+const BASE = `http://127.0.0.1:${PORT}`;
+const ADMIN_TOKEN = 'test-token';
+const DB_PATH = path.join(APP_ROOT, 'data', 'funnel.db');
+const OUTBOX = path.join(APP_ROOT, 'data', 'outbox');
+const SERVER_START_TIMEOUT_MS = 30000;
+const FETCH_TIMEOUT_MS = 15000;
+
+/* ------------------------------------------------------------------ */
+/* Results                                                             */
+/* ------------------------------------------------------------------ */
+const results = [];
+function check(name, cond, detail = '') {
+  const ok = !!cond;
+  results.push({ name, ok });
+  console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${!ok && detail ? ' — ' + detail : ''}`);
+}
+function failFast(msg) {
+  console.log('FAIL  ' + msg);
+  results.push({ name: msg, ok: false });
+  throw new Error(msg);
+}
+
+/* ------------------------------------------------------------------ */
+/* HTTP + cookie jar                                                   */
+/* ------------------------------------------------------------------ */
+class Jar {
+  constructor() { this.c = new Map(); }
+  store(res) {
+    const sc = typeof res.headers.getSetCookie === 'function' ? res.headers.getSetCookie() : [];
+    for (const h of sc) {
+      const pair = h.split(';')[0];
+      const i = pair.indexOf('=');
+      if (i > 0) this.c.set(pair.slice(0, i).trim(), pair.slice(i + 1).trim());
+    }
+  }
+  header() { return [...this.c].map(([k, v]) => `${k}=${v}`).join('; '); }
+  has(n) { return this.c.has(n); }
+}
+
+async function req(url, { method = 'GET', jar = null, form = null, json = null, redirect = 'manual' } = {}) {
+  const headers = {};
+  if (jar && jar.c.size) headers.cookie = jar.header();
+  let body;
+  if (form) { headers['content-type'] = 'application/x-www-form-urlencoded'; body = new URLSearchParams(form).toString(); }
+  if (json) { headers['content-type'] = 'application/json'; body = JSON.stringify(json); }
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+  try {
+    const res = await fetch(url, { method, headers, body, redirect, signal: ctl.signal });
+    if (jar) jar.store(res);
+    return res;
+  } finally { clearTimeout(t); }
+}
+
+async function runScheduler() {
+  const res = await req(`${BASE}/admin/run-scheduler?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+  const text = await res.text();
+  return { status: res.status, text };
+}
+
+/* ------------------------------------------------------------------ */
+/* SCHEMA DISCOVERY — the one place to adapt if the build names        */
+/* things differently. Candidates are tried in order; the first        */
+/* table/column that exists wins.                                      */
+/* ------------------------------------------------------------------ */
+function tableExists(db, t) {
+  try { db.prepare(`SELECT 1 FROM "${t}" LIMIT 1`).get(); return true; }
+  catch { return false; }
+}
+function findTable(db, cands, what) {
+  for (const c of cands) if (tableExists(db, c)) return c;
+  const actual = db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map(r => r.name);
+  failFast(`schema: no ${what} table among [${cands.join(', ')}]; actual tables: [${actual.join(', ')}]`);
+}
+function columns(db, t) {
+  return db.prepare(`PRAGMA table_info("${t}")`).all().map(r => r.name);
+}
+function pickCol(cols, cands) {
+  return cands.find(c => cols.includes(c)) || null;
+}
+
+function discover(db) {
+  const S = {};
+  S.leads = findTable(db, ['leads', 'lead', 'contacts', 'subscribers'], 'leads');
+  const lc = columns(db, S.leads);
+  S.leadId = pickCol(lc, ['id', 'lead_id']) || failFast('schema: leads table has no id column');
+  S.leadEmail = pickCol(lc, ['email', 'email_address']) || failFast('schema: leads table has no email column');
+
+  S.tags = findTable(db, ['lead_tags', 'tags', 'taggings', 'contact_tags'], 'tags');
+  const tc = columns(db, S.tags);
+  S.tagLead = pickCol(tc, ['lead_id', 'contact_id', 'subscriber_id']) || failFast('schema: tags table has no lead id column');
+  S.tagName = pickCol(tc, ['tag', 'tag_name', 'name']) || failFast('schema: tags table has no tag name column');
+
+  S.carts = findTable(db, ['carts', 'cart', 'checkouts'], 'carts');
+  const cc = columns(db, S.carts);
+  S.cartId = pickCol(cc, ['id', 'cart_id']) || failFast('schema: carts table has no id column');
+  S.cartLead = pickCol(cc, ['lead_id', 'contact_id']) || failFast('schema: carts table has no lead id column');
+  S.cartStatus = pickCol(cc, ['status', 'state']);
+  S.cartStarted = pickCol(cc, ['started_at', 'created_at', 'updated_at']) || failFast('schema: carts table has no started_at/created_at column');
+
+  S.queue = findTable(db, ['email_queue', 'emails', 'email_jobs', 'outbox', 'scheduled_emails'], 'email queue');
+  const qc = columns(db, S.queue);
+  S.qLead = pickCol(qc, ['lead_id', 'contact_id']);
+  S.qStatus = pickCol(qc, ['status', 'state']) || failFast('schema: email queue has no status column');
+  S.qSched = pickCol(qc, ['scheduled_for', 'send_at', 'scheduled_at', 'run_at']) || failFast('schema: email queue has no scheduled_for column');
+  S.qTextCols = ['sequence', 'step', 'template', 'template_name', 'kind', 'type', 'name', 'subject'].filter(c => qc.includes(c));
+  if (!S.qTextCols.length) failFast('schema: email queue has no sequence/step/subject-ish text column');
+
+  S.purchases = findTable(db, ['purchases', 'orders', 'transactions'], 'purchases');
+  const pc = columns(db, S.purchases);
+  S.purLead = pickCol(pc, ['lead_id', 'contact_id', 'email']);
+  return S;
+}
+
+function tagsFor(db, S, leadId) {
+  return db.prepare(`SELECT "${S.tagName}" AS t FROM "${S.tags}" WHERE "${S.tagLead}" = ?`)
+    .all(leadId).map(r => r.t);
+}
+function leadIdByEmail(db, S, email) {
+  const r = db.prepare(`SELECT "${S.leadId}" AS id FROM "${S.leads}" WHERE "${S.leadEmail}" = ?`).get(email);
+  return r ? r.id : null;
+}
+function textConds(S, keywords) {
+  // (LOWER("template") LIKE '%cart%' OR LOWER("subject") LIKE '%cart%' ...)
+  const ors = [];
+  for (const col of S.qTextCols) for (const kw of keywords) ors.push(`LOWER("${col}") LIKE '%${kw}%'`);
+  return `(${ors.join(' OR ')})`;
+}
+function queueCount(db, S, leadId, keywords, status) {
+  const conds = [`"${S.qStatus}" = ?`];
+  const params = [status];
+  if (S.qLead && leadId != null) { conds.push(`"${S.qLead}" = ?`); params.push(leadId); }
+  if (keywords) conds.push(textConds(S, keywords));
+  return db.prepare(`SELECT COUNT(*) AS n FROM "${S.queue}" WHERE ${conds.join(' AND ')}`).get(...params).n;
+}
+function forceDue(db, S, leadId, keywords) {
+  const conds = [`"${S.qStatus}" = 'queued'`, textConds(S, keywords)];
+  const params = [];
+  if (S.qLead && leadId != null) { conds.push(`"${S.qLead}" = ?`); params.push(leadId); }
+  return db.prepare(`UPDATE "${S.queue}" SET "${S.qSched}" = datetime('now','-1 minute') WHERE ${conds.join(' AND ')}`).run(...params).changes;
+}
+
+/* ------------------------------------------------------------------ */
+/* Outbox helpers                                                      */
+/* ------------------------------------------------------------------ */
+function outboxFiles() {
+  try { return fs.readdirSync(OUTBOX).filter(f => f.endsWith('.html')).sort(); }
+  catch { return []; }
+}
+function newFilesSince(before) {
+  const b = new Set(before);
+  return outboxFiles().filter(f => !b.has(f));
+}
+function filesMentioning(email, files) {
+  return files.filter(f => {
+    try { return fs.readFileSync(path.join(OUTBOX, f), 'utf8').includes(email); }
+    catch { return false; }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Server lifecycle                                                    */
+/* ------------------------------------------------------------------ */
+function startServer() {
+  if (!fs.existsSync(path.join(APP_ROOT, 'server.js'))) {
+    failFast(`server.js not found at ${APP_ROOT}/server.js — app not built yet`);
+  }
+  const child = spawn('node', ['server.js'], {
+    cwd: APP_ROOT,
+    env: { ...process.env, ADMIN_TOKEN, PORT: String(PORT), EMAIL_PROVIDER: 'local' },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  child.stdout.on('data', d => process.stdout.write(`[server] ${d}`));
+  child.stderr.on('data', d => process.stderr.write(`[server:err] ${d}`));
+  return child;
+}
+async function waitForHealth() {
+  const t0 = Date.now();
+  while (Date.now() - t0 < SERVER_START_TIMEOUT_MS) {
+    try {
+      const res = await req(`${BASE}/healthz`, {});
+      if (res.status === 200 && (await res.text()).trim() === 'ok') return;
+    } catch { /* not up yet */ }
+    await new Promise(r => setTimeout(r, 300));
+  }
+  failFast(`server did not answer /healthz with "ok" within ${SERVER_START_TIMEOUT_MS}ms`);
+}
+function stopServer(child) {
+  return new Promise(resolve => {
+    if (!child || child.exitCode !== null) return resolve();
+    const killer = setTimeout(() => { try { child.kill('SIGKILL'); } catch {} }, 5000);
+    child.once('exit', () => { clearTimeout(killer); resolve(); });
+    try { child.kill('SIGTERM'); } catch { resolve(); }
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Main                                                                */
+/* ------------------------------------------------------------------ */
+async function main() {
+  const ts = Date.now();
+  const email1 = `e2e1-${ts}@example.com`;
+  const email2 = `e2e2-${ts}@example.com`;
+  const email3 = `e2e3-${ts}@example.com`;
+
+  let child = null, db = null;
+  try {
+    child = startServer();
+    await waitForHealth();
+    check('server boots and GET /healthz returns "ok"', true);
+
+    if (!fs.existsSync(DB_PATH)) failFast(`DB not found at ${DB_PATH} — app did not create data/funnel.db`);
+    db = new DatabaseSync(DB_PATH);
+    const S = discover(db);
+    check('schema discovery found leads/tags/carts/queue/purchases tables', true);
+
+    // Optional: ground product id + payment mode from config (used for stripe-mode path)
+    let paymentMode = 'demo', productId = null;
+    try {
+      const site = JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'config', 'site.json'), 'utf8'));
+      if (site.paymentMode) paymentMode = site.paymentMode;
+      const prods = JSON.parse(fs.readFileSync(path.join(APP_ROOT, 'config', 'products.json'), 'utf8'));
+      const list = Array.isArray(prods) ? prods : prods.products;
+      if (Array.isArray(list) && list.length) productId = list[0].id || list[0].productId || null;
+    } catch { /* config not readable yet; assume demo */ }
+    console.log(`info: paymentMode=${paymentMode}${productId ? ` productId=${productId}` : ''}`);
+
+    /* ---- 1. Anonymous visit -------------------------------------- */
+    const jar1 = new Jar();
+    let res = await req(`${BASE}/`, { jar: jar1 });
+    check('GET / returns 200', res.status === 200, `status=${res.status}`);
+    check('anonymous visit sets vid cookie, no lid yet', jar1.has('vid') && !jar1.has('lid'),
+      `cookies=[${[...jar1.c.keys()].join(',')}]`);
+
+    /* ---- 2. Lead submit ------------------------------------------- */
+    res = await req(`${BASE}/lead`, { jar: jar1 });
+    const leadForm = await res.text();
+    check('GET /lead form exposes first_name/email/consent fields',
+      res.status === 200 && /first_name/i.test(leadForm) && /name="email"/i.test(leadForm) && /consent/i.test(leadForm),
+      `status=${res.status}`);
+
+    const outboxBefore = outboxFiles();
+    res = await req(`${BASE}/lead?src=autotest&cmp=e2e`, {
+      jar: jar1, method: 'POST',
+      form: { first_name: 'Testy', email: email1, phone: '414-555-0100', consent: 'on' },
+    });
+    const loc = res.headers.get('location') || '';
+    check('POST /lead 302-redirects to /free-value', [301, 302, 303].includes(res.status) && loc.includes('/free-value'),
+      `status=${res.status} location=${loc}`);
+    check('lead submit sets lid cookie (visitor now identified)', jar1.has('lid'),
+      `cookies=[${[...jar1.c.keys()].join(',')}]`);
+
+    const lead1 = leadIdByEmail(db, S, email1);
+    check('lead row saved in DB', lead1 != null);
+    if (lead1 == null) failFast('cannot continue without lead1 row');
+
+    let tags = tagsFor(db, S, lead1);
+    check('lead tagged NEW_LEAD', tags.includes('NEW_LEAD'), `tags=[${tags.join(',')}]`);
+
+    // Welcome email: may send on submit or need a scheduler pass.
+    let sched = await runScheduler();
+    check('POST /admin/run-scheduler?token= returns 200', sched.status === 200, `status=${sched.status}`);
+    let newMail = newFilesSince(outboxBefore);
+    check('welcome email HTML written to data/outbox', newMail.length >= 1,
+      `new files=${newMail.length}`);
+    const nurtureQueued = queueCount(db, S, lead1, ['nurture', 'welcome', 'day'], 'queued');
+    check('nurture sequence emails queued for lead', nurtureQueued >= 1 || newMail.length >= 1,
+      `queued nurture-ish=${nurtureQueued}`);
+
+    /* ---- 3. Sales view + checkout start (abandon path) ------------- */
+    res = await req(`${BASE}/sales`, { jar: jar1 });
+    check('GET /sales returns 200', res.status === 200, `status=${res.status}`);
+    tags = tagsFor(db, S, lead1);
+    check('offer view tagged VIEWED_OFFER/OFFER_*_VIEWED',
+      tags.includes('VIEWED_OFFER') || tags.some(t => /^OFFER_.*_VIEWED$/.test(t)),
+      `tags=[${tags.join(',')}]`);
+
+    res = await req(`${BASE}/checkout`, { jar: jar1 });
+    check('GET /checkout returns 200 with lead form', res.status === 200 && /name="email"/i.test(await res.text()),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/checkout`, {
+      jar: jar1, method: 'POST',
+      form: { first_name: 'Testy', email: email1, phone: '414-555-0100' },
+    });
+    const coBody = await res.text();
+    const isDemo = res.status === 200 && coBody.includes('/checkout/complete-demo');
+    const isStripeRedirect = [301, 302, 303].includes(res.status) && /^https?:\/\//i.test(res.headers.get('location') || '');
+    check('POST /checkout creates cart (demo page or stripe redirect)', isDemo || isStripeRedirect,
+      `status=${res.status} location=${res.headers.get('location') || ''}`);
+
+    const cartRow = db.prepare(
+      `SELECT "${S.cartId}" AS id${S.cartStatus ? `, "${S.cartStatus}" AS st` : ''} FROM "${S.carts}" WHERE "${S.cartLead}" = ? ORDER BY "${S.cartId}" DESC LIMIT 1`
+    ).get(lead1);
+    check('cart row created for lead', !!cartRow, S.cartStatus ? `status=${cartRow && cartRow.st}` : 'no status column');
+    tags = tagsFor(db, S, lead1);
+    check('checkout start tagged STARTED_CHECKOUT (+HIGH_INTENT)',
+      tags.includes('STARTED_CHECKOUT') && tags.includes('HIGH_INTENT'),
+      `tags=[${tags.join(',')}]`);
+
+    /* ---- 4. Abandon: age cart, run scheduler ----------------------- */
+    db.prepare(`UPDATE "${S.carts}" SET "${S.cartStarted}" = datetime('now','-2 hours') WHERE "${S.cartLead}" = ?`).run(lead1);
+    sched = await runScheduler();
+    check('scheduler pass after aging cart returns 200', sched.status === 200, `status=${sched.status}`);
+    tags = tagsFor(db, S, lead1);
+    check('ABANDONED_CART tag applied after 1h threshold', tags.includes('ABANDONED_CART'),
+      `tags=[${tags.join(',')}]`);
+    const cartSent1 = queueCount(db, S, lead1, ['cart', 'abandon'], 'sent');
+    const cartQueued1 = queueCount(db, S, lead1, ['cart', 'abandon'], 'queued');
+    check('cart reminder #1 queued/sent after 1h', cartSent1 + cartQueued1 >= 1,
+      `sent=${cartSent1} queued=${cartQueued1}`);
+
+    // Force the remaining cart emails due instead of waiting 24h/60h/144h.
+    const forced = forceDue(db, S, lead1, ['cart', 'abandon']);
+    sched = await runScheduler();
+    check('scheduler pass after forcing cart emails due returns 200', sched.status === 200);
+    const cartSentTotal = queueCount(db, S, lead1, ['cart', 'abandon'], 'sent');
+    check('all 4 abandoned-cart emails sent (1h/24h/60h/144h)',
+      cartSentTotal >= 4, `sent cart emails=${cartSentTotal} (forced ${forced} due)`);
+    const outboxAfterCart = outboxFiles();
+    const cartMailFiles = filesMentioning(email1, newFilesSince(outboxBefore));
+    check('cart emails landed in data/outbox', cartMailFiles.length >= 4,
+      `files mentioning ${email1}: ${cartMailFiles.length}`);
+
+    /* ---- 5. Complete the demo purchase ----------------------------- */
+    let purchased = false;
+    if (isDemo) {
+      res = await req(`${BASE}/checkout/complete-demo`, { jar: jar1, method: 'POST', form: {} });
+      const ploc = res.headers.get('location') || '';
+      check('POST /checkout/complete-demo 302-redirects to /thank-you',
+        [301, 302, 303].includes(res.status) && ploc.includes('/thank-you'),
+        `status=${res.status} location=${ploc}`);
+      purchased = [301, 302, 303].includes(res.status);
+    } else if (isStripeRedirect && productId) {
+      // Stripe payment-link mode: simulate the webhook completion stub.
+      res = await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: email1, productId } });
+      check('POST /webhooks/stripe stub records purchase', res.status === 200, `status=${res.status}`);
+      purchased = res.status === 200;
+    }
+    if (!purchased) failFast('could not complete a purchase in demo or stripe-stub mode');
+
+    res = await req(`${BASE}/thank-you`, { jar: jar1 });
+    check('GET /thank-you returns 200', res.status === 200, `status=${res.status}`);
+
+    sched = await runScheduler();
+    check('scheduler pass after purchase returns 200', sched.status === 200);
+
+    tags = tagsFor(db, S, lead1);
+    check('ABANDONED_CART tag removed on purchase', !tags.includes('ABANDONED_CART'),
+      `tags=[${tags.join(',')}]`);
+    check('purchase tags PURCHASED + CUSTOMER applied',
+      tags.includes('PURCHASED') && tags.includes('CUSTOMER'), `tags=[${tags.join(',')}]`);
+    const cartQueuedAfter = queueCount(db, S, lead1, ['cart', 'abandon'], 'queued');
+    check('no cart emails remain queued after purchase (all 4 were already sent pre-purchase)',
+      cartQueuedAfter === 0, `queued=${cartQueuedAfter}`);
+
+    let purCount = 0;
+    if (S.purLead) {
+      purCount = db.prepare(`SELECT COUNT(*) AS n FROM "${S.purchases}" WHERE "${S.purLead}" = ?`).get(
+        S.purLead === 'email' ? email1 : lead1).n;
+    } else {
+      purCount = db.prepare(`SELECT COUNT(*) AS n FROM "${S.purchases}"`).get().n;
+    }
+    check('purchase row recorded', purCount >= 1, `rows=${purCount}`);
+
+    const newAfterPurchase = newFilesSince(outboxAfterCart);
+    check('confirmation email sent after purchase (new outbox file)', newAfterPurchase.length >= 1,
+      `new files=${newAfterPurchase.length}`);
+    const postQueued = queueCount(db, S, lead1, ['post', 'confirm', 'receipt', 'onboard'], 'queued')
+      + queueCount(db, S, lead1, ['post', 'confirm', 'receipt', 'onboard'], 'sent');
+    check('post-purchase sequence scheduled/sending', postQueued >= 1, `post-purchase-ish rows=${postQueued}`);
+
+    /* ---- 5b. Pending cart emails are cancelled by a mid-sequence purchase */
+    const jar4 = new Jar();
+    const email4 = `cancel${Date.now()}@example.com`;
+    await req(`${BASE}/`, { jar: jar4 });
+    res = await req(`${BASE}/lead?src=autotest&cmp=e2e`, {
+      jar: jar4, method: 'POST', form: { first_name: 'Canceller', email: email4, consent: 'on' },
+    });
+    const lead4 = leadIdByEmail(db, S, email4);
+    check('fourth lead saved', lead4 != null);
+    await runScheduler(); // welcome goes out
+    await req(`${BASE}/checkout`, {
+      jar: jar4, method: 'POST',
+      form: { first_name: 'Canceller', email: email4, phone: '414-555-0103' },
+    });
+    db.prepare(`UPDATE "${S.carts}" SET "${S.cartStarted}" = datetime('now','-2 hours') WHERE "${S.cartLead}" = ?`).run(lead4);
+    await runScheduler(); // abandon detected: 1h email sent, the rest stay queued
+    const pendingBefore = queueCount(db, S, lead4, ['cart', 'abandon'], 'queued');
+    check('abandoned lead has pending cart emails before purchase', pendingBefore >= 1,
+      `queued=${pendingBefore}`);
+    if (isDemo) {
+      res = await req(`${BASE}/checkout/complete-demo`, { jar: jar4, method: 'POST', form: {} });
+      check('fourth lead completes demo purchase mid cart-sequence', [301, 302, 303].includes(res.status),
+        `status=${res.status}`);
+    } else if (productId) {
+      res = await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: email4, productId } });
+      check('stripe stub records fourth lead purchase', res.status === 200, `status=${res.status}`);
+    }
+    await runScheduler();
+    const pendingAfter = queueCount(db, S, lead4, ['cart', 'abandon'], 'queued');
+    const cancelledAfter = queueCount(db, S, lead4, ['cart', 'abandon'], 'cancelled');
+    check('pending cart emails cancelled immediately on purchase (none left queued)',
+      pendingAfter === 0 && cancelledAfter >= 1,
+      `queued=${pendingAfter} cancelled=${cancelledAfter}`);
+
+    /* ---- 6. Second lead: purchase immediately, no abandon ----------- */
+    const jar2 = new Jar();
+    await req(`${BASE}/`, { jar: jar2 });
+    res = await req(`${BASE}/lead?src=autotest&cmp=e2e`, {
+      jar: jar2, method: 'POST', form: { first_name: 'Speedy', email: email2, consent: 'on' },
+    });
+    check('second lead submits (302 to /free-value)', [301, 302, 303].includes(res.status));
+    const lead2 = leadIdByEmail(db, S, email2);
+    check('second lead row saved', lead2 != null);
+    await runScheduler();
+    await req(`${BASE}/checkout`, { jar: jar2, method: 'POST', form: { first_name: 'Speedy', email: email2 } });
+    if (isDemo) {
+      res = await req(`${BASE}/checkout/complete-demo`, { jar: jar2, method: 'POST', form: {} });
+      check('second lead completes demo purchase immediately', [301, 302, 303].includes(res.status),
+        `status=${res.status}`);
+    } else if (productId) {
+      await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: email2, productId } });
+    }
+    await runScheduler();
+    const tags2 = tagsFor(db, S, lead2);
+    check('immediate purchaser never gets ABANDONED_CART', !tags2.includes('ABANDONED_CART'),
+      `tags=[${tags2.join(',')}]`);
+    check('immediate purchaser tagged PURCHASED', tags2.includes('PURCHASED'), `tags=[${tags2.join(',')}]`);
+    const cartMailLead2 = queueCount(db, S, lead2, ['cart', 'abandon'], 'queued') + queueCount(db, S, lead2, ['cart', 'abandon'], 'sent');
+    check('immediate purchaser gets zero cart emails', cartMailLead2 === 0, `cart email rows=${cartMailLead2}`);
+
+    /* ---- 7. Weekly nurture: prospect gets it, purchaser suppressed -- */
+    const jar3 = new Jar();
+    await req(`${BASE}/`, { jar: jar3 });
+    res = await req(`${BASE}/lead?src=autotest&cmp=e2e`, {
+      jar: jar3, method: 'POST', form: { first_name: 'Prospect', email: email3, consent: 'on' },
+    });
+    const lead3 = leadIdByEmail(db, S, email3);
+    check('third (prospect) lead saved', lead3 != null);
+    await runScheduler();
+
+    const weeklyKw = ['weekly', 'nurture', 'flyer'];
+    forceDue(db, S, lead3, weeklyKw);
+    await runScheduler();
+    const weeklySentProspect = queueCount(db, S, lead3, weeklyKw, 'sent');
+    check('prospect receives weekly nurture email when due', weeklySentProspect >= 1,
+      `sent weekly-ish=${weeklySentProspect}`);
+
+    // Purchaser suppression: force any weekly-ish queued mail for lead2 due and
+    // confirm the scheduler does NOT send prospect promo for the featured offer.
+    const purchaserWeeklyQueued = queueCount(db, S, lead2, weeklyKw, 'queued');
+    forceDue(db, S, lead2, weeklyKw);
+    await runScheduler();
+    const weeklySentPurchaser = queueCount(db, S, lead2, weeklyKw, 'sent');
+    check('purchaser suppressed from featured-offer prospect promo',
+      purchaserWeeklyQueued === 0 || weeklySentPurchaser === 0,
+      `purchaser weekly queued-before=${purchaserWeeklyQueued} sent=${weeklySentPurchaser}`);
+
+    /* ---- 8. Unsubscribe -------------------------------------------- */
+    res = await req(`${BASE}/unsubscribe?email=${encodeURIComponent(email3)}`, { jar: jar3 });
+    check('GET /unsubscribe?email= returns 200', res.status === 200, `status=${res.status}`);
+    res = await req(`${BASE}/unsubscribe`, { jar: jar3, method: 'POST', form: { email: email3 } });
+    check('POST /unsubscribe succeeds (one-click)', [200, 301, 302, 303].includes(res.status),
+      `status=${res.status}`);
+    const tags3 = tagsFor(db, S, lead3);
+    check('unsubscribed lead tagged UNSUBSCRIBED', tags3.includes('UNSUBSCRIBED'),
+      `tags=[${tags3.join(',')}]`);
+    const queuedAfterUnsub = S.qLead
+      ? db.prepare(`SELECT COUNT(*) AS n FROM "${S.queue}" WHERE "${S.qLead}" = ? AND "${S.qStatus}" = 'queued'`).get(lead3).n
+      : 0;
+    check('all queued emails cancelled on unsubscribe', queuedAfterUnsub === 0, `still queued=${queuedAfterUnsub}`);
+
+    const filesBeforeFinalSched = outboxFiles();
+    const mentionedBefore = filesMentioning(email3, filesBeforeFinalSched).length;
+    await runScheduler();
+    const mentionedAfter = filesMentioning(email3, outboxFiles()).length;
+    check('no new email generated for unsubscribed lead', mentionedAfter === mentionedBefore,
+      `files mentioning lead before=${mentionedBefore} after=${mentionedAfter}`);
+
+    /* ---- 9. Admin dashboard ---------------------------------------- */
+    res = await req(`${BASE}/admin?token=${ADMIN_TOKEN}`, {});
+    const adminBody = (await res.text()).toLowerCase();
+    const labels = ['leads', 'carts', 'purchases', 'emails', 'revenue', 'conversion', 'dashboard', 'subscribers'];
+    const hits = labels.filter(l => adminBody.includes(l));
+    check('GET /admin dashboard 200 with key metric labels', res.status === 200 && hits.length >= 3,
+      `status=${res.status} labels found=[${hits.join(',')}]`);
+
+  } finally {
+    try { if (db) db.close(); } catch {}
+    await stopServer(child);
+  }
+
+  const failed = results.filter(r => !r.ok);
+  console.log(`\n${results.length - failed.length}/${results.length} assertions passed.`);
+  if (failed.length) {
+    console.log('Failed:');
+    for (const f of failed) console.log(`  - ${f.name}`);
+    process.exit(1);
+  }
+  console.log('ALL TESTS PASSED');
+}
+
+main().catch(err => {
+  console.error('TEST ERROR:', err && err.message ? err.message : err);
+  process.exit(1);
+});
