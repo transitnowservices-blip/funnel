@@ -1,1 +1,1 @@
-{"dependencies":{"@libsql/client":"^0.18.0","cookie":"^1.0.2","express":"^4.21.2"},"description":"Marketing funnel web app backend (Express + node:sqlite)","engines":{"node":">=24"},"name":"funnel","private":true,"scripts":{"start":"node server.js"},"version":"0.1.0"}
+{"dependencies":{"@libsql/client":"^0.18.0","cookie":"^1.0.2","express":"^4.21.2","nodemailer":"^10.0.10"},"description":"Marketing funnel web app backend (Express + node:sqlite)","engines":{"node":">=24"},"name":"funnel","private":true,"scripts":{"start":"node server.js"},"version":"0.1.0"}
