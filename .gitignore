@@ -1,0 +1,5 @@
+# Runtime data (SQLite DB + local email outbox) — recreated at boot
+data/
+
+# Dependencies
+node_modules/

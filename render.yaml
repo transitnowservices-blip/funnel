@@ -1,0 +1,20 @@
+# Render Blueprint — deploys the funnel app as a Node web service.
+# In the Render dashboard: New → Blueprint → connect this repo/folder and the
+# env vars below marked `sync: false` will prompt for values at deploy time.
+services:
+  - type: web
+    name: funnel
+    runtime: node
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: ADMIN_TOKEN
+        sync: false
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
+      - key: EMAIL_PROVIDER
+        value: local
+      - key: RESEND_API_KEY
+        sync: false
