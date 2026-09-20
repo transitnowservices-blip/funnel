@@ -100,6 +100,36 @@ async function runScheduler() {
   return { status: res.status, text };
 }
 
+/** POST a multipart/form-data body (for the proof-of-progress upload route). */
+async function multipartReq(url, { jar = null, fields = {}, file = null } = {}) {
+  const boundary = '----e2eboundary' + Date.now();
+  const parts = [];
+  for (const [k, v] of Object.entries(fields)) {
+    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`, 'utf8'));
+  }
+  if (file) {
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="proof"; filename="${file.filename}"\r\nContent-Type: ${file.mime}\r\n\r\n`,
+      'utf8'
+    ));
+    parts.push(file.buffer);
+    parts.push(Buffer.from('\r\n', 'utf8'));
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
+  const body = Buffer.concat(parts);
+  const headers = { 'content-type': `multipart/form-data; boundary=${boundary}` };
+  if (jar && jar.c.size) headers.cookie = jar.header();
+  const res = await fetch(url, { method: 'POST', headers, body, redirect: 'manual' });
+  if (jar) jar.store(res);
+  return res;
+}
+
+// 1x1 transparent PNG, for proof-upload tests.
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==',
+  'base64'
+);
+
 /* ------------------------------------------------------------------ */
 /* SCHEMA DISCOVERY — the one place to adapt if the build names        */
 /* things differently. Candidates are tried in order; the first        */
@@ -883,6 +913,184 @@ async function main() {
     check('GET /admin/config shows masked env status without secrets',
       res.status === 200 && cfgHtml.includes('ADMIN_TOKEN') && !cfgHtml.includes('test-admin-token'),
       `status=${res.status}`);
+
+    /* ---- 13. Room accountability: goals, check-ins, tracker, emails ------ */
+    // Covers: /room/goal create+edit (dates fixed on edit), /room/checkin
+    // multipart submit with server timestamp + proof upload + confirm guard,
+    // per-member privacy (no cross-member checkin/proof visibility),
+    // week math, /room/progress tracker, reminder/confirmation emails with
+    // eligibility guards, admin accountability section, 12 seeded posts.
+    const acctEmail = `e2e-acct-${ts}@example.com`;
+    const acctJar = new Jar();
+
+    async function provisionClaimedMember(email, pass) {
+      const jar = new Jar();
+      let r = await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email, productId: 'room', amountCents: 4900 } });
+      if (r.status !== 200) failFast(`webhook provision failed for ${email}: status=${r.status}`);
+      r = await req(`${BASE}/room/claim`, { jar, method: 'POST', form: { email, password: pass, password2: pass } });
+      if (r.status !== 302 || !jar.has('room_sess')) failFast(`claim failed for ${email}: status=${r.status}`);
+      r = await req(`${BASE}/room/welcome`, { jar, method: 'POST', form: {} });
+      if (r.status !== 302) failFast(`welcome POST failed for ${email}: status=${r.status}`);
+      r = await req(`${BASE}/room/goal`, { jar, method: 'POST', form: { goal_text: `Goal for ${email}` } });
+      if (r.status !== 302) failFast(`goal POST failed for ${email}: status=${r.status}`);
+      return jar;
+    }
+
+    const acctJar1 = await provisionClaimedMember(acctEmail, 'accttestpass1');
+    check('accountability member provisioned, claimed, goal set', true);
+
+    res = await req(`${BASE}/room/goal`, { jar: acctJar1 });
+    check('GET /room/goal renders MY 90-DAY WEALTH GOAL prompt',
+      res.status === 200 && (await res.text()).includes('MY 90-DAY WEALTH GOAL'),
+      `status=${res.status}`);
+
+    const goalRow = db.prepare('SELECT * FROM room_goals WHERE email = ?').get(acctEmail);
+    check('goal row has start_date and target_date = start + 90 days',
+      goalRow && goalRow.start_date > 0 && goalRow.target_date === goalRow.start_date + 90 * 24 * 3600 * 1000,
+      `row=${JSON.stringify(goalRow)}`);
+
+    res = await req(`${BASE}/room/goal`, { jar: acctJar1, method: 'POST', form: { goal_text: 'Edited goal text' } });
+    const goalRow2 = db.prepare('SELECT * FROM room_goals WHERE email = ?').get(acctEmail);
+    check('goal edit keeps start/target dates, updates text',
+      res.status === 302 &&
+      goalRow2.start_date === goalRow.start_date &&
+      goalRow2.target_date === goalRow.target_date &&
+      goalRow2.goal_text === 'Edited goal text',
+      `status=${res.status}`);
+
+    // Week math: 8 days after start -> current week 2.
+    db.prepare('UPDATE room_goals SET start_date = ? WHERE email = ?').run(Date.now() - 8 * 24 * 3600 * 1000, acctEmail);
+    res = await req(`${BASE}/room/progress`, { jar: acctJar1 });
+    const progHtmlW2 = await res.text();
+    check('week math: 8 days in shows "Week 2 of 12"',
+      res.status === 200 && progHtmlW2.includes('Week 2 of 12'),
+      `status=${res.status}`);
+    db.prepare('UPDATE room_goals SET start_date = ?, target_date = ? WHERE email = ?')
+      .run(Date.now(), Date.now() + 90 * 24 * 3600 * 1000, acctEmail);
+
+    // Weekly check-in via multipart (with proof file + confirm checkbox).
+    const ciBefore = Date.now();
+    res = await multipartReq(`${BASE}/room/checkin`, {
+      jar: acctJar1,
+      fields: {
+        goal: 'week one goal', action_taken: 'took action', accomplishment: 'accomplished things',
+        lesson: 'learned lots', next_commitment: 'do more', proof_confirm: '1',
+      },
+      file: { filename: 'proof.png', mime: 'image/png', buffer: TINY_PNG },
+    });
+    const ciLoc = res.headers.get('location') || '';
+    check('POST /room/checkin with proof redirects to /room/progress',
+      res.status === 302 && ciLoc.includes('/room/progress'),
+      `status=${res.status} location=${ciLoc}`);
+    const ciRow = db.prepare('SELECT * FROM room_checkins WHERE email = ? AND week = 1').get(acctEmail);
+    check('checkin row stored with server-generated timestamp (not client time)',
+      ciRow && ciRow.created_at >= ciBefore && ciRow.created_at <= Date.now() && ciRow.goal === 'week one goal',
+      `row=${JSON.stringify(ciRow && { ...ciRow, proof_blob: ciRow.proof_blob ? '<blob>' : null })}`);
+    check('proof bytes stored in DB (proof_blob) with metadata',
+      ciRow && ciRow.proof_blob &&
+        Buffer.from(ciRow.proof_blob).equals(TINY_PNG) &&
+        ciRow.proof_mime === 'image/png' && ciRow.proof_size === TINY_PNG.length,
+      `mime=${ciRow && ciRow.proof_mime} size=${ciRow && ciRow.proof_size} blobBytes=${ciRow && ciRow.proof_blob && ciRow.proof_blob.length}`);
+
+    res = await req(`${BASE}/room/proof/${ciRow.id}`, { jar: acctJar1 });
+    check('member can fetch own proof (200, image/png)',
+      res.status === 200 && (res.headers.get('content-type') || '').includes('image/png'),
+      `status=${res.status} ct=${res.headers.get('content-type')}`);
+
+    // Proof without the confirm checkbox is rejected.
+    res = await multipartReq(`${BASE}/room/checkin`, {
+      jar: acctJar1,
+      fields: { goal: 'g', action_taken: 'a' },
+      file: { filename: 'proof2.png', mime: 'image/png', buffer: TINY_PNG },
+    });
+    check('proof upload without confirm checkbox is rejected',
+      res.status === 200 && (await res.text()).includes('sensitive personal information'),
+      `status=${res.status}`);
+
+    // Confirmation email queued on check-in.
+    const confRow = db.prepare("SELECT * FROM email_queue WHERE email = ? AND sequence = 'room-confirmation'").get(acctEmail);
+    check("confirmation email queued with subject 'Progress documented ✓'",
+      confRow && confRow.subject === 'Progress documented ✓' && confRow.body_html.includes('VIEW MY PROGRESS'),
+      `row=${JSON.stringify(confRow && { subject: confRow.subject, status: confRow.status })}`);
+
+    // Second member: privacy — cannot see member 1's checkins or proof.
+    const acctEmail2 = `e2e-acct2-${ts}@example.com`;
+    const acctJar2 = await provisionClaimedMember(acctEmail2, 'accttestpass2');
+    res = await req(`${BASE}/room/progress`, { jar: acctJar2 });
+    const prog2 = await res.text();
+    check("member 2 progress page never shows member 1's checkin data",
+      res.status === 200 && !prog2.includes('accomplished things') && !prog2.includes('Edited goal text'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/room/proof/${ciRow.id}`, { jar: acctJar2 });
+    check("member 2 cannot fetch member 1's proof (404)", res.status === 404, `status=${res.status}`);
+    const anonJar = new Jar();
+    res = await req(`${BASE}/room/proof/${ciRow.id}`, { jar: anonJar });
+    check('anonymous proof fetch redirects to login',
+      res.status === 302 && (res.headers.get('location') || '').endsWith('/room/login'),
+      `status=${res.status}`);
+
+    // Dashboard shows goal card + check-in state; lesson page has action CTA.
+    res = await req(`${BASE}/room`, { jar: acctJar1 });
+    const dashAcct = await res.text();
+    check('dashboard shows 90-day goal card and completed check-in state',
+      res.status === 200 && dashAcct.includes('My 90-Day Wealth Goal') && dashAcct.includes('Edited goal text'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/room/classroom/money-cashflow`, { jar: acctJar1 });
+    check('lesson page carries NOW PUT IT INTO ACTION check-in CTA',
+      res.status === 200 && (await res.text()).includes('NOW PUT IT INTO ACTION'),
+      `status=${res.status}`);
+
+    // Reminders: member 2 has a goal but no check-in -> reminder queued.
+    // Member 1 already checked in -> no reminder.
+    sched = await runScheduler();
+    check('scheduler pass runs (200)', sched.status === 200, `status=${sched.status}`);
+    const rem2 = db.prepare("SELECT * FROM email_queue WHERE email = ? AND sequence = 'room-reminder'").get(acctEmail2);
+    check('reminder queued for member missing this week\'s check-in',
+      rem2 && rem2.subject === 'Your Wealth Builder weekly check-in' && rem2.body_html.includes('COMPLETE MY WEEKLY CHECK-IN'),
+      `row=${JSON.stringify(rem2 && { subject: rem2.subject, status: rem2.status })}`);
+    const rem1count = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-reminder'").get(acctEmail).n;
+    check('no reminder queued for member who already checked in', rem1count === 0, `count=${rem1count}`);
+    sched = await runScheduler();
+    const rem2dup = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-reminder' AND step = 'week-1'").get(acctEmail2).n;
+    check('reminder not duplicated on second scheduler pass', rem2dup === 1, `count=${rem2dup}`);
+
+    // Inactive member: no reminder; a manually queued room email is cancelled.
+    const acctEmail4 = `e2e-acct4-${ts}@example.com`;
+    await provisionClaimedMember(acctEmail4, 'accttestpass4');
+    res = await req(`${BASE}/admin/room/member-status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { email: acctEmail4, status: 'inactive' } });
+    check('admin can deactivate member', res.status === 302, `status=${res.status}`);
+    db.prepare(`INSERT INTO email_queue (lead_id, email, sequence, step, subject, body_html, product_id, scheduled_for, status)
+                VALUES (NULL, ?, 'room-reminder', 'week-1', 'x', 'y', 'room', ?, 'queued')`).run(acctEmail4, Date.now());
+    sched = await runScheduler();
+    const inactCancelled = db.prepare("SELECT status, cancel_reason FROM email_queue WHERE email = ? AND sequence = 'room-reminder' ORDER BY id DESC LIMIT 1").get(acctEmail4);
+    check('room email to inactive member cancelled with inactive-member reason',
+      inactCancelled && inactCancelled.status === 'cancelled' && inactCancelled.cancel_reason === 'inactive-member',
+      `row=${JSON.stringify(inactCancelled)}`);
+
+    // Suppressed email: no reminder queued.
+    const acctEmail5 = `e2e-acct5-${ts}@example.com`;
+    await provisionClaimedMember(acctEmail5, 'accttestpass5');
+    db.prepare('INSERT INTO suppressions (email, reason, ts) VALUES (?, ?, ?)').run(acctEmail5, 'test-suppression', Date.now());
+    sched = await runScheduler();
+    const suppCount = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-reminder'").get(acctEmail5).n;
+    check('no reminder queued for suppressed email', suppCount === 0, `count=${suppCount}`);
+
+    // Admin accountability section.
+    res = await req(`${BASE}/admin/room?token=${ADMIN_TOKEN}`, {});
+    const acctAdmin = await res.text();
+    check('admin room page renders Accountability section',
+      res.status === 200 && acctAdmin.includes('Accountability'),
+      `status=${res.status}`);
+    check('admin accountability shows member goal + check-in data, no leaderboard',
+      acctAdmin.includes('Edited goal text') && acctAdmin.includes('Checked in this week') &&
+      acctAdmin.includes('Not checked in this week') && !acctAdmin.toLowerCase().includes('leaderboard'),
+      `status=${res.status}`);
+
+    // 12 accountability posts seeded.
+    const acctPostCount = db.prepare("SELECT COUNT(*) n FROM room_posts WHERE title LIKE 'WEEK %'").get().n;
+    check('12 weekly accountability posts seeded', acctPostCount === 12, `count=${acctPostCount}`);
+    const pinnedAcct = db.prepare("SELECT COUNT(*) n FROM room_posts WHERE title LIKE 'WEEK %' AND pinned = 1").get().n;
+    check('accountability posts are not pinned', pinnedAcct === 0, `pinned=${pinnedAcct}`);
 
   } finally {
     try { if (db) db.close(); } catch {}
