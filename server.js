@@ -1379,6 +1379,90 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl }), site);
 }));
 
+// --- Phase D: driver route + packages (scoped to the token's driver) -------------
+app.get('/d/:token/route', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const route = await drivers.getCurrentRoute(driver.id);
+  const packages = route ? await drivers.listPackages({ routeId: route.id }) : [];
+  page(res, 'My route', driverViews.driverRoutePage({ site, driver, route, packages }), site);
+}));
+
+app.get('/d/:token/packages', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const packages = await drivers.listPackages({ driverId: driver.id });
+  page(res, 'My packages', driverViews.driverPackagesPage({ site, driver, packages }), site);
+}));
+
+// --- Phase D: admin routes + packages ------------------------------------------
+app.get('/admin/routes', adminAuth, ah(async (req, res) => {
+  const routes = await drivers.listRoutes();
+  const ids = [...new Set(routes.map((r) => r.driver_id).filter(Boolean))];
+  const driversById = {};
+  for (const id of ids) driversById[id] = await drivers.getDriverById(id);
+  res.send(adminViews.adminLayout('Routes', driverAdminViews.routeListHtml({ routes, driversById })));
+}));
+
+app.get('/admin/routes/new', adminAuth, ah(async (req, res) => {
+  const list = await drivers.listDrivers({ limit: 500 });
+  res.send(adminViews.adminLayout('New route', driverAdminViews.routeNewHtml({ list, preselectDriverId: req.query.driver_id })));
+}));
+
+app.post('/admin/routes', adminAuth, ah(async (req, res) => {
+  try {
+    const route = await drivers.createRoute({
+      driverId: Number(req.body.driver_id),
+      title: req.body.title,
+      scheduledDate: req.body.scheduled_date,
+      notes: req.body.notes,
+    });
+    res.redirect(`/admin/routes/${route.id}`);
+  } catch (err) {
+    res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p><p><a href="/admin/routes/new">&larr; Back</a></p>`));
+  }
+}));
+
+app.get('/admin/routes/:id', adminAuth, ah(async (req, res) => {
+  const route = await drivers.getRouteById(req.params.id);
+  if (!route) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Route not found.</p>'));
+  const [driver, packages, counts] = await Promise.all([
+    route.driver_id ? drivers.getDriverById(route.driver_id) : null,
+    drivers.listPackages({ routeId: route.id }),
+    drivers.countPackagesByStatus(route.id),
+  ]);
+  res.send(adminViews.adminLayout('Route ' + route.route_code, driverAdminViews.routeDetailHtml({ route, driver, packages, counts })));
+}));
+
+app.post('/admin/routes/:id/status', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.setRouteStatus(req.params.id, req.body.status);
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect(`/admin/routes/${req.params.id}`);
+}));
+
+app.post('/admin/routes/:id/packages', adminAuth, ah(async (req, res) => {
+  const route = await drivers.getRouteById(req.params.id);
+  if (!route) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Route not found.</p>'));
+  try {
+    await drivers.createPackage({
+      routeId: route.id,
+      driverId: route.driver_id,
+      recipient_name: req.body.recipient_name,
+      address: req.body.address,
+      city: req.body.city,
+      state: req.body.state,
+      zip: req.body.zip,
+      special_instructions: req.body.special_instructions,
+    });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p><p><a href="/admin/routes/${route.id}">&larr; Back</a></p>`));
+  }
+  res.redirect(`/admin/routes/${route.id}`);
+}));
+
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------
 app.get('/unsubscribe', (req, res) => {
   const site = config.getSite();

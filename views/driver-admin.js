@@ -152,4 +152,120 @@ function driverDetailHtml({ driver: d, history }) {
 </div>`;
 }
 
-module.exports = { driverPipelineHtml, driverDetailHtml, statusBadge };
+// --- Routes (Phase D) -----------------------------------------------------------
+function routeStatusBadge(status) {
+  const label = drivers.ROUTE_STATUS_LABELS[status] || status;
+  return `<span class="status-badge status-${esc(status)}">${esc(label)}</span>`;
+}
+
+function packageStatusBadge(status) {
+  const label = drivers.PACKAGE_STATUS_LABELS[status] || status;
+  return `<span class="status-badge">${esc(label)}</span>`;
+}
+
+function routeListHtml({ routes, driversById }) {
+  const rows = routes
+    .map((r) => {
+      const d = driversById[r.driver_id];
+      return `<tr>
+        <td><a href="/admin/routes/${r.id}"><strong>${esc(r.route_code)}</strong></a><br><span class="muted">${esc(r.title || '')}</span></td>
+        <td>${d ? `<a href="/admin/drivers/${d.id}">${esc(d.full_name)}</a>` : '—'}</td>
+        <td>${routeStatusBadge(r.status)}</td>
+        <td>${esc(r.scheduled_date || '—')}</td>
+        <td>${fmtTs(r.created_at)}</td>
+      </tr>`;
+    })
+    .join('');
+  return `
+<h2>Routes</h2>
+<p><a class="btn" href="/admin/routes/new">+ New route</a></p>
+<table class="admin-table">
+<thead><tr><th>Route</th><th>Driver</th><th>Status</th><th>Scheduled</th><th>Created</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="5">No routes yet.</td></tr>'}</tbody>
+</table>`;
+}
+
+function routeNewHtml({ list, preselectDriverId }) {
+  const opts = list
+    .map((d) => `<option value="${d.id}"${String(d.id) === String(preselectDriverId) ? ' selected' : ''}>${esc(d.full_name)} — ${esc(d.email)}</option>`)
+    .join('');
+  return `
+<h2>New route</h2>
+<form method="POST" action="/admin/routes" class="form">
+  <label>Driver *
+    <select name="driver_id" required>${opts}</select>
+  </label>
+  <label>Route title *
+    <input type="text" name="title" required placeholder="e.g. Milwaukee AM loop">
+  </label>
+  <label>Scheduled date
+    <input type="date" name="scheduled_date">
+  </label>
+  <label>Notes
+    <textarea name="notes" rows="3"></textarea>
+  </label>
+  <button type="submit" class="btn">Create route</button>
+</form>`;
+}
+
+function routeDetailHtml({ route, driver, packages, counts }) {
+  const statusOpts = drivers.ROUTE_STATUSES.map(
+    (s) => `<option value="${s}"${route.status === s ? ' selected' : ''}>${esc(drivers.ROUTE_STATUS_LABELS[s])}</option>`
+  ).join('');
+  const pkgRows = packages
+    .map(
+      (p) => `<tr>
+        <td><strong>${esc(p.package_id)}</strong></td>
+        <td>${esc(p.recipient_name)}<br><span class="muted">${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}</span></td>
+        <td>${packageStatusBadge(p.status)}</td>
+      </tr>`
+    )
+    .join('');
+  const countLine = Object.entries(counts)
+    .map(([s, c]) => `${drivers.PACKAGE_STATUS_LABELS[s] || s}: ${c}`)
+    .join(' · ');
+  return `
+<p><a href="/admin/routes">&larr; Back to routes</a></p>
+<h2>${esc(route.route_code)} ${routeStatusBadge(route.status)}</h2>
+<p class="muted">${esc(route.title || '')} · Driver: ${driver ? `<a href="/admin/drivers/${driver.id}">${esc(driver.full_name)}</a>` : '—'} · Scheduled: ${esc(route.scheduled_date || '—')}</p>
+
+<div class="card">
+  <h3>Change route status</h3>
+  <form method="POST" action="/admin/routes/${route.id}/status" class="form">
+    <label>Status <select name="status">${statusOpts}</select></label>
+    <button type="submit" class="btn">Update</button>
+  </form>
+</div>
+
+<div class="card">
+  <h3>Packages (${packages.length})${countLine ? ` — <span class="muted">${esc(countLine)}</span>` : ''}</h3>
+  <table class="admin-table">
+  <thead><tr><th>Package ID</th><th>Recipient / address</th><th>Status</th></tr></thead>
+  <tbody>${pkgRows || '<tr><td colspan="3">No packages on this route yet.</td></tr>'}</tbody>
+  </table>
+</div>
+
+<div class="card">
+  <h3>Add package</h3>
+  <form method="POST" action="/admin/routes/${route.id}/packages" class="form">
+    <label>Recipient name * <input type="text" name="recipient_name" required></label>
+    <label>Address * <input type="text" name="address" required></label>
+    <label>City <input type="text" name="city"></label>
+    <label>State <input type="text" name="state"></label>
+    <label>ZIP <input type="text" name="zip"></label>
+    <label>Special instructions <textarea name="special_instructions" rows="2"></textarea></label>
+    <button type="submit" class="btn">Add package</button>
+  </form>
+</div>`;
+}
+
+module.exports = {
+  driverPipelineHtml,
+  driverDetailHtml,
+  statusBadge,
+  routeListHtml,
+  routeNewHtml,
+  routeDetailHtml,
+  routeStatusBadge,
+  packageStatusBadge,
+};

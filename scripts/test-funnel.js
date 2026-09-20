@@ -1444,6 +1444,65 @@ async function main() {
     res = await req(`${BASE}/d/not-a-real-token`, {});
     check('dashboard rejects invalid token with 404', res.status === 404, `status=${res.status}`);
 
+    /* ---- Phase D: routes + packages -------------------------------- */
+    const pdEmail = `routed-${ts}@example.com`;
+    await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'Route Driver'], ['email', pdEmail], ['phone', '4145550103'], ['source', 'direct'],
+    ]});
+    const pdDrv = db.prepare('SELECT id, access_token FROM drivers WHERE email = ?').get(pdEmail);
+
+    res = await req(`${BASE}/admin/routes`, {});
+    check('admin routes require token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/routes?token=${ADMIN_TOKEN}`, {});
+    check('admin routes list renders', res.status === 200 && (await res.text()).includes('Routes'), `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/routes?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['driver_id', String(pdDrv.id)], ['title', 'Test Loop'], ['scheduled_date', '2026-09-21'],
+    ]});
+    const route = db.prepare('SELECT * FROM routes WHERE driver_id = ? ORDER BY id DESC LIMIT 1').get(pdDrv.id);
+    check('admin creates route with TNR-YYYY-0001 code',
+      res.status === 302 && route && /^TNR-2026-\d{4}$/.test(route.route_code) && route.status === 'planned',
+      route ? `code=${route.route_code}` : 'no route');
+
+    res = await req(`${BASE}/admin/routes/${route.id}/packages?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['recipient_name', 'Acme Corp'], ['address', '123 Main St'],
+      ['city', 'Milwaukee'], ['state', 'WI'], ['zip', '53202'],
+    ]});
+    const pkg = db.prepare('SELECT * FROM packages WHERE route_id = ?').get(route.id);
+    check('admin adds package with TN-YYYY-000001 id, inherits driver',
+      res.status === 302 && pkg && /^TN-2026-\d{6}$/.test(pkg.package_id) && pkg.driver_id === pdDrv.id && pkg.status === 'created',
+      pkg ? `id=${pkg.package_id}` : 'no package');
+
+    res = await req(`${BASE}/admin/routes/${route.id}/packages?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['recipient_name', ''], ['address', ''],
+    ]});
+    check('package validation rejects empty recipient/address (400)', res.status === 400, `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/routes/${route.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['status', 'active']] });
+    const routeAfter = db.prepare('SELECT status FROM routes WHERE id = ?').get(route.id);
+    check('admin route status change works', res.status === 302 && routeAfter.status === 'active', `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/route`, {});
+    const drvRouteHtml = await res.text();
+    check('driver route page shows assigned route + packages',
+      res.status === 200 && drvRouteHtml.includes(route.route_code) && drvRouteHtml.includes(pkg.package_id) && drvRouteHtml.includes('Acme Corp'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages`, {});
+    const drvPkgsHtml = await res.text();
+    check('driver packages page lists own packages',
+      res.status === 200 && drvPkgsHtml.includes(pkg.package_id), `status=${res.status}`);
+
+    // A second driver must not see the first driver's packages.
+    const pd2Email = `routed2-${ts}@example.com`;
+    await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'Other Driver'], ['email', pd2Email], ['phone', '4145550104'],
+    ]});
+    const pd2Token = db.prepare('SELECT access_token FROM drivers WHERE email = ?').get(pd2Email).access_token;
+    res = await req(`${BASE}/d/${pd2Token}/packages`, {});
+    const otherPkgs = await res.text();
+    check('driver cannot see another driver\'s packages',
+      res.status === 200 && !otherPkgs.includes(pkg.package_id));
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

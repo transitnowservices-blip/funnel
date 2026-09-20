@@ -190,4 +190,66 @@ function dashboardPage({ site, driver, dashUrl }) {
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, selectField, textField, checkboxGroup };
+// --- Phase D: driver route + packages -------------------------------------------
+function driverRoutePage({ site, driver, route, packages }) {
+  if (!route) {
+    return `
+<section>
+  <h1>My route</h1>
+  <p class="subhead">No route assigned yet.</p>
+  <div class="card"><p>When TransitNow assigns you a route, it will appear here with your stops and packages.</p></div>
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+  }
+  const pkgRows = packages
+    .map(
+      (p) => `<div class="card">
+        <h3>${esc(p.package_id)}</h3>
+        <p><strong>${esc(p.recipient_name)}</strong><br>${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}</p>
+        <p>Status: <strong>${esc(drivers.PACKAGE_STATUS_LABELS[p.status] || p.status)}</strong></p>
+        ${p.special_instructions ? `<p class="muted">Note: ${esc(p.special_instructions)}</p>` : ''}
+      </div>`
+    )
+    .join('');
+  return `
+<section>
+  <h1>My route</h1>
+  <p class="subhead">${esc(route.route_code)} · ${esc(route.title || '')}</p>
+  <div class="card highlight-card">
+    <p><strong>Status:</strong> ${esc(drivers.ROUTE_STATUS_LABELS[route.status] || route.status)}<br>
+    <strong>Scheduled:</strong> ${esc(route.scheduled_date || '—')}<br>
+    <strong>Packages:</strong> ${packages.length}</p>
+  </div>
+  <h2>Packages (${packages.length})</h2>
+  ${pkgRows || '<div class="card"><p>No packages on this route yet.</p></div>'}
+  <p><a class="btn btn-large" href="/d/${esc(driver.access_token)}/scan">SCAN A PACKAGE &rarr;</a></p>
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
+function driverPackagesPage({ site, driver, packages }) {
+  const groups = {};
+  for (const p of packages) {
+    (groups[p.status] = groups[p.status] || []).push(p);
+  }
+  const sections = Object.entries(groups)
+    .map(
+      ([status, list]) => `
+<h2>${esc(drivers.PACKAGE_STATUS_LABELS[status] || status)} (${list.length})</h2>
+${list.map((p) => `<div class="card">
+  <h3>${esc(p.package_id)}</h3>
+  <p><strong>${esc(p.recipient_name)}</strong><br>${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}</p>
+  ${p.special_instructions ? `<p class="muted">Note: ${esc(p.special_instructions)}</p>` : ''}
+</div>`).join('')}`
+    )
+    .join('\n');
+  return `
+<section>
+  <h1>My packages</h1>
+  <p class="subhead">${packages.length} package(s) assigned to you.</p>
+  ${sections || '<div class="card"><p>No packages assigned yet.</p></div>'}
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, selectField, textField, checkboxGroup };
