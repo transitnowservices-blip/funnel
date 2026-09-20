@@ -199,24 +199,88 @@ Most people try to skip to ownership. This Room walks you through the stages in 
 /** Idempotent: insert any seed post whose title isn't already present. */
 async function seedRoomPosts() {
   for (const p of SEED_POSTS) {
-    let row = await db.get('SELECT id, pinned FROM room_posts WHERE title = ?', [p.title]);
-    if (!row) {
-      const newId = await room.createPost({
-        authorEmail: 'admin',
-        authorName: 'Davena',
-        kind: 'post',
-        title: p.title,
-        body: p.body,
-      });
-      row = { id: newId != null ? Number(newId) : null, pinned: 0 };
-      console.log('[boot] seeded room post:', p.title);
-    }
-    // Foundational posts stay pinned so new members see them first.
-    if (row && row.id && !row.pinned) {
-      await room.setPinned(row.id, true);
-    }
+    await seedOnePost(p, true);
+  }
+  for (const p of ACCOUNTABILITY_POSTS) {
+    await seedOnePost(p, false);
   }
 }
+
+async function seedOnePost(p, pin) {
+  let row = await db.get('SELECT id, pinned FROM room_posts WHERE title = ?', [p.title]);
+  if (!row) {
+    const newId = await room.createPost({
+      authorEmail: 'admin',
+      authorName: 'Davena',
+      kind: 'post',
+      title: p.title,
+      body: p.body,
+    });
+    row = { id: newId != null ? Number(newId) : null, pinned: 0 };
+    console.log('[boot] seeded room post:', p.title);
+  }
+  // Foundational posts stay pinned so new members see them first;
+  // weekly accountability posts stay unpinned so the feed stays readable.
+  if (row && row.id && pin && !row.pinned) {
+    await room.setPinned(row.id, true);
+  }
+}
+
+// --- Weekly accountability community posts -------------------------------------------------
+// One per week of the 90-day journey. Seeded once at boot by seedRoomPosts()
+// (idempotent by title, never pinned). Each gives the week's theme, a concrete
+// action, and a pointer to the weekly check-in. Encouraging, never shaming;
+// no income promises.
+const ACCOUNTABILITY_POSTS = [
+  {
+    title: 'WEEK 1 — SHOW US YOUR STARTING POINT',
+    body: `Week 1 is about honesty, not impressiveness. Before you can measure progress, you need a starting point you told the truth about.\n\nTHIS WEEK'S ACTION: set your ONE 90-day goal (Dashboard → "Set My 90-Day Goal") and complete your first Proof of Progress check-in. Write down where you are right now — money in, money out, skills, time — without judging it.\n\nComplete your check-in from the My Progress page: /room/progress\n\nEveryone starts somewhere. Starting honestly is the bravest move there is. 👇 Reply with the ONE thing you're focusing on for the next 90 days.`,
+  },
+  {
+    title: 'WEEK 2 — SHOW US YOUR FIRST MOVE',
+    body: `Ideas are cheap; the first move is everything. Week 2 is about turning your goal into one real-world action — small counts.\n\nTHIS WEEK'S ACTION: take ONE concrete step toward your goal (send the email, open the account, write the page, make the list), then document it in your weekly check-in.\n\nComplete your check-in from the My Progress page: /room/progress\n\nIt doesn't have to be big. It has to be real. 👇 What was your first move?`,
+  },
+  {
+    title: 'WEEK 3 — SHOW US WHAT YOU EXECUTED',
+    body: `Week 3 separates planners from executors. Look back at what you said you'd do — then look at what actually got done.\n\nTHIS WEEK'S ACTION: in your check-in, compare last week's commitment to this week's reality. No spin. If you did it, say so. If you didn't, say why — that's data, not failure.\n\nComplete your check-in from the My Progress page: /room/progress\n\nExecution is a skill, and skills grow with reps. 👇 What did you execute this week?`,
+  },
+  {
+    title: 'WEEK 4 — WHAT WORKED? WHAT DIDN\'T?',
+    body: `One month in. Week 4 is a review week: keep what's working, name what isn't, and adjust without drama.\n\nTHIS WEEK'S ACTION: in your check-in's "lesson" section, write one thing that worked and one thing that didn't. Then make next week's commitment a fix for the thing that didn't.\n\nComplete your check-in from the My Progress page: /room/progress\n\nA system you adjust beats a perfect plan you abandon. 👇 What worked — and what didn't?`,
+  },
+  {
+    title: 'WEEK 5 — WHAT ARE YOU CHANGING?',
+    body: `If week 4 showed you something that isn't working, week 5 is when you change it. Same actions, same results — so change an action.\n\nTHIS WEEK'S ACTION: pick ONE thing to do differently this week (a new time block, a different approach, a smaller step) and put it in your check-in as your commitment.\n\nComplete your check-in from the My Progress page: /room/progress\n\nChange is uncomfortable and necessary. You're doing it anyway. 👇 What are you changing this week?`,
+  },
+  {
+    title: 'WEEK 6 — WHAT ARE YOU BUILDING NOW?',
+    body: `Halfway to the midpoint. Week 6 is about building — turning repeated actions into something with structure: an offer, a system, a habit, a body of work.\n\nTHIS WEEK'S ACTION: name the ONE thing you're actively building right now and take one building-block step toward it. Document it with proof if you can (a screenshot of the page, the draft, the list).\n\nComplete your check-in from the My Progress page: /room/progress\n\nBrick by brick is still building. 👇 What are you building now?`,
+  },
+  {
+    title: 'WEEK 7 — WHAT DID YOU FOLLOW THROUGH ON?',
+    body: `Follow-through is the rarest skill in the room. Week 7 is about finishing what you started — especially the unglamorous middle parts.\n\nTHIS WEEK'S ACTION: revisit an old commitment from a previous check-in that slipped. Do it this week, or consciously replace it. Either way, write the truth in your check-in.\n\nComplete your check-in from the My Progress page: /room/progress\n\nNobody's keeping score but you — and you're worth following through for. 👇 What did you follow through on?`,
+  },
+  {
+    title: 'WEEK 8 — WHAT CAN YOU IMPROVE?',
+    body: `Good enough got you here; better takes you further. Week 8 is about one upgrade — to a system, a skill, or a standard.\n\nTHIS WEEK'S ACTION: pick one thing you're already doing and make it 10% better (clearer offer, tighter budget tracking, faster follow-up). Small improvements compound.\n\nComplete your check-in from the My Progress page: /room/progress\n\nYou don't need a new plan. You need a sharper one. 👇 What are you improving?`,
+  },
+  {
+    title: 'WEEK 9 — WHAT ARE YOU READY TO EXPAND?',
+    body: `What's working deserves more fuel. Week 9 is about expansion: do more of what's producing results, and give it structure so it scales.\n\nTHIS WEEK'S ACTION: identify your highest-leverage action so far and commit to expanding it next week — more reps, a simple system around it, or teaching it to someone else.\n\nComplete your check-in from the My Progress page: /room/progress\n\nDouble down on what works. 👇 What are you ready to expand?`,
+  },
+  {
+    title: 'WEEK 10 — WHAT SYSTEM ARE YOU STRENGTHENING?',
+    body: `Motivation fades; systems stay. Week 10 is about making your progress less dependent on willpower — checklists, calendars, automatic transfers, templates.\n\nTHIS WEEK'S ACTION: strengthen ONE system (money tracking, weekly review, content routine, savings habit) and describe it in your check-in.\n\nComplete your check-in from the My Progress page: /room/progress\n\nBuild the machine that builds the results. 👇 What system are you strengthening?`,
+  },
+  {
+    title: 'WEEK 11 — WHAT NEEDS TO BE COMPLETED?',
+    body: `Almost there. Week 11 is for finishing: close the open loops, complete the half-done items, and clear the deck before your final week.\n\nTHIS WEEK'S ACTION: list every open item tied to your 90-day goal. Complete as many as you can this week — and be honest in your check-in about what stays open.\n\nComplete your check-in from the My Progress page: /room/progress\n\nFinishers are made in weeks like this one. 👇 What needs to be completed?`,
+  },
+  {
+    title: 'WEEK 12 — WHAT CHANGED IN YOUR 90 DAYS?',
+    body: `You made it to week 12. Whatever happened — wins, stalls, restarts — you showed up, and that counts.\n\nTHIS WEEK'S ACTION: complete your final weekly check-in, then do your 90-Day Wealth Review (My Progress page → "Start My 90-Day Review"). Read your week 1 check-in next to your week 12 check-in and notice the distance.\n\nComplete your check-in from the My Progress page: /room/progress\n\nThen set your NEXT 90-day goal. This is a practice, not a one-time event.\n\n👇 Tell us: what changed in your 90 days?`,
+  },
+];
 
 function productFromReq(req) {
   return config.getProduct((req.body && req.body.product_id) || req.query.p);
@@ -811,6 +875,14 @@ function requireRoomMember(handler) {
   });
 }
 
+/** Middleware form of the guard, for routes that need extra middleware first. */
+const requireRoomMemberMw = ah(async (req, res, next) => {
+  const member = await roomMemberFromReq(req);
+  if (!member) return res.redirect('/room/login');
+  req.roomMember = member;
+  next();
+});
+
 function setRoomSession(res, token) {
   tracking.setCookie(res, room.SESSION_COOKIE, token, { maxAge: room.SESSION_TTL_MS / 1000 });
 }
@@ -913,10 +985,16 @@ app.get('/room', requireRoomMember(async (req, res) => {
   const announcements = await db.all(
     "SELECT * FROM room_posts WHERE kind = 'announcement' ORDER BY created_at DESC LIMIT 3"
   );
+  const goal = await room.getGoal(req.roomMember.email);
+  const info = goal ? await room.weekInfo(req.roomMember.email) : null;
+  const thisWeekCheckin = info ? await room.getCheckin(req.roomMember.email, info.currentWeek) : null;
   res.send(roomViews.dashboardPage({
     member: req.roomMember,
     progress: { total, done, pct: total ? Math.round((done / total) * 100) : 0 },
     announcements,
+    goal,
+    weekInfo: info,
+    checkinDone: !!thisWeekCheckin,
   }));
 }));
 
@@ -956,6 +1034,158 @@ app.post('/room/plan/toggle', requireRoomMember(async (req, res) => {
   const checked = req.body.checked === '1' || req.body.checked === 'on';
   await room.setProgress(req.roomMember.email, req.body.week, req.body.item, checked);
   res.redirect('/room/plan');
+}));
+
+// --- Accountability: 90-day goal ------------------------------------------------------------
+app.get('/room/goal', requireRoomMember(async (req, res) => {
+  const email = req.roomMember.email;
+  const goal = await room.getGoal(email);
+  const info = await room.weekInfo(email);
+  res.send(roomViews.goalPage({ member: req.roomMember, goal, info, error: req.query.error || null }));
+}));
+
+app.post('/room/goal', requireRoomMember(async (req, res) => {
+  const email = req.roomMember.email;
+  const fail = (error) => res.send(roomViews.goalPage({
+    member: req.roomMember,
+    goal: { goal_text: req.body.goal_text || '' },
+    info: null,
+    error,
+  }));
+  try {
+    await room.saveGoal(email, req.body.goal_text || '');
+  } catch (err) {
+    return fail(err.message);
+  }
+  await db.recordEvent({ lead_id: null, type: 'room_goal_set', product_id: 'room', meta: { email } });
+  res.redirect('/room/progress');
+}));
+
+// --- Accountability: weekly Proof of Progress -----------------------------------------------
+const multipart = require('./lib/multipart');
+const PROOF_ALLOWED_MIMES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp', 'application/pdf'];
+
+app.get('/room/checkin', requireRoomMember(async (req, res) => {
+  const email = req.roomMember.email;
+  const goal = await room.getGoal(email);
+  if (!goal) return res.redirect('/room/goal');
+  const info = await room.weekInfo(email);
+  const existing = await room.getCheckin(email, info.currentWeek);
+  const readonly = !!existing && req.query.edit !== '1';
+  res.send(roomViews.checkinPage({
+    member: req.roomMember,
+    goal,
+    info,
+    existing,
+    readonly,
+    error: req.query.error || null,
+  }));
+}));
+
+// Note: express.raw() on this route only — the global urlencoded/json parsers
+// skip multipart bodies, leaving the stream for the raw parser. 10 MB cap;
+// the multipart parser enforces 8 MB per file.
+app.post('/room/checkin',
+  requireRoomMemberMw,
+  express.raw({ type: 'multipart/form-data', limit: '10mb' }),
+  ah(async (req, res) => {
+  const email = req.roomMember.email;
+  const goal = await room.getGoal(email);
+  if (!goal) return res.redirect('/room/goal');
+  const info = await room.weekInfo(email);
+  const fail = (error) => res.send(roomViews.checkinPage({
+    member: req.roomMember, goal, info, existing: null, readonly: false, error,
+  }));
+  let fields, file;
+  try {
+    ({ fields, file } = multipart.parseMultipart(req, { maxFileBytes: 8 * 1024 * 1024, allowedMimes: PROOF_ALLOWED_MIMES }));
+  } catch (err) {
+    return fail(err.message);
+  }
+  if (file && fields.proof_confirm !== '1' && fields.proof_confirm !== 'on') {
+    return fail('Please check the box confirming your proof contains no sensitive personal information.');
+  }
+  let proofMeta = null;
+  let savedCheckin = null;
+  try {
+    if (file) {
+      proofMeta = { name: file.originalName, mime: file.mime, size: file.size, buffer: file.buffer };
+    }
+    savedCheckin = await room.saveCheckin(email, info.currentWeek, fields, proofMeta);
+    await db.recordEvent({
+      lead_id: null, type: 'room_checkin_submitted', product_id: 'room',
+      meta: { email, week: info.currentWeek, proof: !!file },
+    });
+    await automation.queueCheckinConfirmation(email, savedCheckin.id);
+  } catch (err) {
+    return fail(err.message);
+  }
+  res.redirect('/room/progress?notice=' + encodeURIComponent("Check-in saved. Progress documented — keep going."));
+}));
+
+// --- Accountability: 12-week progress tracker -------------------------------------------------
+app.get('/room/progress', requireRoomMember(async (req, res) => {
+  const email = req.roomMember.email;
+  const goal = await room.getGoal(email);
+  if (!goal) return res.redirect('/room/goal');
+  const [info, stats, checkins, review] = await Promise.all([
+    room.weekInfo(email),
+    room.progressStats(email),
+    room.listCheckins(email),
+    room.getReview(email),
+  ]);
+  res.send(roomViews.progressPage({
+    member: req.roomMember, goal, info, stats, checkins, review,
+    notice: req.query.notice || null,
+  }));
+}));
+
+// --- Accountability: private proof files ---------------------------------------------------------
+// Proof bytes live in the database (room_checkins.proof_blob) so they persist
+// with member data across restarts/redeploys. Served only to the owning member.
+app.get('/room/proof/:id', requireRoomMember(async (req, res) => {
+  const checkin = await room.getCheckinById(req.params.id);
+  if (!checkin || checkin.email !== req.roomMember.email || !checkin.proof_blob) {
+    return res.status(404).send(roomViews.roomLayout({
+      title: 'Not found', member: req.roomMember,
+      body: '<h1>Proof not found</h1><p><a href="/room/progress">Back to My Progress</a></p>',
+    }));
+  }
+  const data = Buffer.isBuffer(checkin.proof_blob) ? checkin.proof_blob : Buffer.from(checkin.proof_blob);
+  res.setHeader('Content-Type', checkin.proof_mime || 'application/octet-stream');
+  res.setHeader('Content-Length', data.length);
+  res.setHeader('Content-Disposition', `inline; filename="${String(checkin.proof_name || 'proof').replace(/"/g, '')}"`);
+  res.send(data);
+}));
+
+// --- Accountability: 90-day review ------------------------------------------------------------------
+app.get('/room/review', requireRoomMember(async (req, res) => {
+  const email = req.roomMember.email;
+  const goal = await room.getGoal(email);
+  if (!goal) return res.redirect('/room/goal');
+  const [info, review] = await Promise.all([room.weekInfo(email), room.getReview(email)]);
+  if (review && req.query.edit !== '1') {
+    const checkins = await room.listCheckins(email);
+    return res.send(roomViews.reviewSummaryPage({ member: req.roomMember, goal, info, review, checkins }));
+  }
+  res.send(roomViews.reviewPage({ member: req.roomMember, goal, info, review, error: req.query.error || null }));
+}));
+
+app.post('/room/review', requireRoomMember(async (req, res) => {
+  const email = req.roomMember.email;
+  const goal = await room.getGoal(email);
+  if (!goal) return res.redirect('/room/goal');
+  try {
+    await room.saveReview(email, req.body || {});
+  } catch (err) {
+    const info = await room.weekInfo(email);
+    return res.send(roomViews.reviewPage({ member: req.roomMember, goal, info, review: req.body, error: err.message }));
+  }
+  await db.recordEvent({ lead_id: null, type: 'room_review_completed', product_id: 'room', meta: { email } });
+  const [info, review, checkins] = await Promise.all([
+    room.weekInfo(email), room.getReview(email), room.listCheckins(email),
+  ]);
+  res.send(roomViews.reviewSummaryPage({ member: req.roomMember, goal, info, review, checkins }));
 }));
 
 // Community
@@ -1699,7 +1929,20 @@ app.get('/admin/room', ah(async (req, res) => {
     'SELECT email, name, joined_at, last_login, password_hash, status FROM room_members ORDER BY joined_at DESC'
   );
   const posts = await room.listPosts(100);
-  res.send(adminViews.adminLayout("Wealth Builder's Room", roomViews.roomAdminPage({ members, posts })));
+  const accountability = [];
+  for (const m of members) {
+    try {
+      accountability.push(await room.accountabilitySummary(m.email));
+    } catch (err) {
+      console.error('[admin/room] accountability summary failed for', m.email, err.message);
+    }
+  }
+  // Active members first, then by most recent check-in.
+  accountability.sort((a, b) =>
+    (a.status === 'active' ? 0 : 1) - (b.status === 'active' ? 0 : 1) ||
+    (b.lastCheckinAt || 0) - (a.lastCheckinAt || 0)
+  );
+  res.send(adminViews.adminLayout("Wealth Builder's Room", roomViews.roomAdminPage({ members, posts, accountability })));
 }));
 
 app.post('/admin/room/announce', ah(async (req, res) => {
