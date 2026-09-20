@@ -142,4 +142,52 @@ function onboardDonePage({ site, driver, dashUrl }) {
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, selectField, textField, checkboxGroup };
+// --- Phase C: private driver dashboard (token link, no login) -------------------
+function dashboardPage({ site, driver, dashUrl }) {
+  const stage = drivers.STATUS_LABELS[driver.status] || driver.status;
+  const nextSteps = {
+    new: 'We are reviewing your onboarding information. No action needed right now.',
+    reviewing: 'Our team is reviewing your profile and documents. We will contact you soon.',
+    contacted: 'We reached out — please check your email/texts and respond so we can keep moving.',
+    documents_needed: 'We need additional documents from you. Please check your email for details.',
+    ready: 'You are marked Ready. We will start matching you with routes shortly.',
+    placement: 'We are actively searching for loads and route opportunities for you.',
+    active: 'You are active. Your current route and packages appear below.',
+    inactive: 'Your driver profile is currently inactive. Contact us if this is a mistake.',
+  };
+  const step = nextSteps[driver.status] || nextSteps.new;
+  const cards = [
+    ['My route', '/d/' + driver.access_token + '/route', 'Your assigned route and stops.', driver.status === 'active'],
+    ['Packages', '/d/' + driver.access_token + '/packages', 'Packages assigned to you.', true],
+    ['Scan a package', '/d/' + driver.access_token + '/scan', 'Scan barcodes at pickup and delivery.', true],
+    ['Support', '/d/' + driver.access_token + '/support', 'Get help or report an urgent issue.', true],
+    ['Community', '/d/' + driver.access_token + '/community', 'Connect with other TransitNow drivers.', true],
+    ['My plan', '/d/' + driver.access_token + '/plan', 'Your service plan and billing.', true],
+  ];
+  const cardsHtml = cards
+    .map(
+      ([title, href, desc, enabled]) =>
+        `<a class="card dash-card${enabled ? '' : ' disabled'}"${enabled ? ` href="${esc(href)}"` : ''}>
+          <h3>${esc(title)}</h3><p>${esc(desc)}${enabled ? '' : ' — available when active.'}</p>
+        </a>`
+    )
+    .join('\n');
+  return `
+<section class="dash">
+  <h1>Hi, ${esc(driver.full_name)}.</h1>
+  <p class="subhead">Status: ${esc(stage)}</p>
+  <div class="card highlight-card"><p><strong>What happens next:</strong> ${esc(step)}</p></div>
+  <h2>Your hub</h2>
+  <div class="dash-grid">
+    ${cardsHtml}
+  </div>
+  <div class="card">
+    <h3>Your private link</h3>
+    <p class="dash-link"><a href="${esc(dashUrl)}">${esc(dashUrl)}</a></p>
+    <p class="microcopy">Save or bookmark this link — it is your personal sign-in. Do not share it.</p>
+  </div>
+  <p class="contact-line">Questions? Call ${esc(site.phone || '')} or email ${esc(site.email || '')}.</p>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, selectField, textField, checkboxGroup };

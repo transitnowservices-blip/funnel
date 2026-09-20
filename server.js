@@ -1360,6 +1360,25 @@ app.post('/admin/drivers/:id/note', adminAuth, ah(async (req, res) => {
   res.redirect(`/admin/drivers/${driver.id}`);
 }));
 
+// --- Phase C: private driver dashboard (token link, no login) ------------------
+/** Look up the driver from :token. Drivers can only ever see their own data. */
+async function requireDriver(req, res, next) {
+  const driver = await drivers.getDriverByToken(req.params.token);
+  if (!driver) {
+    res.status(404);
+    return page(res, 'Not found', '<section><h1>Link not found</h1><p class="subhead">This driver link is invalid or expired. Check the link from your onboarding email.</p></section>', config.getSite());
+  }
+  req.driver = driver;
+  next();
+}
+
+app.get('/d/:token', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const dashUrl = drivers.driverDashUrl(driver.access_token);
+  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl }), site);
+}));
+
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------
 app.get('/unsubscribe', (req, res) => {
   const site = config.getSite();

@@ -253,3 +253,8 @@ a { color: var(--navy); }
   .admin-table { font-size: 13px; }
   .admin-table th:nth-child(n+4), .admin-table td:nth-child(n+4) { display: none; }
 }
+.dash-grid { display: grid; grid-template-columns: 1fr; gap: 12px; margin: 12px 0; }
+@media (min-width: 640px) { .dash-grid { grid-template-columns: 1fr 1fr; } }
+a.dash-card { text-decoration: none; color: inherit; display: block; }
+a.dash-card h3 { margin: 0 0 6px; }
+a.dash-card.disabled { opacity: .55; }

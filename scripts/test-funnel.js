@@ -1300,7 +1300,7 @@ async function main() {
       onboardHtml.includes('value="tiktok" selected'));
 
     res = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
-      ['full_name', 'Test Driver'], ['email', drvEmail], ['phone', '4145550100'],
+      ['full_name', 'Test Driver ' + ts], ['email', drvEmail], ['phone', '4145550100'],
       ['contact_method', 'text'], ['vehicle_type', 'cargo_van'],
       ['vehicle_make_model', 'Ford Transit'], ['home_city', 'Milwaukee'],
       ['home_state', 'WI'], ['days_available', 'mon'], ['days_available', 'tue'],
@@ -1309,7 +1309,7 @@ async function main() {
     ]});
     const doneHtml = await res.text();
     check('POST /drivers/onboard creates driver and shows confirmation',
-      res.status === 200 && doneHtml.includes("You're in, Test Driver") && doneHtml.includes('/d/'),
+      res.status === 200 && doneHtml.includes("You're in, Test Driver " + ts) && doneHtml.includes('/d/'),
       `status=${res.status}`);
     const drv = db.prepare('SELECT * FROM drivers WHERE email = ?').get(drvEmail);
     check('driver row stored with status=new, source preserved, access token set',
@@ -1321,13 +1321,13 @@ async function main() {
     check('driver status history records onboarding (null -> new)',
       !!hist && hist.from_status === null && hist.to_status === 'new' && hist.changed_by === 'system');
     const qDriver = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND step = 'onboarding-confirmation'").get(drvEmail).n;
-    const qOps = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'onboarding-new' AND subject LIKE ?").get('%Test Driver%').n;
+    const qOps = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'onboarding-new' AND subject LIKE ?").get('%Test Driver ' + ts + '%').n;
     check('onboarding queues driver confirmation + ops notification emails',
       qDriver === 1 && qOps === 1, `driver=${qDriver} ops=${qOps}`);
 
     // Re-submit with the same email: updates, does not duplicate.
     res = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
-      ['full_name', 'Test Driver'], ['email', drvEmail], ['phone', '4145559999'],
+      ['full_name', 'Test Driver ' + ts], ['email', drvEmail], ['phone', '4145559999'],
       ['vehicle_type', 'box_truck'], ['source', 'direct'],
     ]});
     const dupeCount = db.prepare('SELECT COUNT(*) n FROM drivers WHERE email = ?').get(drvEmail).n;
@@ -1425,6 +1425,24 @@ async function main() {
     check('admin rejects invalid status with 400', res.status === 400, `status=${res.status}`);
     res = await req(`${BASE}/admin/drivers/999999?token=${ADMIN_TOKEN}`, {});
     check('admin driver detail 404s for unknown id', res.status === 404, `status=${res.status}`);
+
+    /* ---- Phase C: private driver dashboard ------------------------- */
+    const pcEmail = `dash-${ts}@example.com`;
+    await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'Dash Driver'], ['email', pcEmail], ['phone', '4145550102'], ['source', 'direct'],
+    ]});
+    const pcToken = db.prepare('SELECT access_token FROM drivers WHERE email = ?').get(pcEmail).access_token;
+    res = await req(`${BASE}/d/${pcToken}`, {});
+    const pcDashHtml = await res.text();
+    check('driver dashboard loads via private token link',
+      res.status === 200 && pcDashHtml.includes('Hi, Dash Driver') && pcDashHtml.includes('Status:'),
+      `status=${res.status}`);
+    check('dashboard links to routes, packages, scan, support, community, plan sections',
+      pcDashHtml.includes('/scan') && pcDashHtml.includes('/support') && pcDashHtml.includes('/community') &&
+      pcDashHtml.includes('/plan') && pcDashHtml.includes('/packages'));
+    check('dashboard shows private-link reminder', pcDashHtml.includes('Do not share it'));
+    res = await req(`${BASE}/d/not-a-real-token`, {});
+    check('dashboard rejects invalid token with 404', res.status === 404, `status=${res.status}`);
 
   } finally {
     try { if (db) db.close(); } catch {}
