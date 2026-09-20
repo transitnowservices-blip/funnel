@@ -1005,6 +1005,193 @@ async function main() {
       res.status === 200 && acctAdminProof.includes('<td>Uploaded</td>'),
       `status=${res.status}`);
 
+    // --- Daily accountability nudges -----------------------------------------
+    const chicagoDay = (t) => {
+      const parts = {};
+      for (const p of new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(new Date(t))) {
+        if (p.type !== 'literal') parts[p.type] = p.value;
+      }
+      return `${parts.year}-${parts.month}-${parts.day}`;
+    };
+    const nudgeA = `nudge-a-${ts}@example.com`;        // checked in this week
+    const nudgeB = `nudge-b-${ts}@example.com`;        // not checked in
+    const nudgeInactive = `nudge-inactive-${ts}@example.com`;
+    const nudgeUnclaimed = `nudge-unclaimed-${ts}@example.com`;
+    const nudgeSupp = `nudge-supp-${ts}@example.com`;
+    const nudgeUnsub = `nudge-unsub-${ts}@example.com`;
+    const nudgeNow = Date.now();
+    const addNudgeMember = (email, { status = 'active', claimed = true } = {}) =>
+      db.prepare('INSERT INTO room_members (email, name, password_hash, joined_at, status) VALUES (?, ?, ?, ?, ?)')
+        .run(email, 'Nudge Member', claimed ? 'testhash' : null, nudgeNow, status);
+    addNudgeMember(nudgeA);
+    addNudgeMember(nudgeB);
+    addNudgeMember(nudgeInactive, { status: 'inactive' });
+    addNudgeMember(nudgeUnclaimed, { claimed: false });
+    addNudgeMember(nudgeSupp);
+    addNudgeMember(nudgeUnsub);
+    db.prepare('INSERT INTO suppressions (email, reason, ts) VALUES (?, ?, ?)').run(nudgeSupp, 'test-suppression', nudgeNow);
+    // nudgeA has a goal and a check-in for the current week.
+    db.prepare('INSERT INTO room_goals (email, goal_text, start_date, target_date, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(nudgeA, 'nudge goal', nudgeNow, nudgeNow + 90 * 24 * 3600 * 1000, nudgeNow, nudgeNow);
+    db.prepare(`INSERT INTO room_checkins
+        (email, week, created_at, goal, action_taken, accomplishment, lesson, next_commitment)
+      VALUES (?, 1, ?, 'g', 'a', 'acc', 'les', 'next')`).run(nudgeA, nudgeNow);
+    const nudgeCount = (email) =>
+      db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-daily-nudge'").get(email).n;
+
+    let schedN1 = await runScheduler();
+    check('scheduler pass returns dailyNudges count',
+      schedN1.status === 200 && typeof JSON.parse(schedN1.text).dailyNudges === 'number',
+      `status=${schedN1.status}`);
+    check('daily nudge queued for checked-in member', nudgeCount(nudgeA) === 1, `count=${nudgeCount(nudgeA)}`);
+    check('daily nudge queued for not-checked-in member', nudgeCount(nudgeB) === 1, `count=${nudgeCount(nudgeB)}`);
+    check('daily nudge queued for member-only unsub test member', nudgeCount(nudgeUnsub) === 1, `count=${nudgeCount(nudgeUnsub)}`);
+    check('no daily nudge for inactive member', nudgeCount(nudgeInactive) === 0, `count=${nudgeCount(nudgeInactive)}`);
+    check('no daily nudge for unclaimed member', nudgeCount(nudgeUnclaimed) === 0, `count=${nudgeCount(nudgeUnclaimed)}`);
+    check('no daily nudge for suppressed email', nudgeCount(nudgeSupp) === 0, `count=${nudgeCount(nudgeSupp)}`);
+
+    const schedN2 = await runScheduler();
+    check('second pass same day queues no new nudges',
+      JSON.parse(schedN2.text).dailyNudges === 0, `dailyNudges=${JSON.parse(schedN2.text).dailyNudges}`);
+    check('still exactly one nudge per eligible member after second pass',
+      nudgeCount(nudgeA) === 1 && nudgeCount(nudgeB) === 1,
+      `a=${nudgeCount(nudgeA)} b=${nudgeCount(nudgeB)}`);
+
+    // Simulate a new calendar day: backdate today's nudge rows, scheduler must queue again.
+    const twoDaysAgoChi = chicagoDay(Date.now() - 2 * 86400000);
+    db.prepare("UPDATE email_queue SET step = ? WHERE sequence = 'room-daily-nudge' AND email IN (?, ?)")
+      .run(twoDaysAgoChi, nudgeA, nudgeB);
+    await runScheduler();
+    check('new calendar day queues daily nudges again',
+      nudgeCount(nudgeA) === 2 && nudgeCount(nudgeB) === 2,
+      `a=${nudgeCount(nudgeA)} b=${nudgeCount(nudgeB)}`);
+
+    // Nudge body: links, unsubscribe, variant by check-in state, no shaming language.
+    const nudgeBody = (email) =>
+      db.prepare("SELECT body_html FROM email_queue WHERE email = ? AND sequence = 'room-daily-nudge' ORDER BY id ASC LIMIT 1").get(email).body_html;
+    const bodyA = nudgeBody(nudgeA);
+    const bodyB = nudgeBody(nudgeB);
+    check('nudge body links check-in and progress pages',
+      bodyA.includes('/room/checkin') && bodyA.includes('/room/progress'), 'missing links');
+    check('nudge body contains unsubscribe link',
+      bodyA.includes(`/unsubscribe?email=${encodeURIComponent(nudgeA)}`), 'missing unsubscribe link');
+    const bannedWords = ['lazy', 'failure', 'behind'];
+    const lowerAB = (bodyA + ' ' + bodyB).toLowerCase();
+    check('nudge copy contains no shaming language',
+      !bannedWords.some((w) => lowerAB.includes(w)), 'shaming word found');
+    check('checked-in member gets different variant than not-checked-in member',
+      bodyA !== bodyB, 'variants identical');
+
+    // Member-only email (no lead row) unsubscribes -> nudges stop.
+    check('unsub test member has no lead row',
+      !db.prepare('SELECT * FROM leads WHERE email = ?').get(nudgeUnsub), 'lead row exists');
+    res = await req(`${BASE}/unsubscribe`, { method: 'POST', form: { email: nudgeUnsub } });
+    check('POST /unsubscribe succeeds for member-only email',
+      [200, 301, 302, 303].includes(res.status), `status=${res.status}`);
+    const unsubSupp = db.prepare('SELECT * FROM suppressions WHERE email = ?').get(nudgeUnsub);
+    check('member-only email added to suppressions on unsubscribe',
+      unsubSupp && unsubSupp.reason === 'unsubscribed', `row=${JSON.stringify(unsubSupp)}`);
+    await req(`${BASE}/unsubscribe`, { method: 'POST', form: { email: nudgeUnsub } });
+    check('unsubscribe is idempotent (one suppression row)',
+      db.prepare('SELECT COUNT(*) n FROM suppressions WHERE email = ?').get(nudgeUnsub).n === 1,
+      'duplicate suppression rows');
+    db.prepare("UPDATE email_queue SET step = ? WHERE sequence = 'room-daily-nudge' AND email = ?")
+      .run(twoDaysAgoChi, nudgeUnsub);
+    await runScheduler();
+    check('no new nudge queued after member unsubscribes',
+      nudgeCount(nudgeUnsub) === 1, `count=${nudgeCount(nudgeUnsub)}`);
+    // A nudge still sitting in the queue is cancelled at send time once suppressed.
+    db.prepare(`INSERT INTO email_queue
+        (lead_id, email, sequence, step, subject, body_html, product_id, scheduled_for, status)
+      VALUES (NULL, ?, 'room-daily-nudge', '2000-01-01', 'subj', 'body', 'room', ?, 'queued')`)
+      .run(nudgeUnsub, Date.now() - 1000);
+    await runScheduler();
+    const guardRow = db.prepare("SELECT status, cancel_reason FROM email_queue WHERE email = ? AND sequence = 'room-daily-nudge' AND step = '2000-01-01'").get(nudgeUnsub);
+    check('queued nudge for unsubscribed member cancelled at send time',
+      guardRow.status === 'cancelled' && guardRow.cancel_reason === 'suppressed',
+      `row=${JSON.stringify(guardRow)}`);
+
+    // --- SMS daily nudges ----------------------------------------------------
+    const smsCount = (email) =>
+      db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-daily-nudge-sms'").get(email).n;
+    db.prepare('UPDATE room_members SET phone = ? WHERE email = ?').run('5551234567', nudgeA);
+    db.prepare('UPDATE room_members SET phone = ? WHERE email = ?').run('5551234568', nudgeSupp);
+    db.prepare('UPDATE room_members SET phone = ? WHERE email = ?').run('5551234569', nudgeUnsub);
+    // nudgeB keeps no phone on record.
+    let schedS1 = await runScheduler();
+    check('scheduler pass returns dailyNudgeSms count',
+      schedS1.status === 200 && typeof JSON.parse(schedS1.text).dailyNudgeSms === 'number',
+      `status=${schedS1.status}`);
+    check('SMS nudge queued once per member per day', smsCount(nudgeA) === 1, `count=${smsCount(nudgeA)}`);
+    check('member with no phone gets no SMS nudge', smsCount(nudgeB) === 0, `count=${smsCount(nudgeB)}`);
+    check('suppressed member gets no SMS nudge', smsCount(nudgeSupp) === 0, `count=${smsCount(nudgeSupp)}`);
+    check('unsubscribed member gets no SMS nudge', smsCount(nudgeUnsub) === 0, `count=${smsCount(nudgeUnsub)}`);
+
+    await runScheduler();
+    check('SMS nudge not duplicated on second pass same day',
+      smsCount(nudgeA) === 1, `count=${smsCount(nudgeA)}`);
+
+    db.prepare("UPDATE email_queue SET step = ? WHERE sequence = 'room-daily-nudge-sms' AND email = ?")
+      .run(twoDaysAgoChi, nudgeA);
+    await runScheduler();
+    check('new calendar day queues SMS nudge again',
+      smsCount(nudgeA) === 2, `count=${smsCount(nudgeA)}`);
+
+    // Scope to this run's emails: the suite reuses data/funnel.db across runs,
+    // so earlier runs' manually-inserted guard rows must not pollute the check.
+    const smsRows = db.prepare("SELECT body_html FROM email_queue WHERE sequence = 'room-daily-nudge-sms' AND email LIKE ?")
+      .all(`%-${ts}@example.com`);
+    check('SMS nudge rows exist', smsRows.length > 0, `rows=${smsRows.length}`);
+    check('all SMS nudge bodies fit 320 chars',
+      smsRows.every((r) => r.body_html.length <= 320),
+      `max=${Math.max(...smsRows.map((r) => r.body_html.length))}`);
+    check('SMS nudge body contains the check-in link',
+      smsRows.every((r) => r.body_html.includes('/room/checkin')), 'missing link');
+
+    // Queued SMS for a suppressed member is cancelled at send time.
+    db.prepare(`INSERT INTO email_queue
+        (lead_id, email, sequence, step, subject, body_html, product_id, scheduled_for, status)
+      VALUES (NULL, ?, 'room-daily-nudge-sms', '2000-01-02', 'subj', 'body', 'room', ?, 'queued')`)
+      .run(nudgeSupp, Date.now() - 1000);
+    await runScheduler();
+    const smsGuard = db.prepare("SELECT status, cancel_reason FROM email_queue WHERE email = ? AND sequence = 'room-daily-nudge-sms' AND step = '2000-01-02'").get(nudgeSupp);
+    check('queued SMS for suppressed member cancelled at send time',
+      smsGuard.status === 'cancelled' && smsGuard.cancel_reason === 'suppressed',
+      `row=${JSON.stringify(smsGuard)}`);
+
+    // Member created from a purchase copies the phone from a pre-existing lead.
+    const leadPhoneEmail = `leadphone-${ts}@example.com`;
+    db.prepare(`INSERT INTO leads
+        (first_name, email, phone, offer_of_interest, consent_marketing, consent_ts, date_captured, status, unsubscribed)
+      VALUES ('Lead', ?, '5559876543', 'room', 1, ?, ?, 'lead', 0)`)
+      .run(leadPhoneEmail, nudgeNow, nudgeNow);
+    await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: leadPhoneEmail, productId: 'room', amountCents: 4900 } });
+    check('member created from purchase copies phone from existing lead',
+      db.prepare('SELECT phone FROM room_members WHERE email = ?').get(leadPhoneEmail).phone === '5559876543',
+      `phone=${db.prepare('SELECT phone FROM room_members WHERE email = ?').get(leadPhoneEmail).phone}`);
+
+    // Claim form: valid phone saved, garbage phone ignored without failing.
+    const phoneEmail1 = `phone1-${ts}@example.com`;
+    await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: phoneEmail1, productId: 'room', amountCents: 4900 } });
+    res = await req(`${BASE}/room/claim`, { method: 'POST', form: { email: phoneEmail1, password: 'phonetest1', password2: 'phonetest1', phone: '(555) 123-4567' } });
+    check('claim with valid phone succeeds',
+      res.status === 302 && (res.headers.get('location') || '').includes('/room/welcome'),
+      `status=${res.status}`);
+    check('valid phone saved to member record on claim',
+      db.prepare('SELECT phone FROM room_members WHERE email = ?').get(phoneEmail1).phone === '5551234567',
+      `phone=${db.prepare('SELECT phone FROM room_members WHERE email = ?').get(phoneEmail1).phone}`);
+    const phoneEmail2 = `phone2-${ts}@example.com`;
+    await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: phoneEmail2, productId: 'room', amountCents: 4900 } });
+    res = await req(`${BASE}/room/claim`, { method: 'POST', form: { email: phoneEmail2, password: 'phonetest2', password2: 'phonetest2', phone: 'not-a-phone' } });
+    check('claim with garbage phone still succeeds',
+      res.status === 302 && (res.headers.get('location') || '').includes('/room/welcome'),
+      `status=${res.status}`);
+    check('garbage phone ignored (not saved)',
+      db.prepare('SELECT phone FROM room_members WHERE email = ?').get(phoneEmail2).phone == null,
+      `phone=${db.prepare('SELECT phone FROM room_members WHERE email = ?').get(phoneEmail2).phone}`);
+
     // Proof without the confirm checkbox is rejected.
     res = await multipartReq(`${BASE}/room/checkin`, {
       jar: acctJar1,
