@@ -179,6 +179,9 @@ ${error ? `<div class="error">${esc(error)}</div>` : ''}
   <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password">
   <label for="password2">Confirm password</label>
   <input type="password" id="password2" name="password2" required minlength="8" autocomplete="new-password">
+  <label for="phone">Mobile number — text me the daily nudge (optional)</label>
+  <input type="tel" id="phone" name="phone" autocomplete="tel" placeholder="(555) 123-4567">
+  <p class="muted" style="margin-top:-6px">One short accountability text each day. Standard message rates may apply. Leave blank for email only.</p>
   <p><button type="submit" class="btn btn-gold">Claim My Access</button></p>
 </form>
 </div>
