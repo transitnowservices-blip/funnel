@@ -217,3 +217,39 @@ a { color: var(--navy); }
 .module { margin: 12px 0; padding: 16px; }
 .module-title { font-weight: 800; color: var(--navy); margin: 0 0 6px; }
 .module-desc { margin: 0; color: var(--muted); font-size: 16px; }
+
+/* --- TransitNow Driver Operations Platform (additive) --- */
+.check-group { border: 1px solid var(--border, #ddd); border-radius: 8px; padding: 12px; margin: 12px 0; }
+.check-group legend { font-weight: 700; padding: 0 6px; }
+.checkbox { display: flex; align-items: center; gap: 10px; padding: 8px 4px; font-size: 16px; }
+.checkbox input[type=checkbox] { width: 22px; height: 22px; flex: none; }
+.form textarea { width: 100%; font-size: 16px; padding: 10px; border-radius: 8px; border: 1px solid var(--border, #ccc); }
+.form input[type=date] { width: 100%; font-size: 16px; padding: 10px; border-radius: 8px; border: 1px solid var(--border, #ccc); }
+.highlight-card { border: 2px solid var(--yellow, #f5b301); }
+.dash-link { word-break: break-all; font-size: 15px; background: #f7f7f7; padding: 10px; border-radius: 8px; }
+.status-badge { display: inline-block; padding: 4px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; background: #eee; }
+.status-new { background: #e3ecff; } .status-reviewing { background: #fff3cd; }
+.status-contacted { background: #d1ecf1; } .status-documents_needed { background: #f8d7da; }
+.status-ready { background: #d4edda; } .status-placement { background: #e2d9f3; }
+.status-active { background: #c3e6cb; } .status-inactive { background: #ddd; }
+.admin-table { width: 100%; border-collapse: collapse; font-size: 14px; }
+.admin-table th, .admin-table td { text-align: left; padding: 8px; border-bottom: 1px solid #e5e5e5; vertical-align: top; }
+.admin-table th { background: #f7f7f7; }
+.pipeline-nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0; }
+.pipeline-nav a { padding: 6px 12px; border-radius: 999px; background: #f0f0f0; text-decoration: none; font-size: 14px; }
+.pipeline-nav a.active { background: #222; color: #fff; }
+.big-btn { display: block; width: 100%; padding: 18px; font-size: 18px; margin: 10px 0; }
+.scan-result { font-size: 20px; font-weight: 700; padding: 16px; border-radius: 8px; margin: 12px 0; }
+.scan-ok { background: #d4edda; } .scan-warn { background: #fff3cd; } .scan-err { background: #f8d7da; }
+.stat-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+.stat-card { background: #fff; border: 1px solid #e5e5e5; border-radius: 10px; padding: 14px; }
+.stat-card .num { font-size: 28px; font-weight: 800; }
+.stat-card .lbl { font-size: 13px; color: var(--muted, #666); }
+.timeline { list-style: none; padding: 0; }
+.timeline li { padding: 10px 0 10px 18px; border-left: 3px solid #ddd; margin-left: 6px; position: relative; }
+.timeline li::before { content: ''; position: absolute; left: -7px; top: 14px; width: 11px; height: 11px; border-radius: 50%; background: #888; }
+.timeline .ts { font-size: 13px; color: var(--muted, #666); }
+@media (max-width: 640px) {
+  .admin-table { font-size: 13px; }
+  .admin-table th:nth-child(n+4), .admin-table td:nth-child(n+4) { display: none; }
+}

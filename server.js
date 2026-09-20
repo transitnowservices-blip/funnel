@@ -34,6 +34,9 @@ const automation = require('./lib/automation');
 const room = require('./lib/room');
 const roomViews = require('./views/room');
 const roomFunnelViews = require('./views/room-funnel');
+// TransitNow Driver Operations Platform (additive; existing routes untouched).
+const drivers = require('./lib/drivers');
+const driverViews = require('./views/drivers');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1247,6 +1250,70 @@ app.post('/room/community/post/:id/comment', requireRoomMember(async (req, res) 
     return res.redirect(`/room/community/post/${encodeURIComponent(req.params.id)}?error=` + encodeURIComponent(err.message));
   }
   res.redirect(`/room/community/post/${encodeURIComponent(req.params.id)}`);
+}));
+
+// --- TransitNow Driver Operations Platform (additive; existing routes untouched)
+// Phase A: driver onboarding — simple form, no login. Reachable post-payment
+// (payment-success CTA) and via a direct link (/drivers/onboard?src=...).
+
+/** Resolve the driver's source: ?src= wins, then the visitor's first-touch source. */
+async function resolveDriverSource(req) {
+  if (req.query.src) return drivers.normalizeSource(req.query.src);
+  try {
+    const v = await db.get('SELECT source FROM visitors WHERE id = ?', [req.vid]);
+    if (v && v.source) return drivers.normalizeSource(v.source);
+  } catch {
+    // fall through to default
+  }
+  return 'direct';
+}
+
+app.get('/drivers/onboard', ah(async (req, res) => {
+  const site = config.getSite();
+  const source = await resolveDriverSource(req);
+  page(res, 'Driver Onboarding', driverViews.onboardPage({ site, source }), site);
+}));
+
+app.post('/drivers/onboard', ah(async (req, res) => {
+  const site = config.getSite();
+  const { ok, errors, clean } = drivers.validateDriverInput(req.body || {});
+  if (!ok) {
+    res.status(400);
+    const source = drivers.normalizeSource((req.body || {}).source || (await resolveDriverSource(req)));
+    return page(
+      res,
+      'Driver Onboarding',
+      driverViews.onboardPage({ site, source, prefill: req.body || {}, errors }),
+      site
+    );
+  }
+  // Preserve an explicit ?src= even when the form's hidden field is stale.
+  if (req.query.src) clean.source = drivers.normalizeSource(req.query.src);
+  const driver = await drivers.createOrUpdateDriver(clean);
+  const dashUrl = drivers.driverDashUrl(driver.access_token);
+
+  // Notifications via the existing outbox queue (Phase 19).
+  await drivers.queueDriverEmail({
+    to: driver.email,
+    subject: 'TransitNow — we received your driver onboarding',
+    html: drivers.onboardDriverEmail(driver, dashUrl),
+    sequence: 'driver-ops',
+    step: 'onboarding-confirmation',
+  });
+  await drivers.notifyOps(
+    `New driver onboarding: ${driver.full_name}`,
+    drivers.onboardOpsEmail(driver),
+    'onboarding-new'
+  );
+  await db.recordEvent({
+    visitor_id: req.vid || null,
+    lead_id: req.leadId || null,
+    type: 'driver_onboarded',
+    product_id: null,
+    meta: { driver_id: driver.id, source: driver.source },
+  });
+
+  page(res, 'Onboarding complete', driverViews.onboardDonePage({ site, driver, dashUrl }), site);
 }));
 
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------

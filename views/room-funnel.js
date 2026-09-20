@@ -52,6 +52,21 @@ function roomCheckoutPage({ product, site }) {
 function paymentSuccessPage({ product }) {
   const p = product || {};
   const name = esc(p.name || "The Wealth Builder's Room");
+  // TransitNow dispatch products route into driver onboarding (additive branch;
+  // the Room flow below is unchanged).
+  if (p.id && String(p.id).indexOf('transitnow') === 0) {
+    return `
+<section>
+  <h1>Payment successful — welcome!</h1>
+  <p class="subhead">Your <strong>${name}</strong> subscription is active.</p>
+  <div class="card">
+    <h2>Next step: driver onboarding</h2>
+    <p>Complete your driver onboarding so we can review your profile and start matching you with routes.</p>
+  </div>
+  <a class="btn btn-large" href="/drivers/onboard?src=website">COMPLETE DRIVER ONBOARDING &rarr;</a>
+  <p class="microcopy">Takes about 5 minutes. No login needed.</p>
+</section>`;
+  }
   return `
 <section>
   <h1>Payment successful — welcome!</h1>

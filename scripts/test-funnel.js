@@ -1287,6 +1287,87 @@ async function main() {
     const pinnedAcct = db.prepare("SELECT COUNT(*) n FROM room_posts WHERE title LIKE 'WEEK %' AND pinned = 1").get().n;
     check('accountability posts are not pinned', pinnedAcct === 0, `pinned=${pinnedAcct}`);
 
+    /* ---- Phase A: driver onboarding -------------------------------- */
+    const drvEmail = `driver-${ts}@example.com`;
+    res = await req(`${BASE}/drivers/onboard?src=tiktok`, {});
+    const onboardHtml = await res.text();
+    check('GET /drivers/onboard renders onboarding form',
+      res.status === 200 && onboardHtml.includes('Driver Onboarding') && onboardHtml.includes('name="full_name"'),
+      `status=${res.status}`);
+    check('onboarding form collects no SSN/bank/password fields',
+      !/name="(ssn|social|bank|account_number|password)"/i.test(onboardHtml));
+    check('onboarding form preselects source from ?src=',
+      onboardHtml.includes('value="tiktok" selected'));
+
+    res = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'Test Driver'], ['email', drvEmail], ['phone', '4145550100'],
+      ['contact_method', 'text'], ['vehicle_type', 'cargo_van'],
+      ['vehicle_make_model', 'Ford Transit'], ['home_city', 'Milwaukee'],
+      ['home_state', 'WI'], ['days_available', 'mon'], ['days_available', 'tue'],
+      ['work_prefs', 'local'], ['work_prefs', 'same_day'],
+      ['looking_for', 'routes'], ['source', 'tiktok'],
+    ]});
+    const doneHtml = await res.text();
+    check('POST /drivers/onboard creates driver and shows confirmation',
+      res.status === 200 && doneHtml.includes("You're in, Test Driver") && doneHtml.includes('/d/'),
+      `status=${res.status}`);
+    const drv = db.prepare('SELECT * FROM drivers WHERE email = ?').get(drvEmail);
+    check('driver row stored with status=new, source preserved, access token set',
+      !!drv && drv.status === 'new' && drv.source === 'tiktok' && !!drv.access_token && drv.access_token.length >= 32,
+      drv ? `status=${drv.status} source=${drv.source}` : 'no row');
+    check('driver work_prefs stored as JSON array',
+      !!drv && JSON.parse(drv.work_prefs).includes('local'));
+    const hist = db.prepare('SELECT * FROM driver_status_history WHERE driver_id = ?').get(drv.id);
+    check('driver status history records onboarding (null -> new)',
+      !!hist && hist.from_status === null && hist.to_status === 'new' && hist.changed_by === 'system');
+    const qDriver = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND step = 'onboarding-confirmation'").get(drvEmail).n;
+    const qOps = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'onboarding-new' AND subject LIKE ?").get('%Test Driver%').n;
+    check('onboarding queues driver confirmation + ops notification emails',
+      qDriver === 1 && qOps === 1, `driver=${qDriver} ops=${qOps}`);
+
+    // Re-submit with the same email: updates, does not duplicate.
+    res = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'Test Driver'], ['email', drvEmail], ['phone', '4145559999'],
+      ['vehicle_type', 'box_truck'], ['source', 'direct'],
+    ]});
+    const dupeCount = db.prepare('SELECT COUNT(*) n FROM drivers WHERE email = ?').get(drvEmail).n;
+    const updated = db.prepare('SELECT * FROM drivers WHERE email = ?').get(drvEmail);
+    check('re-onboarding with same email updates instead of duplicating',
+      res.status === 200 && dupeCount === 1 && updated.phone === '4145559999' && updated.vehicle_type === 'box_truck',
+      `count=${dupeCount}`);
+    check('re-onboarding does not reset pipeline status or rotate access token',
+      updated.status === 'new' && updated.access_token === drv.access_token);
+
+    // Validation.
+    res = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'No Email'], ['email', 'not-an-email'], ['phone', '123'],
+    ]});
+    const badHtml = await res.text();
+    check('onboarding rejects invalid email with 400',
+      res.status === 400 && badHtml.includes('valid email'), `status=${res.status}`);
+    res = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', ''], ['email', `noname-${ts}@example.com`], ['phone', '123'],
+    ]});
+    check('onboarding rejects missing name with 400', res.status === 400, `status=${res.status}`);
+
+    // Unknown source normalizes to other.
+    const otherEmail = `driver-other-${ts}@example.com`;
+    await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+      ['full_name', 'Other Source'], ['email', otherEmail], ['phone', '123'], ['source', 'bogus-src'],
+    ]});
+    const otherDrv = db.prepare('SELECT source FROM drivers WHERE email = ?').get(otherEmail);
+    check('unknown source normalizes to other', otherDrv && otherDrv.source === 'other');
+
+    // Post-payment path branches by product; Room flow unchanged.
+    res = await req(`${BASE}/payment-success?p=transitnow-complete`, {});
+    const psHtml = await res.text();
+    check('payment-success for TransitNow product shows onboarding CTA',
+      psHtml.includes('/drivers/onboard') && psHtml.includes('COMPLETE DRIVER ONBOARDING'));
+    res = await req(`${BASE}/payment-success?p=room`, {});
+    const psRoom = await res.text();
+    check('payment-success for Room still shows claim access (no regression)',
+      psRoom.includes('/room/claim'));
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);
