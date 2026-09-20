@@ -24,6 +24,7 @@
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
+const crypto = require('crypto');
 
 const db = require('./lib/db');
 const config = require('./lib/config');
@@ -287,7 +288,11 @@ async function recordAddonPurchase(leadId, product, which, mode) {
 
 // --- Middleware -------------------------------------------------------------------
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json()); // webhook stubs only; forms use urlencoded
+// Capture the raw JSON body: Stripe webhook signature verification MUST run
+// against the exact raw bytes, not the re-serialized parsed object.
+app.use(express.json({
+  verify: (req, _res, buf) => { req.rawBody = buf; },
+})); // webhooks use JSON; forms use urlencoded
 app.use(express.static(path.join(__dirname, 'public')));
 app.use(ah(tracking.middleware));
 
@@ -587,21 +592,106 @@ function privacyHandler(req, res) {
 app.get('/privacy-note', privacyHandler);
 app.get('/privacy', privacyHandler); // alias — the views link to /privacy
 
-// --- Webhook stubs ---------------------------------------------------------------------------
+// --- Stripe webhooks ---------------------------------------------------------------------------
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
+const STRIPE_SIG_TOLERANCE_SEC = 300; // Stripe recommends rejecting events older than ~5 minutes
+
+/**
+ * Verify a Stripe `stripe-signature` header against the raw request body.
+ * Uses the exact algorithm from Stripe's docs (HMAC-SHA256 over "t.rawBody"),
+ * with only node built-ins — no extra dependency. Returns the parsed event.
+ * Throws on any failure (malformed header, stale timestamp, bad signature).
+ */
+function verifyStripeSignature(rawBody, sigHeader, secret) {
+  const parts = {};
+  String(sigHeader).split(',').forEach((pair) => {
+    const i = pair.indexOf('=');
+    if (i > 0) parts[pair.slice(0, i).trim()] = pair.slice(i + 1).trim();
+  });
+  const t = parseInt(parts.t, 10);
+  if (!t || !parts.v1) throw new Error('malformed stripe-signature header');
+  const nowSec = Math.floor(Date.now() / 1000);
+  if (Math.abs(nowSec - t) > STRIPE_SIG_TOLERANCE_SEC) {
+    throw new Error('stripe-signature timestamp outside tolerance');
+  }
+  const signedPayload = `${t}.${rawBody.toString('utf8')}`;
+  const expectedHex = crypto.createHmac('sha256', secret).update(signedPayload, 'utf8').digest('hex');
+  const a = Buffer.from(expectedHex, 'utf8');
+  const b = Buffer.from(parts.v1, 'utf8');
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    throw new Error('stripe-signature mismatch');
+  }
+  return JSON.parse(rawBody.toString('utf8'));
+}
+
+/**
+ * Handle a verified Stripe event. Records the purchase so the funnel's
+ * post-purchase automation (confirmation email, nurture-stop, upsells,
+ * metrics) runs. Returns true when a purchase was recorded.
+ *
+ * Product mapping: Stripe payment links don't carry our product id, so we
+ * match the charged amount (amount_total, in cents) against the configured
+ * products' priceCents (Basic $50 = 5000, Complete $100 = 10000).
+ */
+async function handleStripeEvent(event) {
+  if (!event || event.type !== 'checkout.session.completed') {
+    console.log('[webhook:stripe] ignoring event type', event && event.type);
+    return false;
+  }
+  const session = (event.data && event.data.object) || {};
+  const email = ((session.customer_details && session.customer_details.email) || '').trim().toLowerCase();
+  const amountCents = Number(session.amount_total);
+  if (!email || !Number.isFinite(amountCents)) {
+    console.warn('[webhook:stripe] event missing customer email or amount_total — ignored');
+    return false;
+  }
+  const product = config.getProducts().products.find((p) => Number(p.priceCents) === amountCents);
+  if (!product) {
+    console.warn('[webhook:stripe] no configured product matches amount_total', amountCents);
+    return false;
+  }
+  const lead = await db.get('SELECT * FROM leads WHERE email = ?', [email]);
+  if (!lead) {
+    console.warn('[webhook:stripe] purchase from unknown lead email — ignored', email);
+    return false;
+  }
+  await recordPurchase(lead.id, product.id, 'stripe', { amountCents });
+  console.log('[webhook:stripe] recorded purchase', { email, productId: product.id, amountCents });
+  return true;
+}
+
 app.post('/webhooks/stripe', ah(async (req, res) => {
-  // STUB. Production MUST verify the Stripe signature using the RAW request
-  // body and STRIPE_WEBHOOK_SECRET before trusting this payload (this stub
-  // uses express.json(), which cannot do that verification).
+  const sigHeader = req.get('stripe-signature');
+  if (STRIPE_WEBHOOK_SECRET && sigHeader && req.rawBody) {
+    // Real Stripe traffic: verify the signature before trusting anything.
+    let event;
+    try {
+      event = verifyStripeSignature(req.rawBody, sigHeader, STRIPE_WEBHOOK_SECRET);
+    } catch (err) {
+      console.warn('[webhook:stripe] signature verification failed:', err.message);
+      return res.status(400).json({ ok: false, error: 'invalid signature' });
+    }
+    const handled = await handleStripeEvent(event);
+    return res.json({ ok: true, handled });
+  }
+  if (STRIPE_WEBHOOK_SECRET) {
+    // A secret is configured, so production Stripe traffic always carries a
+    // signature. Reject unsigned payloads instead of trusting them.
+    console.warn('[webhook:stripe] rejected unsigned payload while STRIPE_WEBHOOK_SECRET is set');
+    return res.status(400).json({ ok: false, error: 'missing stripe-signature' });
+  }
+  // No webhook secret configured (local dev / tests): accept the simple
+  // JSON integration shape { email, productId, amountCents }.
   const { email, productId, amountCents } = req.body || {};
-  console.log('[webhook:stripe] stub received', { email, productId, amountCents });
+  console.log('[webhook:stripe] unsigned payload received', { email, productId, amountCents });
   const cleanEmail = (email || '').trim().toLowerCase();
   const lead = cleanEmail ? await db.get('SELECT * FROM leads WHERE email = ?', [cleanEmail]) : null;
   if (lead && productId) {
     await recordPurchase(lead.id, productId, 'stripe-webhook', { amountCents });
   } else {
-    console.warn('[webhook:stripe] stub ignored payload — unknown lead or missing productId');
+    console.warn('[webhook:stripe] ignored payload — unknown lead or missing productId');
   }
-  res.json({ ok: true, note: 'stub' });
+  res.json({ ok: true, note: 'unsigned (no STRIPE_WEBHOOK_SECRET configured)' });
 }));
 
 app.post('/webhooks/email-event', ah(async (req, res) => {
