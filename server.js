@@ -1142,6 +1142,13 @@ app.get('/room/progress', requireRoomMember(async (req, res) => {
   }));
 }));
 
+// --- Accountability: member mobile number for daily text nudges -------------------------------
+// An empty or invalid number is ignored (existing number is kept); it never fails.
+app.post('/room/phone', requireRoomMember(async (req, res) => {
+  await room.setMemberPhone(req.roomMember.email, req.body.phone);
+  res.redirect('/room/progress?notice=' + encodeURIComponent('Mobile number saved. You will get the daily nudge by text too.'));
+}));
+
 // --- Accountability: private proof files ---------------------------------------------------------
 // Proof bytes live in the database (room_checkins.proof_blob) so they persist
 // with member data across restarts/redeploys. Served only to the owning member.
