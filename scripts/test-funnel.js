@@ -619,6 +619,160 @@ async function main() {
       await stopServer(child2);
     }
 
+    /* ---- 11. Wealth Builder's Room --------------------------------- */
+    // Covers: /checkout/room 302 to the $49/mo Stripe link, webhook room
+    // provisioning (unsigned dev shape + signed shape), claim -> password ->
+    // login -> session, gated /room routes, classroom, 90-day plan progress,
+    // community post/comment, admin room section.
+    const ROOM_STRIPE_LINK = 'https://buy.stripe.com/5kQdRbfEp5Hrc8Yf38dIA00';
+    const roomEmail = `e2e-room-${ts}@example.com`;
+    const roomJar = new Jar();
+
+    res = await req(`${BASE}/checkout/room`, { jar: roomJar });
+    check('GET /checkout/room 302s to the $49/mo Stripe payment link',
+      res.status === 302 && res.headers.get('location') === ROOM_STRIPE_LINK,
+      `status=${res.status} location=${res.headers.get('location')}`);
+
+    const roomPurchaseCount = () => db.prepare("SELECT COUNT(*) AS n FROM purchases WHERE product_id = 'room'").get().n;
+    const roomPurchasesBefore = roomPurchaseCount();
+    res = await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: roomEmail, productId: 'room', amountCents: 4900 } });
+    check('unsigned webhook provisions room member (200)', res.status === 200, `status=${res.status}`);
+    const memberRow = () => db.prepare('SELECT email, status, password_hash FROM room_members WHERE email = ?').get(roomEmail);
+    check('room_members row created, active, no password yet',
+      memberRow() && memberRow().status === 'active' && memberRow().password_hash == null,
+      `row=${JSON.stringify(memberRow())}`);
+    const newRoomPurchase = db.prepare("SELECT product_id, amount_cents, mode FROM purchases WHERE product_id = 'room' ORDER BY id DESC LIMIT 1").get();
+    check('room purchase recorded ($49.00, 4900 cents)',
+      roomPurchaseCount() === roomPurchasesBefore + 1 && newRoomPurchase.amount_cents === 4900,
+      `before=${roomPurchasesBefore} after=${roomPurchaseCount()} latest=${JSON.stringify(newRoomPurchase)}`);
+
+    res = await req(`${BASE}/room`, {});
+    check('GET /room unauthenticated redirects to /room/login',
+      res.status === 302 && (res.headers.get('location') || '').endsWith('/room/login'),
+      `status=${res.status} location=${res.headers.get('location')}`);
+
+    res = await req(`${BASE}/room/login`, { jar: roomJar });
+    check('GET /room/login returns 200', res.status === 200 && (await res.text()).includes('Member Login'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/room/claim`, { jar: roomJar, method: 'POST', form: { email: `nobody-${ts}@example.com`, password: 'roomtestpass1', password2: 'roomtestpass1' } });
+    check('claim with unknown email shows not-found error',
+      res.status === 200 && (await res.text()).includes('could not find a paid membership'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/room/claim`, { jar: roomJar, method: 'POST', form: { email: roomEmail, password: 'roomtestpass1', password2: 'roomtestpass1' } });
+    check('claim with paid email sets password and creates session',
+      res.status === 302 && (res.headers.get('location') || '').endsWith('/room') && roomJar.has('room_sess'),
+      `status=${res.status} location=${res.headers.get('location')} cookies=[${[...roomJar.c.keys()].join(',')}]`);
+    check('password hash stored (not plaintext)',
+      memberRow().password_hash && !String(memberRow().password_hash).includes('roomtestpass1'));
+
+    res = await req(`${BASE}/room`, { jar: roomJar });
+    check('GET /room with session returns dashboard', res.status === 200 && (await res.text()).includes('Wealth-Building Headquarters'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/room/classroom`, { jar: roomJar });
+    check('GET /room/classroom lists 7 pillars', res.status === 200 && (await res.text()).includes('Pillar 7'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/room/classroom/money-management`, { jar: roomJar });
+    check('GET /room/classroom/money-management renders lesson content',
+      res.status === 200 && (await res.text()).includes('Pay-Yourself-First'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/room/plan/toggle`, { jar: roomJar, method: 'POST', form: { week: '2', item: '1', checked: '1' } });
+    check('POST /room/plan/toggle persists progress', res.status === 302,
+      `status=${res.status}`);
+    const prog = db.prepare('SELECT checked FROM room_progress WHERE email = ? AND week = 2 AND item = 1').get(roomEmail);
+    check('progress row written to room_progress', prog && prog.checked === 1, `row=${JSON.stringify(prog)}`);
+    res = await req(`${BASE}/room/plan`, { jar: roomJar });
+    check('GET /room/plan returns 200 with 12 weeks', res.status === 200 && (await res.text()).includes('Week 12'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/room/community/post`, { jar: roomJar, method: 'POST', form: { title: 'Room test win', body: 'Finished week 2!' } });
+    check('member can post to community', res.status === 302, `status=${res.status}`);
+    const postRow = db.prepare('SELECT id, title FROM room_posts WHERE author_email = ? ORDER BY id DESC LIMIT 1').get(roomEmail);
+    check('community post stored', postRow && postRow.title === 'Room test win', `row=${JSON.stringify(postRow)}`);
+    res = await req(`${BASE}/room/community/post/${postRow.id}/comment`, { jar: roomJar, method: 'POST', form: { body: 'Room test reply' } });
+    check('member can comment', res.status === 302, `status=${res.status}`);
+    res = await req(`${BASE}/room/community/post/${postRow.id}`, { jar: roomJar });
+    check('post page shows comment', res.status === 200 && (await res.text()).includes('Room test reply'),
+      `status=${res.status}`);
+
+    const badJar = new Jar();
+    res = await req(`${BASE}/room/login`, { jar: badJar, method: 'POST', form: { email: roomEmail, password: 'wrongpassword' } });
+    check('login with wrong password rejected', res.status === 200 && (await res.text()).includes('Incorrect password') && !badJar.has('room_sess'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/room/logout`, { jar: roomJar });
+    check('logout redirects', res.status === 302, `status=${res.status}`);
+    res = await req(`${BASE}/room`, { jar: roomJar });
+    check('session destroyed after logout (back to login)',
+      res.status === 302 && (res.headers.get('location') || '').endsWith('/room/login'),
+      `status=${res.status} location=${res.headers.get('location')}`);
+
+    res = await req(`${BASE}/admin/room?token=${ADMIN_TOKEN}`, {});
+    const adminRoomHtml = await res.text();
+    check('GET /admin/room with token lists the member',
+      res.status === 200 && adminRoomHtml.includes(roomEmail),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/room/announce?token=${ADMIN_TOKEN}`, { method: 'POST', form: { title: 'Room test announcement', body: 'Welcome!' } });
+    check('admin can post announcement', res.status === 302, `status=${res.status}`);
+    const loginJar = new Jar();
+    await req(`${BASE}/room/login`, { jar: loginJar, method: 'POST', form: { email: roomEmail, password: 'roomtestpass1' } });
+    res = await req(`${BASE}/room`, { jar: loginJar });
+    check('announcement visible on member dashboard',
+      res.status === 200 && (await res.text()).includes('Room test announcement'),
+      `status=${res.status}`);
+
+    // Signed webhook shape: $49.00 checkout.session.completed with an email
+    // that has NO funnel lead row must still provision the member.
+    const child3 = spawn('node', ['server.js'], {
+      cwd: APP_ROOT,
+      env: { ...process.env, ADMIN_TOKEN, PORT: '3113', EMAIL_PROVIDER: 'local', STRIPE_WEBHOOK_SECRET: `whsec_test_${ts}` },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      const WEBHOOK3 = 'http://127.0.0.1:3113';
+      const t3 = Date.now();
+      for (;;) {
+        try {
+          const hr = await req(`${WEBHOOK3}/healthz`, {});
+          if (hr.status === 200) break;
+        } catch { /* not up yet */ }
+        if (Date.now() - t3 > SERVER_START_TIMEOUT_MS) failFast('room signed-webhook server did not boot in time');
+        await new Promise(r => setTimeout(r, 300));
+      }
+      const roomEmail2 = `e2e-room-signed-${ts}@example.com`;
+      const evt = {
+        id: `evt_room_${ts}`,
+        type: 'checkout.session.completed',
+        data: { object: { id: `cs_room_${ts}`, customer_details: { email: roomEmail2, name: 'Room Tester' }, amount_total: 4900 } },
+      };
+      const tt = Math.floor(Date.now() / 1000);
+      const raw = JSON.stringify(evt);
+      const v1 = crypto.createHmac('sha256', `whsec_test_${ts}`).update(`${tt}.${raw}`, 'utf8').digest('hex');
+      const ctl = new AbortController();
+      const to = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+      let r3;
+      try {
+        r3 = await fetch(`${WEBHOOK3}/webhooks/stripe`, {
+          method: 'POST',
+          headers: { 'content-type': 'application/json', 'stripe-signature': `t=${tt},v1=${v1}` },
+          body: raw, redirect: 'manual', signal: ctl.signal,
+        });
+      } finally { clearTimeout(to); }
+      const b3 = await r3.json().catch(() => ({}));
+      check('signed $49 webhook provisions member without a lead row (200, handled=true)',
+        r3.status === 200 && b3.handled === true,
+        `status=${r3.status} body=${JSON.stringify(b3)}`);
+      const m2 = db.prepare('SELECT email, name, status FROM room_members WHERE email = ?').get(roomEmail2);
+      check('signed webhook created active room member', m2 && m2.status === 'active',
+        `row=${JSON.stringify(m2)}`);
+    } finally {
+      await stopServer(child3);
+    }
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);
