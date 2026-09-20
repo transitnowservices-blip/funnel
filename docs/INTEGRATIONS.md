@@ -64,9 +64,15 @@ cloud hosting (see README deploy notes) so data survives restarts.
   form `POST`s to `/checkout/complete-demo`, which records a purchase ("no charge") and 302s to
   `/thank-you`.
 - **Stripe payment-link mode** (`paymentMode: "stripe"`): `POST /checkout` creates the cart and
-  **302-redirects the buyer to the product's Stripe payment link** (seed product:
-  `https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n`). The real charge happens on Stripe's hosted
-  page; completion is recorded via the `POST /webhooks/stripe` stub webhook (`{email, productId}`).
+  **302-redirects the buyer to the product's Stripe payment link**. The real charge happens on
+  Stripe's hosted page; completion is recorded via `POST /webhooks/stripe`, which **verifies the
+  Stripe signature** (`stripe-signature` header, HMAC-SHA256 over the raw body) using
+  `STRIPE_WEBHOOK_SECRET` before trusting the event. Verified `checkout.session.completed`
+  events are mapped to a product by the charged amount (`amount_total` in cents vs the
+  product's `priceCents`) and recorded via `recordPurchase`, which triggers the full
+  post-purchase automation. While `STRIPE_WEBHOOK_SECRET` is set, unsigned payloads are
+  rejected with 400; with no secret configured (local dev/tests) the endpoint accepts the
+  simple `{email, productId}` JSON shape.
 
 **(b) What is NOT built — be explicit:**
 - **Embedded card checkout is NOT built.** There is no on-page card form, no Stripe.js, no
@@ -74,14 +80,17 @@ cloud hosting (see README deploy notes) so data survives restarts.
   secret) and new code to create PaymentIntents and confirm cards — that is a future build, not
   config.
 - To use the current Stripe mode for real money you need a **Stripe account**, a **payment link**
-  per product (put in `config/products.json`), and the webhook endpoint registered so Stripe can
-  notify the app of completed payments.
+  per product (put in `config/products.json`), the webhook endpoint registered in the Stripe
+  dashboard (`https://<your-domain>/webhooks/stripe`, listening for `checkout.session.completed`),
+  and the endpoint's signing secret set as the `STRIPE_WEBHOOK_SECRET` env var.
 
 **(c) Env vars / accounts:**
 - `config/site.json` → `paymentMode`: `"demo"` or `"stripe"`
 - Stripe account (stripe.com) with a payment link per product; paste links into `config/products.json`.
-- Webhook: point Stripe at `POST /webhooks/stripe` on your deployed URL. (The stub accepts
-  `{email, productId}`; a production hardening pass should verify Stripe signatures.)
+- Webhook: point Stripe at `POST /webhooks/stripe` on your deployed URL (event:
+  `checkout.session.completed`), then set the endpoint's signing secret as `STRIPE_WEBHOOK_SECRET`.
+  The handler verifies Stripe signatures; without a secret configured it accepts the simple
+  `{email, productId}` JSON shape (local dev/tests only).
 
 ---
 
@@ -138,7 +147,7 @@ phone number (`TWILIO_FROM`). None of these exist in the app today.
 |---|---|---|
 | Email sending | Local provider → `data/outbox/` HTML files + admin views | Resend account + `RESEND_API_KEY`, set `EMAIL_PROVIDER=resend` to send real email |
 | CRM / database | SQLite (`data/funnel.db`) + admin pages are the CRM; Turso backend available | Nothing required; Turso needs `TURSO_DATABASE_URL` + `TURSO_AUTH_TOKEN` (free Turso account) |
-| Checkout / payments | Demo mode (no charge) + Stripe **payment-link redirect** + webhook stub | Stripe account + per-product payment links in `config/products.json`; embedded card checkout NOT built (would need Stripe API keys + new code) |
+| Checkout / payments | Demo mode (no charge) + Stripe **payment-link redirect** + signature-verified webhook | Stripe account + per-product payment links in `config/products.json` + webhook endpoint + `STRIPE_WEBHOOK_SECRET`; embedded card checkout NOT built (would need Stripe API keys + new code) |
 | Abandoned cart | Scheduler-driven, 1h/24h/60h/144h, auto-cancel on purchase | Nothing (server must be running / scheduler triggered) |
 | Analytics | First-party page-view/event tables in SQLite + admin dashboard | Nothing; Google Analytics NOT wired (would need GA4 ID + snippet code) |
 | SMS | NOT built (phone stored only) | Twilio or similar + new code (`ACCOUNT_SID`, `AUTH_TOKEN`, from-number) |
