@@ -19,6 +19,10 @@ Stripe payment link, then learn inside the Room.
 | Claim access (after paying) | `https://funnel-qdx9.onrender.com/room/claim` |
 | Member login | `https://funnel-qdx9.onrender.com/room/login` |
 | Member dashboard | `https://funnel-qdx9.onrender.com/room` |
+| 90-day goal | `https://funnel-qdx9.onrender.com/room/goal` |
+| Weekly check-in (Proof of Progress) | `https://funnel-qdx9.onrender.com/room/checkin` |
+| 12-week progress tracker | `https://funnel-qdx9.onrender.com/room/progress` |
+| 90-day review | `https://funnel-qdx9.onrender.com/room/review` |
 | Classroom (5 sections) | `https://funnel-qdx9.onrender.com/room/classroom` |
 | 90-Day Wealth Action Plan | `https://funnel-qdx9.onrender.com/room/plan` |
 | Community | `https://funnel-qdx9.onrender.com/room/community` |
@@ -68,9 +72,50 @@ New tables (created automatically at boot):
 | `room_progress` | 90-day plan check-offs per member per week/item |
 | `room_posts` | Community posts + admin announcements (`kind`), pinned flag |
 | `room_comments` | Replies on posts |
+| `room_goals` | One 90-day goal per member: text, start date, target date (start + 90 days) |
+| `room_checkins` | Weekly Proof of Progress entries (one per member per week): goal, action, accomplishment, lesson, next commitment, optional proof-file metadata, server-generated timestamp |
+| `room_reviews` | One 90-day review per member: 8 reflection answers |
 
 Room purchases also land in the existing `purchases` table
 (`product_id='room'`, 4900 cents) so revenue metrics include them.
+
+## Action + Accountability system
+
+The Room runs a **LEARN → ACT → PROVE → REFLECT → REPEAT** loop on top of
+the classroom:
+
+- **90-day goal** (`/room/goal`): on first dashboard visit members are
+  prompted to set ONE goal ("MY 90-DAY WEALTH GOAL"). The start date and
+  target date are fixed at creation; editing the wording never moves the
+  12-week clock. The goal banner shows across the member's Room experience.
+- **Weekly Proof of Progress** (`/room/checkin`): a private weekly check-in —
+  goal → action → proof → lesson → next action. Optional proof upload
+  (PNG/JPG/GIF/WebP/PDF, ≤ 8 MB, stored under `data/proofs/` and served
+  only to the owning member). Uploads require the member to confirm the
+  file contains no sensitive personal information. Timestamps are always
+  server-generated; members can only ever see their own check-ins.
+- **12-week tracker** (`/room/progress`): weeks 1–12 with completed weeks
+  marked, current week, streak, last check-in, latest accomplishment /
+  lesson / next commitment. Motto: "PROGRESS, NOT PERFECTION." Missed weeks
+  are never punished or shamed.
+- **90-day review** (`/room/review`): 8 reflection questions plus a journey
+  summary built from the member's check-ins.
+- **Lesson CTAs:** every classroom section ends with "NOW PUT IT INTO
+  ACTION." linking to the weekly check-in (LEARN ↓ APPLY ↓ DOCUMENT ↓
+  REFLECT ↓ MOVE FORWARD).
+- **Accountability posts:** 12 weekly community posts (WEEK 1 … WEEK 12),
+  seeded automatically, each with a theme, a concrete action, and a
+  check-in pointer. Never pinned, never ranked.
+- **Emails** (via the existing scheduler + `email_queue`):
+  - Weekly reminder — subject `Your Wealth Builder weekly check-in` — to
+    active, claimed members with a goal who missed the current week's
+    check-in. Never to canceled/inactive/suppressed members.
+  - Confirmation — subject `Progress documented ✓` — immediately after
+    each check-in submission.
+- **Admin → Room → Accountability:** per-member current week, goal,
+  check-ins completed, checked-in-this-week, streak, last check-in, proof
+  status, latest accomplishment/lesson/next commitment, review status —
+  plus "checked in" / "not checked in" lists. No rankings, no leaderboard.
 
 ## Ground rules baked into the product
 
