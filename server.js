@@ -1468,12 +1468,44 @@ app.post('/admin/routes/:id/packages', adminAuth, ah(async (req, res) => {
 app.get('/admin/packages/:packageId', adminAuth, ah(async (req, res) => {
   const pkg = await drivers.getPackage(req.params.packageId);
   if (!pkg) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Package not found.</p>'));
-  const [driver, route, events] = await Promise.all([
+  const [driver, route, events, exceptions] = await Promise.all([
     pkg.driver_id ? drivers.getDriverById(pkg.driver_id) : null,
     pkg.route_id ? drivers.getRouteById(pkg.route_id) : null,
     drivers.getCustodyHistory(pkg.package_id),
+    drivers.listExceptions({ packageId: pkg.package_id }),
   ]);
-  res.send(adminViews.adminLayout('Package ' + pkg.package_id, driverAdminViews.adminPackageHtml({ pkg, driver, route, events })));
+  res.send(adminViews.adminLayout('Package ' + pkg.package_id, driverAdminViews.adminPackageHtml({ pkg, driver, route, events, exceptions })));
+}));
+
+// --- Phase H: admin exception flagging + resolution ------------------------------
+app.get('/admin/exceptions', adminAuth, ah(async (req, res) => {
+  const statusFilter = ['open', 'resolved'].includes(req.query.status) ? req.query.status : null;
+  const [list, openCount] = await Promise.all([
+    drivers.listExceptions({ status: statusFilter }),
+    drivers.countOpenExceptions(),
+  ]);
+  const ids = [...new Set(list.map((x) => x.driver_id).filter(Boolean))];
+  const driversById = {};
+  for (const id of ids) driversById[id] = await drivers.getDriverById(id);
+  res.send(adminViews.adminLayout('Package exceptions', driverAdminViews.exceptionsListHtml({ list, statusFilter, openCount, driversById })));
+}));
+
+app.post('/admin/exceptions/:id/resolve', adminAuth, ah(async (req, res) => {
+  try {
+    const ex = await drivers.resolveException(req.params.id, req.body.resolution_note || '', 'admin');
+    res.redirect(`/admin/packages/${encodeURIComponent(ex.package_id)}`);
+  } catch (err) {
+    res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+}));
+
+app.get('/admin/exceptions/:id/photo', adminAuth, ah(async (req, res) => {
+  const ex = await drivers.getException(req.params.id);
+  if (!ex) return res.status(404).send('Not found');
+  const photo = await drivers.getExceptionPhoto(req.params.id);
+  if (!photo || !photo.photo_blob) return res.status(404).send('No photo attached.');
+  res.type(photo.photo_mime || 'application/octet-stream');
+  res.send(photo.photo_blob);
 }));
 
 // --- Phase E: phone-camera scanning (manual fallback always available) --------
@@ -1507,7 +1539,8 @@ app.get('/d/:token/packages/:packageId', requireDriver, ah(async (req, res) => {
     return page(res, 'Not found', '<section><h1>Package not found</h1><p class="subhead">This package is not assigned to you.</p></section>', site);
   }
   const events = await drivers.getCustodyHistory(pkg.package_id);
-  page(res, pkg.package_id, driverViews.driverPackagePage({ driver, pkg, events }), site);
+  const exceptions = await drivers.listExceptions({ packageId: pkg.package_id });
+  page(res, pkg.package_id, driverViews.driverPackagePage({ driver, pkg, events, exceptions }), site);
 }));
 
 app.post('/d/:token/packages/:packageId/event', requireDriver, ah(async (req, res) => {
@@ -1529,9 +1562,75 @@ app.post('/d/:token/packages/:packageId/event', requireDriver, ah(async (req, re
   } catch (err) {
     res.status(400);
     const events = await drivers.getCustodyHistory(pkg.package_id);
-    return page(res, pkg.package_id, `<section><div class="form-error" role="alert">${err.message}</div></section>` + driverViews.driverPackagePage({ driver, pkg, events }), site);
+    const exceptions = await drivers.listExceptions({ packageId: pkg.package_id });
+    return page(res, pkg.package_id, `<section><div class="form-error" role="alert">${err.message}</div></section>` + driverViews.driverPackagePage({ driver, pkg, events, exceptions }), site);
   }
   res.redirect(`/d/${driver.access_token}/packages/${encodeURIComponent(pkg.package_id)}`);
+}));
+
+// --- Phase H: driver delivery exceptions (optional photo/proof) ------------------
+function requireDriverPackage(req, res, next) {
+  // Shared lookup for exception routes: package must belong to the driver.
+  drivers.getPackage(req.params.packageId).then((pkg) => {
+    if (!pkg || Number(pkg.driver_id) !== Number(req.driver.id)) {
+      res.status(404);
+      return page(res, 'Not found', '<section><h1>Package not found</h1><p class="subhead">This package is not assigned to you.</p></section>', config.getSite());
+    }
+    req.pkg = pkg;
+    next();
+  }).catch(next);
+}
+
+app.get('/d/:token/packages/:packageId/exception', requireDriver, requireDriverPackage, ah(async (req, res) => {
+  const site = config.getSite();
+  page(res, 'Report an exception', driverViews.exceptionFormPage({ driver: req.driver, pkg: req.pkg, error: null }), site);
+}));
+
+app.post('/d/:token/packages/:packageId/exception',
+  requireDriver,
+  requireDriverPackage,
+  express.raw({ type: 'multipart/form-data', limit: '10mb' }),
+  ah(async (req, res) => {
+    const site = config.getSite();
+    const driver = req.driver;
+    const pkg = req.pkg;
+    const fail = (error) => page(res, 'Report an exception', driverViews.exceptionFormPage({ driver, pkg, error }), site);
+    let fields, file;
+    try {
+      ({ fields, file } = multipart.parseMultipart(req, { maxFileBytes: 8 * 1024 * 1024, allowedMimes: PROOF_ALLOWED_MIMES }));
+    } catch (err) {
+      res.status(400);
+      return fail(err.message);
+    }
+    if (file && fields.photo_confirm !== '1' && fields.photo_confirm !== 'on') {
+      res.status(400);
+      return fail('Please check the box confirming your photo contains no sensitive personal information.');
+    }
+    try {
+      await drivers.reportException({
+        packageId: pkg.package_id,
+        driverId: driver.id,
+        exception_type: fields.exception_type,
+        description: fields.description,
+        photo: file ? { buffer: file.buffer, mime: file.mime, originalName: file.originalName } : null,
+        createdBy: 'driver',
+      });
+    } catch (err) {
+      res.status(400);
+      return fail(err.message);
+    }
+    res.redirect(`/d/${driver.access_token}/packages/${encodeURIComponent(pkg.package_id)}`);
+  })
+);
+
+app.get('/d/:token/exceptions/:id/photo', requireDriver, ah(async (req, res) => {
+  const ex = await drivers.getException(req.params.id);
+  // Only the reporting driver may view their own exception photo.
+  if (!ex || Number(ex.driver_id) !== Number(req.driver.id)) return res.status(404).send('Not found');
+  const photo = await drivers.getExceptionPhoto(req.params.id);
+  if (!photo || !photo.photo_blob) return res.status(404).send('No photo attached.');
+  res.type(photo.photo_mime || 'application/octet-stream');
+  res.send(photo.photo_blob);
 }));
 
 // --- Phase G: polling-based route progress (JSON; no real-time claims) ---------

@@ -51,6 +51,7 @@ pre.config-view{background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto;
   <a href="/admin/room">Room</a>
   <a href="/admin/drivers">Drivers</a>
   <a href="/admin/routes">Routes</a>
+  <a href="/admin/exceptions">Exceptions</a>
   <a href="/admin/config">Config</a>
 </nav>
 <main class="container admin">

@@ -278,15 +278,68 @@ module.exports = {
   routeStatusBadge,
   packageStatusBadge,
   adminPackageHtml,
+  exceptionsListHtml,
 };
 
+// --- Exceptions (Phase H: admin flagging + resolution) ------------------------------
+function exceptionStatusBadge(status) {
+  return `<span class="status-badge">${esc(drivers.EXCEPTION_STATUS_LABELS[status] || status)}</span>`;
+}
+
+function exceptionsListHtml({ list, statusFilter, openCount, driversById }) {
+  const tabs = ['open', 'resolved'].map((s) => {
+    const active = statusFilter === s ? ' class="active"' : '';
+    return `<a${active} href="/admin/exceptions?status=${s}">${esc(drivers.EXCEPTION_STATUS_LABELS[s])}</a>`;
+  }).join('');
+  const allActive = !statusFilter ? ' class="active"' : '';
+  const rows = list
+    .map((x) => {
+      const d = driversById[x.driver_id];
+      return `<tr>
+        <td><a href="/admin/packages/${esc(x.package_id)}"><strong>${esc(x.package_id)}</strong></a></td>
+        <td>${esc(drivers.EXCEPTION_TYPE_LABELS[x.exception_type] || x.exception_type)}</td>
+        <td>${d ? `<a href="/admin/drivers/${d.id}">${esc(d.full_name)}</a>` : '—'}</td>
+        <td>${esc((x.description || '').slice(0, 80))}${x.photo_mime ? ' 📷' : ''}</td>
+        <td>${exceptionStatusBadge(x.status)}</td>
+        <td>${fmtTs(x.created_at)}</td>
+        <td>${x.status === 'open'
+          ? `<form method="POST" action="/admin/exceptions/${x.id}/resolve" class="form" style="display:inline">
+               <input type="text" name="resolution_note" placeholder="Resolution note" required style="width:160px">
+               <button type="submit" class="btn">Resolve</button>
+             </form>`
+          : esc(x.resolution_note || '')}</td>
+      </tr>`;
+    })
+    .join('');
+  return `
+<h2>Package exceptions ${openCount ? `(${openCount} open)` : ''}</h2>
+<div class="pipeline-nav"><a${allActive} href="/admin/exceptions">All</a>${tabs}</div>
+<table class="admin-table">
+<thead><tr><th>Package</th><th>Type</th><th>Driver</th><th>Description</th><th>Status</th><th>Reported</th><th>Resolution</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="7">No exceptions.</td></tr>'}</tbody>
+</table>`;
+}
+
 // --- Package investigation (Phase F: read-only custody timeline) ------------------
-function adminPackageHtml({ pkg, driver, route, events }) {
+function adminPackageHtml({ pkg, driver, route, events, exceptions }) {
   const timeline = (events || [])
     .map(
       (ev) => `<li><strong>${esc(drivers.CUSTODY_EVENT_LABELS[ev.event_type] || ev.event_type)}</strong>
         <span class="ts">${fmtTs(ev.ts)} · by ${esc(ev.created_by || 'driver')}${ev.driver_name ? ' (' + esc(ev.driver_name) + ')' : ''}</span>
         ${ev.note ? `<br>${esc(ev.note)}` : ''}</li>`
+    )
+    .join('');
+  const exHtml = (exceptions || [])
+    .map(
+      (x) => `<div class="card"><p><strong>${esc(drivers.EXCEPTION_TYPE_LABELS[x.exception_type] || x.exception_type)}</strong>
+        — ${exceptionStatusBadge(x.status)} <span class="ts">${fmtTs(x.created_at)}</span></p>
+        <p>${esc(x.description)}</p>
+        ${x.photo_mime ? `<p><a href="/admin/exceptions/${x.id}/photo">View attached photo (${esc(x.photo_name || x.photo_mime)})</a></p>` : ''}
+        ${x.status === 'resolved' && x.resolution_note ? `<p class="muted">Resolution: ${esc(x.resolution_note)}</p>` : ''}
+        ${x.status === 'open' ? `<form method="POST" action="/admin/exceptions/${x.id}/resolve" class="form">
+          <label>Resolution note <input type="text" name="resolution_note" required></label>
+          <button type="submit" class="btn">Resolve exception</button>
+        </form>` : ''}</div>`
     )
     .join('');
   return `
@@ -303,5 +356,6 @@ function adminPackageHtml({ pkg, driver, route, events }) {
 <div class="card">
   <h3>Custody history (append-only)</h3>
   <ul class="timeline">${timeline || '<li>No custody events recorded yet.</li>'}</ul>
-</div>`;
+</div>
+${exHtml ? `<h3>Exceptions</h3>${exHtml}` : ''}`;
 }

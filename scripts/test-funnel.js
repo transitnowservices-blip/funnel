@@ -1616,6 +1616,73 @@ async function main() {
       res.status === 200 && adminRouteHtml.includes('Route progress') &&
       adminRouteHtml.includes('0 of 1 packages complete'), `status=${res.status}`);
 
+    /* ---- Phase H: delivery exceptions ---------------------------------- */
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/exception`, {});
+    check('driver exception form renders',
+      res.status === 200 && (await res.text()).includes('Report an exception'), `status=${res.status}`);
+
+    res = await multipartReq(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/exception`, {
+      fields: { exception_type: 'damaged_package', description: 'Box crushed on one corner' },
+      file: { filename: 'damage.png', mime: 'image/png', buffer: Buffer.from('fake-png-bytes') },
+    });
+    // photo without the confirm checkbox is rejected
+    check('exception photo requires the no-sensitive-info confirmation (400)',
+      res.status === 400, `status=${res.status}`);
+
+    res = await multipartReq(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/exception`, {
+      fields: { exception_type: 'damaged_package', description: 'Box crushed on one corner', photo_confirm: '1' },
+      file: { filename: 'damage.png', mime: 'image/png', buffer: Buffer.from('fake-png-bytes') },
+    });
+    const exRow = db.prepare('SELECT * FROM package_exceptions WHERE package_id = ? ORDER BY id DESC LIMIT 1').get(pkg.package_id);
+    const pkgExStatus = db.prepare('SELECT status FROM packages WHERE package_id = ?').get(pkg.package_id).status;
+    check('exception with photo recorded; package flagged',
+      res.status === 302 && exRow && exRow.exception_type === 'damaged_package' &&
+      exRow.status === 'open' && exRow.photo_mime === 'image/png' &&
+      exRow.photo_blob && exRow.photo_blob.length > 0 && pkgExStatus === 'exception',
+      `status=${res.status}`);
+    const exMail = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'exception-new' AND subject LIKE ?").get(`%${pkg.package_id}%`).n;
+    check('new exception notifies operations', exMail === 1, `count=${exMail}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/exceptions/${exRow.id}/photo`, {});
+    check('driver can view own exception photo',
+      res.status === 200 && (res.headers.get('content-type') || '').includes('image/png'), `status=${res.status}`);
+    res = await req(`${BASE}/d/${pd2Token}/exceptions/${exRow.id}/photo`, {});
+    check('other driver cannot view exception photo (404)', res.status === 404, `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}`, {});
+    const pkgPageEx = await res.text();
+    check('driver package page shows the exception',
+      res.status === 200 && pkgPageEx.includes('Damaged package') && pkgPageEx.includes('Box crushed'), `status=${res.status}`);
+
+    // Admin: list, resolve.
+    res = await req(`${BASE}/admin/exceptions`, {});
+    check('admin exceptions require token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/exceptions?token=${ADMIN_TOKEN}`, {});
+    const exListHtml = await res.text();
+    check('admin exceptions list shows open exception',
+      res.status === 200 && exListHtml.includes(pkg.package_id) && exListHtml.includes('Damaged package'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/exceptions/${exRow.id}/photo?token=${ADMIN_TOKEN}`, {});
+    check('admin can view exception photo', res.status === 200, `status=${res.status}`);
+    res = await req(`${BASE}/admin/exceptions/${exRow.id}/resolve?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['resolution_note', 'Customer approved redelivery']] });
+    const exAfter = db.prepare('SELECT status, resolution_note FROM package_exceptions WHERE id = ?').get(exRow.id);
+    const pkgAfterResolve = db.prepare('SELECT status FROM packages WHERE package_id = ?').get(pkg.package_id).status;
+    check('admin resolve keeps report, records resolution, unflags package',
+      res.status === 302 && exAfter.status === 'resolved' &&
+      exAfter.resolution_note === 'Customer approved redelivery' && pkgAfterResolve === 'in_transit',
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/packages/${pkg.package_id}?token=${ADMIN_TOKEN}`, {});
+    check('admin package page shows exception + resolution',
+      res.status === 200 && (await res.text()).includes('Customer approved redelivery'), `status=${res.status}`);
+
+    // Validation: bad type / missing description.
+    res = await multipartReq(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/exception`, {
+      fields: { exception_type: 'bogus', description: 'x' },
+    });
+    check('exception rejects unknown type (400)', res.status === 400, `status=${res.status}`);
+    res = await req(`${BASE}/d/${pd2Token}/packages/${pkg.package_id}/exception`, {});
+    check('driver cannot open exception form for another driver\'s package (404)', res.status === 404, `status=${res.status}`);
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

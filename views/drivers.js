@@ -360,7 +360,7 @@ function scanResultPage({ driver, pkg, error }) {
 }
 
 // --- Phase F: package detail with append-only custody history --------------------
-function driverPackagePage({ driver, pkg, events }) {
+function driverPackagePage({ driver, pkg, events, exceptions }) {
   const buttons = drivers.CUSTODY_EVENTS.map((e) => `
     <button type="submit" name="event_type" value="${e}" class="btn big-btn">${esc(drivers.CUSTODY_EVENT_LABELS[e]).toUpperCase()}</button>`).join('\n');
   const timeline = (events || [])
@@ -368,6 +368,15 @@ function driverPackagePage({ driver, pkg, events }) {
       (ev) => `<li><strong>${esc(drivers.CUSTODY_EVENT_LABELS[ev.event_type] || ev.event_type)}</strong>
         <span class="ts">${new Date(Number(ev.ts)).toLocaleString()}${ev.driver_name ? ' · ' + esc(ev.driver_name) : ''}</span>
         ${ev.note ? `<br>${esc(ev.note)}` : ''}</li>`
+    )
+    .join('');
+  const exHtml = (exceptions || [])
+    .map(
+      (x) => `<div class="card"><p><strong>${esc(drivers.EXCEPTION_TYPE_LABELS[x.exception_type] || x.exception_type)}</strong>
+        — ${esc(drivers.EXCEPTION_STATUS_LABELS[x.status] || x.status)}</p>
+        <p>${esc(x.description)}</p>
+        ${x.photo_mime ? `<p><a href="/d/${esc(driver.access_token)}/exceptions/${x.id}/photo">View attached photo</a></p>` : ''}
+        ${x.status === 'resolved' && x.resolution_note ? `<p class="muted">Resolution: ${esc(x.resolution_note)}</p>` : ''}</div>`
     )
     .join('');
   return `
@@ -379,6 +388,8 @@ function driverPackagePage({ driver, pkg, events }) {
     <p>Status: <strong>${esc(drivers.PACKAGE_STATUS_LABELS[pkg.status] || pkg.status)}</strong></p>
     ${pkg.special_instructions ? `<p class="muted">Note: ${esc(pkg.special_instructions)}</p>` : ''}
   </div>
+  <p><a class="btn big-btn" href="/d/${esc(driver.access_token)}/packages/${esc(pkg.package_id)}/exception">REPORT AN EXCEPTION</a></p>
+  ${exHtml ? `<h2>Exceptions</h2>${exHtml}` : ''}
   <h2>Record custody event</h2>
   <form method="POST" action="/d/${esc(driver.access_token)}/packages/${esc(pkg.package_id)}/event" class="form">
     <label>Note / handed to <span class="hint">Required for handoff — who received the package?</span>
@@ -393,4 +404,32 @@ function driverPackagePage({ driver, pkg, events }) {
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, selectField, textField, checkboxGroup };
+// --- Phase H: report a delivery exception -----------------------------------------
+function exceptionFormPage({ driver, pkg, error }) {
+  const typeOpts = drivers.EXCEPTION_TYPES.map(
+    (t) => `<option value="${t}">${esc(drivers.EXCEPTION_TYPE_LABELS[t])}</option>`
+  ).join('');
+  return `
+<section>
+  <h1>Report an exception</h1>
+  <p class="subhead">${esc(pkg.package_id)} · ${esc(pkg.recipient_name)}</p>
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  <form method="POST" action="/d/${esc(driver.access_token)}/packages/${esc(pkg.package_id)}/exception" enctype="multipart/form-data" class="form">
+    <label>What happened? *
+      <select name="exception_type" required>${typeOpts}</select>
+    </label>
+    <label>Describe what happened *
+      <textarea name="description" rows="4" required placeholder="e.g. Recipient not home; no safe drop location"></textarea>
+    </label>
+    <label>Photo / proof (optional)
+      <input type="file" name="photo" accept="image/*,.pdf">
+      <span class="hint">A photo helps operations resolve this faster.</span>
+    </label>
+    <label class="checkbox"><input type="checkbox" name="photo_confirm" value="1"> My photo contains no sensitive personal information (no IDs, no faces of non-consenting people).</label>
+    <button type="submit" class="btn btn-large big-btn">SUBMIT EXCEPTION</button>
+  </form>
+  <p><a href="/d/${esc(driver.access_token)}/packages/${esc(pkg.package_id)}">&larr; Back to package</a></p>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, selectField, textField, checkboxGroup };
