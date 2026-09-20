@@ -282,7 +282,72 @@ module.exports = {
   ticketsListHtml,
   adminTicketHtml,
   communityModHtml,
+  plansAdminHtml,
 };
+
+// --- Service plans (Phase K: admin configuration + request triage) ------------------
+function plansAdminHtml({ plans, settings, pendingRequests, driversById }) {
+  const freqOpts = drivers.PLAN_BILLING_FREQUENCIES.map(
+    (f) => `<option value="${f}"${settings.billing_frequency === f ? ' selected' : ''}>${esc(f)}</option>`
+  ).join('');
+  const planRows = plans
+    .map((p) => `
+      <tr><td colspan="5">
+        <form method="POST" action="/admin/plans/${esc(p.id)}" class="form">
+          <strong>${esc(p.id)}</strong>
+          <label>Name <input type="text" name="name" value="${esc(p.name)}" required></label>
+          <label>Weekly price (USD) <input type="number" name="weekly_price" min="0" step="1" value="${(p.weekly_price_cents / 100).toFixed(0)}" required></label>
+          <label>Description <input type="text" name="description" value="${esc(p.description || '')}"></label>
+          <label>Features (one per line)<textarea name="features" rows="2">${esc((() => { try { return JSON.parse(p.features || '[]').join('\n'); } catch { return ''; } })())}</textarea></label>
+          <label class="checkbox"><input type="checkbox" name="active" value="1"${p.active ? ' checked' : ''}> Active</label>
+          <button type="submit" class="btn btn-small">Save plan</button>
+        </form>
+      </td></tr>`)
+    .join('');
+  const reqRows = pendingRequests
+    .map((r) => {
+      const d = driversById[r.driver_id];
+      return `<tr>
+        <td>${d ? `<a href="/admin/drivers/${d.id}">${esc(d.full_name)}</a>` : 'driver #' + r.driver_id}</td>
+        <td>${r.from_plan_id ? esc(r.from_plan_id) + ' → ' : ''}<strong>${esc(r.to_plan_id)}</strong></td>
+        <td>${esc(r.note || '')}<br><span class="muted">${fmtTs(r.created_at)}</span></td>
+        <td>
+          <form method="POST" action="/admin/plans/requests/${r.driver_id}/approve" style="display:inline">
+            <input type="text" name="note" placeholder="Approval note" style="width:140px">
+            <button class="btn btn-small">Approve</button>
+          </form>
+          <form method="POST" action="/admin/plans/requests/${r.driver_id}/reject" style="display:inline">
+            <input type="text" name="note" placeholder="Rejection reason" style="width:140px">
+            <button class="btn btn-small">Reject</button>
+          </form>
+        </td>
+      </tr>`;
+    })
+    .join('');
+  return `
+<h2>Service plans</h2>
+<div class="card">
+  <p class="microcopy">${esc(drivers.PLAN_DISCLAIMER)}</p>
+</div>
+<div class="card">
+  <h3>Settings</h3>
+  <form method="POST" action="/admin/plans/settings" class="form">
+    <label>Billing frequency
+      <select name="billing_frequency">${freqOpts}</select>
+    </label>
+    <label class="checkbox"><input type="checkbox" name="plans_enabled" value="1"${settings.plans_enabled ? ' checked' : ''}>
+      Plans are open for driver requests</label>
+    <button type="submit" class="btn">Save settings</button>
+  </form>
+</div>
+<h3>Plans (weekly prices)</h3>
+<table class="admin-table"><tbody>${planRows}</tbody></table>
+<h3>Pending requests (${pendingRequests.length})</h3>
+<table class="admin-table">
+<thead><tr><th>Driver</th><th>Requested</th><th>Note</th><th>Decide</th></tr></thead>
+<tbody>${reqRows || '<tr><td colspan="4">No pending requests.</td></tr>'}</tbody>
+</table>`;
+}
 
 // --- Community moderation (Phase J) -----------------------------------------------
 function communityModHtml({ posts, commentsByPost, reports, driversById }) {

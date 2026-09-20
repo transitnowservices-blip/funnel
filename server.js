@@ -1608,6 +1608,60 @@ app.post('/admin/community/reports/:id/review', adminAuth, ah(async (req, res) =
   res.redirect('/admin/community');
 }));
 
+// --- Phase K: admin service plan configuration -----------------------------------
+app.get('/admin/plans', adminAuth, ah(async (req, res) => {
+  const [plans, settings, pendingRequests] = await Promise.all([
+    drivers.getServicePlans({}),
+    drivers.getPlanSettings(),
+    drivers.listPendingPlanRequests(),
+  ]);
+  const ids = [...new Set(pendingRequests.map((r) => r.driver_id))];
+  const driversById = {};
+  for (const id of ids) driversById[id] = await drivers.getDriverById(id);
+  res.send(adminViews.adminLayout('Service plans', driverAdminViews.plansAdminHtml({ plans, settings, pendingRequests, driversById })));
+}));
+
+app.post('/admin/plans/settings', adminAuth, ah(async (req, res) => {
+  await drivers.updatePlanSettings({
+    billing_frequency: req.body.billing_frequency,
+    plans_enabled: req.body.plans_enabled === '1' || req.body.plans_enabled === 'on',
+  });
+  res.redirect('/admin/plans');
+}));
+
+app.post('/admin/plans/:id', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.updateServicePlan(req.params.id, {
+      name: req.body.name,
+      weekly_price_cents: Math.round(Number(req.body.weekly_price || 0) * 100),
+      description: req.body.description,
+      features: String(req.body.features || '').split('\n').map((s) => s.trim()).filter(Boolean),
+      active: req.body.active === '1' || req.body.active === 'on',
+    });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect('/admin/plans');
+}));
+
+app.post('/admin/plans/requests/:driverId/approve', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.decidePlanRequest(req.params.driverId, 'approved', req.body.note || '', 'admin');
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect('/admin/plans');
+}));
+
+app.post('/admin/plans/requests/:driverId/reject', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.decidePlanRequest(req.params.driverId, 'rejected', req.body.note || '', 'admin');
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect('/admin/plans');
+}));
+
 // --- Phase E: phone-camera scanning (manual fallback always available) --------
 app.get('/d/:token/scan', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
@@ -1867,6 +1921,39 @@ app.post('/d/:token/community/report', requireDriver, ah(async (req, res) => {
     return page(res, 'Report', `<section><div class="form-error" role="alert">${err.message}</div></section>`, site);
   }
   page(res, 'Reported', '<section><h1>Thanks</h1><p class="subhead">Operations will review this content.</p><p><a href="/d/' + req.driver.access_token + '/community">&larr; Back to community</a></p></section>', site);
+}));
+
+// --- Phase K: driver service plans (request-based; no public activation) ---------
+app.get('/d/:token/plan', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const [plans, settings, currentPlanId, pendingRequest, history] = await Promise.all([
+    drivers.getServicePlans({ activeOnly: true }),
+    drivers.getPlanSettings(),
+    drivers.getDriverPlan(driver.id),
+    drivers.getPendingPlanRequest(driver.id),
+    drivers.listPlanChanges(driver.id),
+  ]);
+  page(res, 'Service plans', driverViews.planPage({ driver, plans, settings, currentPlanId, pendingRequest, history, error: null }), site);
+}));
+
+app.post('/d/:token/plan/request', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  try {
+    await drivers.requestPlanChange(driver.id, req.body.plan_id, req.body.note || '');
+  } catch (err) {
+    res.status(400);
+    const [plans, settings, currentPlanId, pendingRequest, history] = await Promise.all([
+      drivers.getServicePlans({ activeOnly: true }),
+      drivers.getPlanSettings(),
+      drivers.getDriverPlan(driver.id),
+      drivers.getPendingPlanRequest(driver.id),
+      drivers.listPlanChanges(driver.id),
+    ]);
+    return page(res, 'Service plans', driverViews.planPage({ driver, plans, settings, currentPlanId, pendingRequest, history, error: err.message }), site);
+  }
+  res.redirect(`/d/${driver.access_token}/plan`);
 }));
 
 // --- Phase G: polling-based route progress (JSON; no real-time claims) ---------

@@ -601,4 +601,47 @@ function communityPostPage({ driver, post, comments, authors, error }) {
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, selectField, textField, checkboxGroup };
+// --- Phase K: service plans ------------------------------------------------------
+function planPage({ driver, plans, settings, currentPlanId, pendingRequest, history, error }) {
+  const requestsOpen = !!settings.plans_enabled;
+  const planCards = (plans || [])
+    .map((p) => {
+      const feats = (() => { try { return JSON.parse(p.features || '[]'); } catch { return []; } })();
+      const isCurrent = currentPlanId === p.id;
+      const isPending = pendingRequest && pendingRequest.to_plan_id === p.id;
+      return `<div class="card">
+        <h3>${esc(p.name)} — ${esc(drivers.planPriceDisplay(p))}</h3>
+        <p>${esc(p.description || '')}</p>
+        ${feats.length ? `<ul>${feats.map((f) => `<li>${esc(f)}</li>`).join('')}</ul>` : ''}
+        ${isCurrent ? '<p><strong>Your current plan</strong></p>'
+          : isPending ? '<p><strong>Request pending</strong> — operations will review.</p>'
+          : requestsOpen ? `<form method="POST" action="/d/${esc(driver.access_token)}/plan/request" class="form">
+               <input type="hidden" name="plan_id" value="${esc(p.id)}">
+               <button type="submit" class="btn big-btn">REQUEST THIS PLAN</button>
+             </form>`
+          : '<p class="microcopy">Requests are currently closed.</p>'}
+      </div>`;
+    })
+    .join('');
+  const histRows = (history || [])
+    .map((h) => `<li><strong>${esc(h.event)}</strong> ${h.from_plan_id ? esc(h.from_plan_id) + ' → ' : ''}${esc(h.to_plan_id || '')}
+      <span class="ts">${new Date(Number(h.created_at)).toLocaleDateString()} · by ${esc(h.created_by)}</span>
+      ${h.note ? `<br>${esc(h.note)}` : ''}</li>`)
+    .join('');
+  return `
+<section>
+  <h1>Service plans</h1>
+  <p class="subhead">TransitNow service plans are billed ${esc(settings.billing_frequency || 'weekly')}.</p>
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  ${requestsOpen ? '' : '<div class="card"><p>Service plans are not currently open for new requests. Check back later.</p></div>'}
+  ${planCards || '<div class="card"><p>No plans are currently available.</p></div>'}
+  <div class="card">
+    <p class="microcopy">${esc(drivers.PLAN_DISCLAIMER)}</p>
+    <p class="microcopy">Plan requests are reviewed by operations. A plan becomes active only after approval and acceptance of the service terms — requesting a plan does not activate billing.</p>
+  </div>
+  ${histRows ? `<h2>Your plan history</h2><ul class="timeline">${histRows}</ul>` : ''}
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, planPage, selectField, textField, checkboxGroup };

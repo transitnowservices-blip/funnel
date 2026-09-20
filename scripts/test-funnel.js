@@ -1786,6 +1786,7 @@ async function main() {
     check('community shows first names only (privacy)',
       postHtml.includes('Route') === false || !postHtml.includes(pdDrv.full_name), 'full name not shown');
 
+    const repMailBefore = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'community-report'").get().n;
     res = await req(`${BASE}/d/${pdDrv.access_token}/community/report`, { method: 'POST', form: [
       ['comment_id', String(comment.id)], ['reason', 'Testing the report flow'],
     ]});
@@ -1794,7 +1795,7 @@ async function main() {
       res.status === 200 && report && report.comment_id === comment.id && report.status === 'open',
       `status=${res.status}`);
     const repMail = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'community-report'").get().n;
-    check('report notifies operations', repMail === 1, `count=${repMail}`);
+    check('report notifies operations', repMail === repMailBefore + 1, `count=${repMail}`);
 
     // Admin moderation.
     res = await req(`${BASE}/admin/community`, {});
@@ -1830,6 +1831,90 @@ async function main() {
 
     res = await req(`${BASE}/admin/community/reports/${report.id}/review?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['outcome', 'dismissed']] });
     check('admin dismisses report', res.status === 302 && db.prepare('SELECT status FROM community_reports WHERE id = ?').get(report.id).status === 'dismissed', `status=${res.status}`);
+
+    /* ---- Phase K: service plans --------------------------------------- */
+    const DISCLAIMER = 'Plan pricing represents the applicable TransitNow service/plan fee. Driver earnings are not guaranteed and may vary based on routes, loads, availability, expenses, eligibility, and other operating factors.';
+    res = await req(`${BASE}/d/${pdDrv.access_token}/plan`, {});
+    let planHtml = await res.text();
+    check('driver plan page shows 4 weekly plans with disclaimer',
+      res.status === 200 && planHtml.includes('$300/week') && planHtml.includes('$500/week') &&
+      planHtml.includes('$750/week') && planHtml.includes('$1,000/week') && planHtml.includes(DISCLAIMER),
+      `status=${res.status}`);
+    check('plan page never shows monthly equivalents',
+      !/per month|\/month|monthly/i.test(planHtml), 'no monthly language');
+    check('plans are closed to requests by default',
+      planHtml.includes('not currently open'), 'closed by default');
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/plan/request`, { method: 'POST', form: [['plan_id', 'plus']] });
+    check('plan request rejected while plans are closed (400)', res.status === 400, `status=${res.status}`);
+
+    // Admin configures plans.
+    res = await req(`${BASE}/admin/plans`, {});
+    check('admin plans require token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/plans?token=${ADMIN_TOKEN}`, {});
+    check('admin plans page renders with disclaimer',
+      res.status === 200 && (await res.text()).includes(DISCLAIMER), `status=${res.status}`);
+    res = await req(`${BASE}/admin/plans/settings?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['billing_frequency', 'biweekly'], ['plans_enabled', '1'],
+    ]});
+    const settings = db.prepare('SELECT * FROM service_plan_settings WHERE id = 1').get();
+    check('admin sets billing frequency + enables plans',
+      res.status === 302 && settings.billing_frequency === 'biweekly' && settings.plans_enabled === 1,
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/plans/plus?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['name', 'Plus'], ['weekly_price', '550'], ['description', 'Updated desc'],
+      ['features', 'A\nB'], ['active', '1'],
+    ]});
+    const plusPlan = db.prepare('SELECT * FROM service_plans WHERE id = ?').get('plus');
+    check('admin updates plan price/config',
+      res.status === 302 && plusPlan.weekly_price_cents === 55000 && plusPlan.description === 'Updated desc',
+      `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/plan`, {});
+    planHtml = await res.text();
+    check('updated price + biweekly billing shown to driver',
+      planHtml.includes('$550/week') && planHtml.includes('billed biweekly'), 'updated ok');
+
+    // Driver requests a plan (pending; no activation).
+    const planMailBefore = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'plan-request'").get().n;
+    res = await req(`${BASE}/d/${pdDrv.access_token}/plan/request`, { method: 'POST', form: [['plan_id', 'plus']] });
+    const pending = db.prepare('SELECT * FROM driver_plan_changes WHERE driver_id = ? ORDER BY id DESC LIMIT 1').get(pdDrv.id);
+    check('driver plan request recorded as pending',
+      res.status === 302 && pending && pending.event === 'requested' && pending.to_plan_id === 'plus',
+      `status=${res.status}`);
+    const planMail = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'plan-request'").get().n;
+    check('plan request notifies operations', planMail === planMailBefore + 1, `count=${planMail}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/plan/request`, { method: 'POST', form: [['plan_id', 'pro']] });
+    check('duplicate plan request rejected (400)', res.status === 400, `status=${res.status}`);
+    res = await req(`${BASE}/admin/plans?token=${ADMIN_TOKEN}`, {});
+    const admPlansHtml = await res.text();
+    check('admin sees pending request', admPlansHtml.includes('plus') && admPlansHtml.includes('Route Driver'), 'pending shown');
+
+    // Admin approves: current plan set, history append-only.
+    res = await req(`${BASE}/admin/plans/requests/${pdDrv.id}/approve?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['note', 'Terms accepted']] });
+    const planHist = db.prepare('SELECT * FROM driver_plan_changes WHERE driver_id = ? ORDER BY id').all(pdDrv.id);
+    check('approval appends event (history intact)',
+      res.status === 302 && planHist.length === 2 && planHist[0].event === 'requested' && planHist[1].event === 'approved' &&
+      planHist[1].note === 'Terms accepted',
+      `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/plan`, {});
+    check('driver sees current plan after approval', (await res.text()).includes('Your current plan'), 'current shown');
+    res = await req(`${BASE}/d/${pdDrv.access_token}/plan/request`, { method: 'POST', form: [['plan_id', 'plus']] });
+    check('requesting current plan rejected (400)', res.status === 400, `status=${res.status}`);
+
+    // Second driver: reject flow.
+    const pd2DrvId = db.prepare('SELECT id FROM drivers WHERE email = ?').get(pd2Email).id;
+    res = await req(`${BASE}/d/${pd2Token}/plan/request`, { method: 'POST', form: [['plan_id', 'pro']] });
+    check('second driver requests plan', res.status === 302, `status=${res.status}`);
+    res = await req(`${BASE}/admin/plans/requests/${pd2DrvId}/reject?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['note', 'Not eligible yet']] });
+    const hist2 = db.prepare('SELECT event FROM driver_plan_changes WHERE driver_id = ? ORDER BY id').all(pd2DrvId).map((r) => r.event);
+    check('rejection appends event', res.status === 302 && hist2.join(',') === 'requested,rejected', `events=${hist2}`);
+
+    // Restore defaults for future runs.
+    await req(`${BASE}/admin/plans/settings?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['billing_frequency', 'weekly']] });
+    await req(`${BASE}/admin/plans/plus?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['name', 'Plus'], ['weekly_price', '500'], ['description', 'Extra support for busier weeks.'],
+      ['features', 'Everything in Essential\nPriority dispatch queue'], ['active', '1'],
+    ]});
 
   } finally {
     try { if (db) db.close(); } catch {}
