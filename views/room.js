@@ -440,6 +440,16 @@ ${notice ? `<div class="notice">${esc(notice)}</div>` : ''}
     : '<a class="btn btn-gold" href="/room/checkin">Complete This Week\'s Check-In &rarr;</a>'}</p>
 </div>
 ${reviewCta}
+<div class="card">
+  <h2 style="margin-top:0">Daily text nudges</h2>
+  <p class="muted">Get the daily accountability nudge by text as well as email. Standard message rates may apply. You can unsubscribe anytime.</p>
+  ${member && member.phone ? `<p>Current number: <strong>${esc(String(member.phone))}</strong></p>` : '<p class="muted">No mobile number on file yet.</p>'}
+  <form method="POST" action="/room/phone">
+    <label for="phone">Mobile number</label>
+    <input id="phone" name="phone" type="tel" inputmode="tel" autocomplete="tel" placeholder="4145551234" value="${member && member.phone ? esc(String(member.phone)) : ''}" maxlength="20">
+    <p><button class="btn btn-gold" type="submit">Save Number</button></p>
+  </form>
+</div>
 <p class="muted">Missed a week? That's fine — it happens to everyone. No punishment, no shame. Just pick up with the current week and keep moving. Consistency beats perfection.</p>
 <p class="mantra">PROGRESS, NOT PERFECTION.</p>`,
   });
