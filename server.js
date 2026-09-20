@@ -935,6 +935,8 @@ const claimPostHandler = ah(async (req, res) => {
   if (password.length < 8) return fail('Please choose a password of at least 8 characters.');
   if (password !== password2) return fail('The two passwords do not match.');
   await room.setMemberPassword(email, password);
+  // Optional SMS opt-in: a bad phone number is ignored, never fails the claim.
+  await room.setMemberPhone(email, req.body.phone);
   const leadRow = await db.get('SELECT id FROM leads WHERE email = ?', [email]);
   await db.recordEvent({
     lead_id: leadRow ? leadRow.id : null,
@@ -1262,6 +1264,12 @@ app.post('/unsubscribe', ah(async (req, res) => {
     <p>${emailAddr ? `We&rsquo;ve removed <strong>${esc(emailAddr)}</strong> from` : `If that address was on`} our marketing list. You won&rsquo;t receive further marketing emails from ${esc(site.businessName)}.</p>
     <p><a href="/">Back to the homepage</a></p>
   </section>`;
+  if (emailAddr && !(await db.get('SELECT 1 FROM suppressions WHERE email = ?', [emailAddr]))) {
+    // Room members often have no lead row, so the lead-only unsubscribe above
+    // would not stop their member emails. Suppress by email so room-reminder
+    // and room-daily-nudge emails stop too. Idempotent: one row per email.
+    await db.run('INSERT INTO suppressions (email, reason, ts) VALUES (?, ?, ?)', [emailAddr, 'unsubscribed', Date.now()]);
+  }
   page(res, 'Unsubscribed', body, site);
 }));
 
