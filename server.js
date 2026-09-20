@@ -1463,6 +1463,27 @@ app.post('/admin/routes/:id/packages', adminAuth, ah(async (req, res) => {
   res.redirect(`/admin/routes/${route.id}`);
 }));
 
+// --- Phase E: phone-camera scanning (manual fallback always available) --------
+app.get('/d/:token/scan', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  page(res, 'Scan a package', driverViews.scanPage({ driver: req.driver }), site);
+}));
+
+app.post('/d/:token/scan', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const code = String(req.body.code || '').trim().toUpperCase();
+  if (!code) {
+    return page(res, 'Scan a package', driverViews.scanResultPage({ driver, pkg: null, error: 'Enter a package ID or scan a barcode.' }), site);
+  }
+  const pkg = await drivers.getPackage(code);
+  // Scope to the driver's own packages; never reveal another driver's data.
+  if (!pkg || Number(pkg.driver_id) !== Number(driver.id)) {
+    return page(res, 'Scan a package', driverViews.scanResultPage({ driver, pkg: null, error: `No package ${code} found among your assigned packages.` }), site);
+  }
+  page(res, 'Package found', driverViews.scanResultPage({ driver, pkg, error: null }), site);
+}));
+
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------
 app.get('/unsubscribe', (req, res) => {
   const site = config.getSite();

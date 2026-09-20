@@ -252,4 +252,88 @@ ${list.map((p) => `<div class="card">
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, selectField, textField, checkboxGroup };
+// --- Phase E: phone-camera scanning with manual fallback -------------------------
+function scanPage({ driver }) {
+  return `
+<section>
+  <h1>Scan a package</h1>
+  <p class="subhead">Point your camera at the package barcode or QR code.</p>
+  <div id="reader" class="card"></div>
+  <p id="scan-error" class="form-error" style="display:none"></p>
+  <div class="card">
+    <h3>Or enter the package ID manually</h3>
+    <form method="POST" action="/d/${esc(driver.access_token)}/scan" class="form">
+      <label>Package ID
+        <input type="text" name="code" placeholder="TN-2026-000001" autocomplete="off" autocapitalize="characters">
+      </label>
+      <button type="submit" class="btn btn-large big-btn">LOOK UP PACKAGE</button>
+    </form>
+  </div>
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>
+<script src="/vendor/html5-qrcode.min.js"></script>
+<script>
+(function () {
+  var errBox = document.getElementById('scan-error');
+  function manualOnly(msg) {
+    document.getElementById('reader').innerHTML =
+      '<p><strong>Camera scanning is not available on this device or browser.</strong></p><p>Use the manual package-ID entry below — it works the same.</p>';
+    if (msg && errBox) { errBox.style.display = 'block'; errBox.textContent = msg; }
+  }
+  function submitCode(code) {
+    var f = document.createElement('form');
+    f.method = 'POST';
+    f.action = ${JSON.stringify('/d/' + driver.access_token + '/scan')};
+    var i = document.createElement('input');
+    i.type = 'hidden'; i.name = 'code'; i.value = code;
+    f.appendChild(i);
+    document.body.appendChild(f);
+    f.submit();
+  }
+  try {
+    if (typeof Html5QrcodeScanner === 'undefined') { manualOnly(); return; }
+    var scanner = new Html5QrcodeScanner('reader', { fps: 10, qrbox: { width: 250, height: 250 } }, false);
+    var done = false;
+    scanner.render(function (decodedText) {
+      if (done) return;
+      done = true;
+      scanner.clear().catch(function () {});
+      submitCode(decodedText);
+    }, function () { /* per-frame scan errors are normal; ignore */ });
+  } catch (e) {
+    manualOnly('Camera error: ' + (e && e.message ? e.message : e));
+  }
+  // If the camera permission is denied after render starts, html5-qrcode shows
+  // its own permission UI; the manual form below always remains available.
+})();
+</script>`;
+}
+
+function scanResultPage({ driver, pkg, error }) {
+  if (error || !pkg) {
+    return `
+<section>
+  <h1>No package found</h1>
+  <div class="card scan-result scan-err"><p>${esc(error || 'We could not find that package ID among your assigned packages.')}</p></div>
+  <p><a class="btn btn-large big-btn" href="/d/${esc(driver.access_token)}/scan">SCAN AGAIN</a></p>
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+  }
+  return `
+<section>
+  <h1>Package found</h1>
+  <div class="card scan-result scan-ok">
+    <p>${esc(pkg.package_id)}</p>
+  </div>
+  <div class="card">
+    <p><strong>${esc(pkg.recipient_name)}</strong><br>
+    ${esc([pkg.address, pkg.city, pkg.state, pkg.zip].filter(Boolean).join(', '))}</p>
+    <p>Status: <strong>${esc(drivers.PACKAGE_STATUS_LABELS[pkg.status] || pkg.status)}</strong></p>
+    ${pkg.special_instructions ? `<p class="muted">Note: ${esc(pkg.special_instructions)}</p>` : ''}
+  </div>
+  <p><a class="btn btn-large big-btn" href="/d/${esc(driver.access_token)}/scan">SCAN ANOTHER</a></p>
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, selectField, textField, checkboxGroup };

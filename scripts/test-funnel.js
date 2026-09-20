@@ -1503,6 +1503,30 @@ async function main() {
     check('driver cannot see another driver\'s packages',
       res.status === 200 && !otherPkgs.includes(pkg.package_id));
 
+    /* ---- Phase E: scanning ----------------------------------------- */
+    res = await req(`${BASE}/d/${pdDrv.access_token}/scan`, {});
+    const scanHtml = await res.text();
+    check('scan page loads camera scanner + manual fallback',
+      res.status === 200 && scanHtml.includes('/vendor/html5-qrcode.min.js') && scanHtml.includes('name="code"'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/scan`, { method: 'POST', form: [['code', pkg.package_id]] });
+    const foundHtml = await res.text();
+    check('scan lookup finds own package',
+      res.status === 200 && foundHtml.includes('Package found') && foundHtml.includes('Acme Corp'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/scan`, { method: 'POST', form: [['code', '  ' + pkg.package_id.toLowerCase() + '  ']] });
+    check('scan lookup is case/whitespace tolerant',
+      res.status === 200 && (await res.text()).includes('Package found'), `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/scan`, { method: 'POST', form: [['code', 'TN-2026-999999']] });
+    check('scan lookup of unknown id shows not-found',
+      res.status === 200 && (await res.text()).includes('No package found'), `status=${res.status}`);
+    // Another driver's package must not resolve.
+    res = await req(`${BASE}/d/${pd2Token}/scan`, { method: 'POST', form: [['code', pkg.package_id]] });
+    check('scan lookup never reveals another driver\'s package',
+      res.status === 200 && (await res.text()).includes('No package found'), `status=${res.status}`);
+    res = await req(`${BASE}/vendor/html5-qrcode.min.js`, {});
+    check('vendored scanner library is served', res.status === 200, `status=${res.status}`);
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);
