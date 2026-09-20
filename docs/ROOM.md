@@ -112,6 +112,17 @@ the classroom:
     check-in. Never to canceled/inactive/suppressed members.
   - Confirmation — subject `Progress documented ✓` — immediately after
     each check-in submission.
+  - Daily nudge — subject `Your Daily Wealth Builder Nudge` — one per
+    active, claimed member per America/Chicago calendar day. 30 rotating
+    nudges (day-of-year % 30, same nudge for everyone each day); members
+    who already checked in that week get a warm momentum variant, everyone
+    else a gentle action prompt. Never shames or punishes. Members with a
+    phone on record (optional opt-in on the claim form, or copied from a
+    pre-existing lead) also get a plain-text SMS twin
+    (`room-daily-nudge-sms`, ≤ 300 chars) via `lib/sms.js`, which is a
+    no-delivery stub until the owner configures a real SMS provider.
+    Unsubscribing (`/unsubscribe`) writes to `suppressions`, which stops
+    room-reminder, daily-nudge email, AND daily-nudge SMS.
 - **Admin → Room → Accountability:** per-member current week, goal,
   check-ins completed, checked-in-this-week, streak, last check-in, proof
   status, latest accomplishment/lesson/next commitment, review status —
