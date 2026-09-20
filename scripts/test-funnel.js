@@ -1683,6 +1683,76 @@ async function main() {
     res = await req(`${BASE}/d/${pd2Token}/packages/${pkg.package_id}/exception`, {});
     check('driver cannot open exception form for another driver\'s package (404)', res.status === 404, `status=${res.status}`);
 
+    /* ---- Phase I: support tickets + urgent alerts ---------------------- */
+    res = await req(`${BASE}/d/${pdDrv.access_token}/support`, {});
+    const supHtml = await res.text();
+    check('driver support page renders with new-request form',
+      res.status === 200 && supHtml.includes('New request') && supHtml.includes('name="category"'),
+      `status=${res.status}`);
+    check('support page is honest about urgent response (no 24/7 promise)',
+      supHtml.includes('We do not promise an immediate human response') && supHtml.includes('call 911'));
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/support`, { method: 'POST', form: [
+      ['category', 'route_issue'], ['subject', 'Gate code needed'], ['description', 'Need the gate code for stop 3'],
+    ]});
+    const ticket = db.prepare('SELECT * FROM support_tickets WHERE driver_id = ? ORDER BY id DESC LIMIT 1').get(pdDrv.id);
+    check('driver creates support ticket with TN-SUP id',
+      res.status === 302 && ticket && /^TN-SUP-\d{6}$/.test(ticket.ticket_id) &&
+      ticket.priority === 'normal' && ticket.status === 'open',
+      ticket ? `id=${ticket.ticket_id}` : 'no ticket');
+    const tNewMail = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'ticket-new' AND subject LIKE ?").get(`%${ticket.ticket_id}%`).n;
+    check('new ticket notifies operations', tNewMail === 1, `count=${tNewMail}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/support`, { method: 'POST', form: [
+      ['category', 'safety_concern'], ['subject', 'Unsafe drop location'], ['description', 'Dark alley, no lighting'],
+      ['priority', 'urgent'],
+    ]});
+    const urgentTicket = db.prepare('SELECT * FROM support_tickets WHERE driver_id = ? ORDER BY id DESC LIMIT 1').get(pdDrv.id);
+    check('urgent ticket flagged urgent',
+      res.status === 302 && urgentTicket.priority === 'urgent', `status=${res.status}`);
+    const urgMail = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'ticket-urgent' AND subject LIKE ?").get(`%${urgentTicket.ticket_id}%`).n;
+    check('urgent ticket triggers urgent ops alert', urgMail === 1, `count=${urgMail}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/support`, { method: 'POST', form: [
+      ['category', 'route_issue'], ['subject', ''], ['description', 'x'],
+    ]});
+    check('ticket validation rejects missing subject (400)', res.status === 400, `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/support/${ticket.ticket_id}`, {});
+    check('driver ticket detail shows message + reply form',
+      res.status === 200 && (await res.text()).includes('Gate code needed'), `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/support/${ticket.ticket_id}/reply`, { method: 'POST', form: [
+      ['message', 'Update: found the code on the door'],
+    ]});
+    const replies = db.prepare('SELECT * FROM ticket_replies WHERE ticket_id = ? ORDER BY id').all(ticket.ticket_id);
+    check('driver reply appended to ticket thread',
+      res.status === 302 && replies.length === 1 && replies[0].author_type === 'driver' &&
+      replies[0].message.includes('found the code'), `status=${res.status}`);
+    res = await req(`${BASE}/d/${pd2Token}/support/${ticket.ticket_id}`, {});
+    check('driver cannot view another driver\'s ticket (404)', res.status === 404, `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/tickets`, {});
+    check('admin tickets require token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/tickets?token=${ADMIN_TOKEN}`, {});
+    const admTicketsHtml = await res.text();
+    check('admin tickets list shows tickets, urgent first',
+      res.status === 200 && admTicketsHtml.includes(urgentTicket.ticket_id) &&
+      admTicketsHtml.indexOf(urgentTicket.ticket_id) < admTicketsHtml.indexOf(ticket.ticket_id),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/tickets/${urgentTicket.ticket_id}?token=${ADMIN_TOKEN}`, {});
+    check('admin ticket detail renders', res.status === 200 && (await res.text()).includes('Unsafe drop location'), `status=${res.status}`);
+    res = await req(`${BASE}/admin/tickets/${urgentTicket.ticket_id}/reply?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['message', 'Ops here — we are looking into a safer stop.'],
+    ]});
+    const tAfterReply = db.prepare('SELECT status FROM support_tickets WHERE ticket_id = ?').get(urgentTicket.ticket_id);
+    check('admin reply moves ticket to in_progress',
+      res.status === 302 && tAfterReply.status === 'in_progress', `status=${res.status}`);
+    res = await req(`${BASE}/admin/tickets/${urgentTicket.ticket_id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['status', 'resolved']] });
+    const tAfterStatus = db.prepare('SELECT status FROM support_tickets WHERE ticket_id = ?').get(urgentTicket.ticket_id);
+    check('admin resolves ticket', res.status === 302 && tAfterStatus.status === 'resolved', `status=${res.status}`);
+    res = await req(`${BASE}/admin/tickets/${urgentTicket.ticket_id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['status', 'bogus']] });
+    check('admin rejects invalid ticket status (400)', res.status === 400, `status=${res.status}`);
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

@@ -432,4 +432,82 @@ function exceptionFormPage({ driver, pkg, error }) {
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, selectField, textField, checkboxGroup };
+// --- Phase I: support tickets -----------------------------------------------------
+function supportPage({ driver, tickets, error }) {
+  const catOpts = drivers.TICKET_CATEGORIES.map(
+    (c) => `<option value="${c}">${esc(drivers.TICKET_CATEGORY_LABELS[c])}</option>`
+  ).join('');
+  const rows = (tickets || [])
+    .map(
+      (t) => `<a class="card" href="/d/${esc(driver.access_token)}/support/${esc(t.ticket_id)}">
+        <h3>${esc(t.ticket_id)} — ${esc(t.subject)}</h3>
+        <p>${esc(drivers.TICKET_CATEGORY_LABELS[t.category] || t.category)} ·
+        ${t.priority === 'urgent' ? '<strong>URGENT</strong> · ' : ''}${esc(drivers.TICKET_STATUS_LABELS[t.status] || t.status)}</p>
+      </a>`
+    )
+    .join('');
+  return `
+<section>
+  <h1>Support</h1>
+  <p class="subhead">Questions about your route, packages, or account — send them here.</p>
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  <div class="card">
+    <h2>New request</h2>
+    <form method="POST" action="/d/${esc(driver.access_token)}/support" class="form">
+      <label>Category *
+        <select name="category" required>${catOpts}</select>
+      </label>
+      <label>Subject *
+        <input type="text" name="subject" required placeholder="e.g. Wrong address on package">
+      </label>
+      <label>Describe what you need *
+        <textarea name="description" rows="4" required placeholder="Give us the details…"></textarea>
+      </label>
+      <label class="checkbox"><input type="checkbox" name="priority" value="urgent">
+        <strong>This is urgent</strong> — I need operations attention as soon as possible.</label>
+      <p class="microcopy">Urgent requests go straight to TransitNow operations and can be submitted any time.
+      We do not promise an immediate human response at all hours. If this is an emergency, call 911 first.</p>
+      <button type="submit" class="btn btn-large big-btn">SUBMIT REQUEST</button>
+    </form>
+  </div>
+  <h2>Your requests (${(tickets || []).length})</h2>
+  ${rows || '<div class="card"><p>No requests yet.</p></div>'}
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
+function ticketDetailPage({ driver, ticket, replies, error }) {
+  const thread = (replies || [])
+    .map(
+      (r) => `<div class="card"><p><strong>${r.author_type === 'admin' ? 'TransitNow Operations' : 'You'}</strong>
+        <span class="ts">${new Date(Number(r.created_at)).toLocaleString()}</span></p>
+        <p>${esc(r.message)}</p></div>`
+    )
+    .join('');
+  return `
+<section>
+  <h1>${esc(ticket.ticket_id)}</h1>
+  <p class="subhead">${esc(ticket.subject)}</p>
+  <div class="card">
+    <p><strong>${esc(drivers.TICKET_CATEGORY_LABELS[ticket.category] || ticket.category)}</strong> ·
+    ${ticket.priority === 'urgent' ? '<strong>URGENT</strong> · ' : ''}${esc(drivers.TICKET_STATUS_LABELS[ticket.status] || ticket.status)}</p>
+    <p>${esc(ticket.message)}</p>
+  </div>
+  <h2>Conversation</h2>
+  ${thread || '<div class="card"><p>No replies yet.</p></div>'}
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  ${['resolved', 'closed'].includes(ticket.status) ? '<p class="microcopy">This request is ' + esc(ticket.status) + '.</p>' : `
+  <div class="card">
+    <h3>Add a reply</h3>
+    <form method="POST" action="/d/${esc(driver.access_token)}/support/${esc(ticket.ticket_id)}/reply" class="form">
+      <label>Your reply
+        <textarea name="message" rows="3" required></textarea>
+      </label>
+      <button type="submit" class="btn">Send reply</button>
+    </form>
+  </div>`}
+  <p><a href="/d/${esc(driver.access_token)}/support">&larr; Back to support</a></p>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, selectField, textField, checkboxGroup };

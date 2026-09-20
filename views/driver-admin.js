@@ -279,7 +279,78 @@ module.exports = {
   packageStatusBadge,
   adminPackageHtml,
   exceptionsListHtml,
+  ticketsListHtml,
+  adminTicketHtml,
 };
+
+// --- Support tickets (Phase I: admin triage) --------------------------------------
+function ticketsListHtml({ list, statusFilter, driversById }) {
+  const statuses = ['open', 'in_progress', 'waiting_driver', 'resolved', 'closed'];
+  const tabs = statuses.map((s) => {
+    const active = statusFilter === s ? ' class="active"' : '';
+    return `<a${active} href="/admin/tickets?status=${s}">${esc(drivers.TICKET_STATUS_LABELS[s])}</a>`;
+  }).join('');
+  const allActive = !statusFilter ? ' class="active"' : '';
+  const rows = list
+    .map((t) => {
+      const d = driversById[t.driver_id];
+      return `<tr${t.priority === 'urgent' && t.status === 'open' ? ' style="background:#fff3cd"' : ''}>
+        <td><a href="/admin/tickets/${esc(t.ticket_id)}"><strong>${esc(t.ticket_id)}</strong></a><br><span class="muted">${esc(t.subject)}</span></td>
+        <td>${d ? `<a href="/admin/drivers/${d.id}">${esc(d.full_name)}</a>` : '—'}</td>
+        <td>${esc(drivers.TICKET_CATEGORY_LABELS[t.category] || t.category)}</td>
+        <td>${t.priority === 'urgent' ? '<strong>URGENT</strong>' : esc(drivers.TICKET_PRIORITY_LABELS[t.priority] || t.priority)}</td>
+        <td>${esc(drivers.TICKET_STATUS_LABELS[t.status] || t.status)}</td>
+        <td>${fmtTs(t.created_at)}</td>
+      </tr>`;
+    })
+    .join('');
+  return `
+<h2>Support tickets</h2>
+<div class="pipeline-nav"><a${allActive} href="/admin/tickets">All</a>${tabs}</div>
+<table class="admin-table">
+<thead><tr><th>Ticket</th><th>Driver</th><th>Category</th><th>Priority</th><th>Status</th><th>Created</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="6">No tickets.</td></tr>'}</tbody>
+</table>`;
+}
+
+function adminTicketHtml({ ticket, driver, replies }) {
+  const statusOpts = drivers.TICKET_STATUSES.map(
+    (s) => `<option value="${s}"${ticket.status === s ? ' selected' : ''}>${esc(drivers.TICKET_STATUS_LABELS[s])}</option>`
+  ).join('');
+  const thread = (replies || [])
+    .map(
+      (r) => `<div class="card"><p><strong>${r.author_type === 'admin' ? 'Operations' : 'Driver'}</strong>
+        <span class="ts">${fmtTs(r.created_at)}</span></p><p>${esc(r.message)}</p></div>`
+    )
+    .join('');
+  return `
+<p><a href="/admin/tickets">&larr; Back to tickets</a></p>
+<h2>${esc(ticket.ticket_id)} ${ticket.priority === 'urgent' ? '<strong>URGENT</strong>' : ''}</h2>
+<div class="card">
+  <p><strong>${esc(ticket.subject)}</strong></p>
+  <p>${esc(drivers.TICKET_CATEGORY_LABELS[ticket.category] || ticket.category)} ·
+  ${esc(drivers.TICKET_STATUS_LABELS[ticket.status] || ticket.status)}</p>
+  <p>${esc(ticket.message)}</p>
+  <p class="muted">Driver: ${driver ? `<a href="/admin/drivers/${driver.id}">${esc(driver.full_name)}</a> (${esc(driver.email)})` : '—'} ·
+  Opened ${fmtTs(ticket.created_at)}</p>
+</div>
+<h3>Conversation</h3>
+${thread || '<div class="card"><p>No replies yet.</p></div>'}
+<div class="card">
+  <h3>Reply</h3>
+  <form method="POST" action="/admin/tickets/${esc(ticket.ticket_id)}/reply" class="form">
+    <label>Message <textarea name="message" rows="3" required></textarea></label>
+    <button type="submit" class="btn">Send reply</button>
+  </form>
+</div>
+<div class="card">
+  <h3>Change status</h3>
+  <form method="POST" action="/admin/tickets/${esc(ticket.ticket_id)}/status" class="form">
+    <label>Status <select name="status">${statusOpts}</select></label>
+    <button type="submit" class="btn">Update</button>
+  </form>
+</div>`;
+}
 
 // --- Exceptions (Phase H: admin flagging + resolution) ------------------------------
 function exceptionStatusBadge(status) {

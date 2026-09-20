@@ -1508,6 +1508,44 @@ app.get('/admin/exceptions/:id/photo', adminAuth, ah(async (req, res) => {
   res.send(photo.photo_blob);
 }));
 
+// --- Phase I: admin support ticket triage ---------------------------------------
+app.get('/admin/tickets', adminAuth, ah(async (req, res) => {
+  const statusFilter = drivers.TICKET_STATUSES.includes(req.query.status) ? req.query.status : null;
+  const list = await drivers.listTickets({ status: statusFilter });
+  const ids = [...new Set(list.map((t) => t.driver_id).filter(Boolean))];
+  const driversById = {};
+  for (const id of ids) driversById[id] = await drivers.getDriverById(id);
+  res.send(adminViews.adminLayout('Support tickets', driverAdminViews.ticketsListHtml({ list, statusFilter, driversById })));
+}));
+
+app.get('/admin/tickets/:ticketId', adminAuth, ah(async (req, res) => {
+  const ticket = await drivers.getTicket(req.params.ticketId);
+  if (!ticket) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Ticket not found.</p>'));
+  const [driver, replies] = await Promise.all([
+    ticket.driver_id ? drivers.getDriverById(ticket.driver_id) : null,
+    drivers.getTicketReplies(ticket.ticket_id),
+  ]);
+  res.send(adminViews.adminLayout('Ticket ' + ticket.ticket_id, driverAdminViews.adminTicketHtml({ ticket, driver, replies })));
+}));
+
+app.post('/admin/tickets/:ticketId/reply', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.addTicketReply({ ticketId: req.params.ticketId, authorType: 'admin', authorId: null, message: req.body.message });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect(`/admin/tickets/${encodeURIComponent(req.params.ticketId)}`);
+}));
+
+app.post('/admin/tickets/:ticketId/status', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.setTicketStatus(req.params.ticketId, req.body.status);
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect(`/admin/tickets/${encodeURIComponent(req.params.ticketId)}`);
+}));
+
 // --- Phase E: phone-camera scanning (manual fallback always available) --------
 app.get('/d/:token/scan', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
@@ -1631,6 +1669,62 @@ app.get('/d/:token/exceptions/:id/photo', requireDriver, ah(async (req, res) => 
   if (!photo || !photo.photo_blob) return res.status(404).send('No photo attached.');
   res.type(photo.photo_mime || 'application/octet-stream');
   res.send(photo.photo_blob);
+}));
+
+// --- Phase I: driver support tickets (urgent alerts routed to operations) -------
+function requireDriverTicket(req, res, next) {
+  drivers.getTicket(req.params.ticketId).then((t) => {
+    if (!t || Number(t.driver_id) !== Number(req.driver.id)) {
+      res.status(404);
+      return page(res, 'Not found', '<section><h1>Request not found</h1></section>', config.getSite());
+    }
+    req.ticket = t;
+    next();
+  }).catch(next);
+}
+
+app.get('/d/:token/support', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const tickets = await drivers.listTickets({ driverId: req.driver.id });
+  page(res, 'Support', driverViews.supportPage({ driver: req.driver, tickets, error: null }), site);
+}));
+
+app.post('/d/:token/support', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  try {
+    const ticket = await drivers.createTicket({
+      driverId: driver.id,
+      category: req.body.category,
+      priority: req.body.priority === 'urgent' ? 'urgent' : 'normal',
+      subject: req.body.subject,
+      message: req.body.description,
+      createdBy: 'driver',
+    });
+    res.redirect(`/d/${driver.access_token}/support/${encodeURIComponent(ticket.ticket_id)}`);
+  } catch (err) {
+    res.status(400);
+    const tickets = await drivers.listTickets({ driverId: driver.id });
+    return page(res, 'Support', driverViews.supportPage({ driver, tickets, error: err.message }), site);
+  }
+}));
+
+app.get('/d/:token/support/:ticketId', requireDriver, requireDriverTicket, ah(async (req, res) => {
+  const site = config.getSite();
+  const replies = await drivers.getTicketReplies(req.ticket.ticket_id);
+  page(res, req.ticket.ticket_id, driverViews.ticketDetailPage({ driver: req.driver, ticket: req.ticket, replies, error: null }), site);
+}));
+
+app.post('/d/:token/support/:ticketId/reply', requireDriver, requireDriverTicket, ah(async (req, res) => {
+  const site = config.getSite();
+  try {
+    await drivers.addTicketReply({ ticketId: req.ticket.ticket_id, authorType: 'driver', authorId: req.driver.id, message: req.body.message });
+  } catch (err) {
+    res.status(400);
+    const replies = await drivers.getTicketReplies(req.ticket.ticket_id);
+    return page(res, req.ticket.ticket_id, driverViews.ticketDetailPage({ driver: req.driver, ticket: req.ticket, replies, error: err.message }), site);
+  }
+  res.redirect(`/d/${req.driver.access_token}/support/${encodeURIComponent(req.ticket.ticket_id)}`);
 }));
 
 // --- Phase G: polling-based route progress (JSON; no real-time claims) ---------
