@@ -215,16 +215,39 @@ function driverRoutePage({ site, driver, route, packages }) {
 <section>
   <h1>My route</h1>
   <p class="subhead">${esc(route.route_code)} · ${esc(route.title || '')}</p>
-  <div class="card highlight-card">
+  <div class="card highlight-card" id="route-progress" data-progress-url="/d/${esc(driver.access_token)}/route/progress">
     <p><strong>Status:</strong> ${esc(drivers.ROUTE_STATUS_LABELS[route.status] || route.status)}<br>
-    <strong>Scheduled:</strong> ${esc(route.scheduled_date || '—')}<br>
-    <strong>Packages:</strong> ${packages.length}</p>
+    <strong>Scheduled:</strong> ${esc(route.scheduled_date || '—')}</p>
+    <p class="progress-line"><strong><span id="pg-done">0</span> of <span id="pg-total">${packages.length}</span> packages complete</strong></p>
+    <div class="bar-track"><div class="bar-fill" id="pg-bar" style="width:0%"></div></div>
+    <p class="microcopy">Counts refresh about every 30 seconds.</p>
   </div>
   <h2>Packages (${packages.length})</h2>
   ${pkgRows || '<div class="card"><p>No packages on this route yet.</p></div>'}
   <p><a class="btn btn-large" href="/d/${esc(driver.access_token)}/scan">SCAN A PACKAGE &rarr;</a></p>
   <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
-</section>`;
+</section>
+<script>
+(function () {
+  var box = document.getElementById('route-progress');
+  if (!box) return;
+  var url = box.getAttribute('data-progress-url');
+  function tick() {
+    fetch(url, { credentials: 'same-origin' })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (p) {
+        if (!p) return;
+        document.getElementById('pg-done').textContent = p.done;
+        document.getElementById('pg-total').textContent = p.total;
+        var pct = p.total ? Math.round((p.done / p.total) * 100) : 0;
+        document.getElementById('pg-bar').style.width = pct + '%';
+      })
+      .catch(function () { /* polling is best-effort; next tick retries */ });
+  }
+  tick();
+  setInterval(tick, 30000);
+})();
+</script>`;
 }
 
 function driverPackagesPage({ site, driver, packages }) {

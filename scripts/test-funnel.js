@@ -1591,6 +1591,31 @@ async function main() {
     res = await req(`${BASE}/admin/packages/TN-2026-999999?token=${ADMIN_TOKEN}`, {});
     check('admin package page 404s for unknown id', res.status === 404, `status=${res.status}`);
 
+    /* ---- Phase G: route progress (polling) ----------------------------- */
+    res = await req(`${BASE}/d/${pdDrv.access_token}/route/progress`, {});
+    const pgProg = await res.json();
+    check('route progress endpoint returns polling JSON counts',
+      res.status === 200 && pgProg.route_code === route.route_code && pgProg.total === 1 &&
+      pgProg.done === 0 && pgProg.remaining === 1 && pgProg.counts.in_transit === 1 && pgProg.updated_at > 0,
+      `status=${res.status} body=${JSON.stringify(pgProg).slice(0, 120)}`);
+    res = await req(`${BASE}/d/${pd2Token}/route/progress`, {});
+    check('route progress 404s when driver has no route', res.status === 404, `status=${res.status}`);
+    res = await req(`${BASE}/d/not-a-real-token/route/progress`, {});
+    check('route progress rejects invalid token (404)', res.status === 404, `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/route`, {});
+    const routePageHtml = await res.text();
+    check('driver route page shows progress card with polling (no real-time claims)',
+      res.status === 200 && routePageHtml.includes('id="route-progress"') &&
+      routePageHtml.includes('Counts refresh about every 30 seconds') &&
+      routePageHtml.includes('/route/progress') &&
+      !/real-?time/i.test(routePageHtml),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/routes/${route.id}?token=${ADMIN_TOKEN}`, {});
+    const adminRouteHtml = await res.text();
+    check('admin route detail shows progress bar with counts',
+      res.status === 200 && adminRouteHtml.includes('Route progress') &&
+      adminRouteHtml.includes('0 of 1 packages complete'), `status=${res.status}`);
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

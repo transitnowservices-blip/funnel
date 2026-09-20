@@ -208,7 +208,7 @@ function routeNewHtml({ list, preselectDriverId }) {
 </form>`;
 }
 
-function routeDetailHtml({ route, driver, packages, counts }) {
+function routeDetailHtml({ route, driver, packages, counts, progress }) {
   const statusOpts = drivers.ROUTE_STATUSES.map(
     (s) => `<option value="${s}"${route.status === s ? ' selected' : ''}>${esc(drivers.ROUTE_STATUS_LABELS[s])}</option>`
   ).join('');
@@ -224,10 +224,19 @@ function routeDetailHtml({ route, driver, packages, counts }) {
   const countLine = Object.entries(counts)
     .map(([s, c]) => `${drivers.PACKAGE_STATUS_LABELS[s] || s}: ${c}`)
     .join(' · ');
+  const pct = progress && progress.total ? Math.round((progress.done / progress.total) * 100) : 0;
+  const progressHtml = progress ? `
+<div class="card">
+  <h3>Route progress</h3>
+  <p><strong>${progress.done} of ${progress.total} packages complete</strong> (${progress.remaining} remaining)</p>
+  <div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div></div>
+  <p class="muted">${esc(countLine)}</p>
+</div>` : '';
   return `
 <p><a href="/admin/routes">&larr; Back to routes</a></p>
 <h2>${esc(route.route_code)} ${routeStatusBadge(route.status)}</h2>
 <p class="muted">${esc(route.title || '')} · Driver: ${driver ? `<a href="/admin/drivers/${driver.id}">${esc(driver.full_name)}</a>` : '—'} · Scheduled: ${esc(route.scheduled_date || '—')}</p>
+${progressHtml}
 
 <div class="card">
   <h3>Change route status</h3>

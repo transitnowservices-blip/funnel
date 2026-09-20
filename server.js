@@ -1426,12 +1426,13 @@ app.post('/admin/routes', adminAuth, ah(async (req, res) => {
 app.get('/admin/routes/:id', adminAuth, ah(async (req, res) => {
   const route = await drivers.getRouteById(req.params.id);
   if (!route) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Route not found.</p>'));
-  const [driver, packages, counts] = await Promise.all([
+  const [driver, packages, counts, progress] = await Promise.all([
     route.driver_id ? drivers.getDriverById(route.driver_id) : null,
     drivers.listPackages({ routeId: route.id }),
     drivers.countPackagesByStatus(route.id),
+    drivers.getRouteProgress(route.id),
   ]);
-  res.send(adminViews.adminLayout('Route ' + route.route_code, driverAdminViews.routeDetailHtml({ route, driver, packages, counts })));
+  res.send(adminViews.adminLayout('Route ' + route.route_code, driverAdminViews.routeDetailHtml({ route, driver, packages, counts, progress })));
 }));
 
 app.post('/admin/routes/:id/status', adminAuth, ah(async (req, res) => {
@@ -1531,6 +1532,13 @@ app.post('/d/:token/packages/:packageId/event', requireDriver, ah(async (req, re
     return page(res, pkg.package_id, `<section><div class="form-error" role="alert">${err.message}</div></section>` + driverViews.driverPackagePage({ driver, pkg, events }), site);
   }
   res.redirect(`/d/${driver.access_token}/packages/${encodeURIComponent(pkg.package_id)}`);
+}));
+
+// --- Phase G: polling-based route progress (JSON; no real-time claims) ---------
+app.get('/d/:token/route/progress', requireDriver, ah(async (req, res) => {
+  const route = await drivers.getCurrentRoute(req.driver.id);
+  if (!route) return res.status(404).json({ error: 'no_route' });
+  res.json(await drivers.getRouteProgress(route.id));
 }));
 
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------
