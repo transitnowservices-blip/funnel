@@ -31,6 +31,8 @@ const config = require('./lib/config');
 const tags = require('./lib/tags');
 const tracking = require('./lib/tracking');
 const automation = require('./lib/automation');
+const room = require('./lib/room');
+const roomViews = require('./views/room');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -438,6 +440,18 @@ app.post('/checkout/complete-demo', ah(async (req, res) => {
   res.redirect(await recordPurchase(lead.id, productId, 'demo'));
 }));
 
+// --- Wealth Builder's Room checkout ---------------------------------------------------------
+// The Room is sold through Davena's own $49/month Stripe payment link
+// (no Skool, no demo flow). This route sends buyers straight to checkout.
+function roomCheckoutRedirect(req, res) {
+  const product = config.getProduct('room');
+  if (product && product.stripeLink) return res.redirect(302, product.stripeLink);
+  const site = config.getSite();
+  return page(res, 'Checkout', pages.checkoutPage(site, product, null, site.paymentMode), site);
+}
+app.get('/checkout/room', (req, res) => roomCheckoutRedirect(req, res));
+app.post('/checkout/room', (req, res) => roomCheckoutRedirect(req, res));
+
 // --- Order bump -----------------------------------------------------------------------
 async function orderBumpAccept(lead, product) {
   await recordAddonPurchase(lead.id, product, 'orderbump', await purchaseModeFor(lead.id, product.id));
@@ -533,6 +547,188 @@ app.get('/thank-you', ah(async (req, res) => {
   const site = config.getSite();
   const product = productFromReq(req);
   page(res, 'Thank you', pages.thankYouPage(site, product, await leadFromReq(req)), site);
+}));
+
+// --- The Wealth Builder's Room (membership community) ----------------------------------------
+// Member auth: email + password with an httpOnly session cookie (`room_sess`).
+async function roomMemberFromReq(req) {
+  const cookies = (req.cookies || tracking.getCookies(req));
+  return room.getSessionMember(cookies[room.SESSION_COOKIE]);
+}
+
+/** Guard: redirect unauthenticated visitors to the member login. */
+function requireRoomMember(handler) {
+  return ah(async (req, res, next) => {
+    const member = await roomMemberFromReq(req);
+    if (!member) return res.redirect('/room/login');
+    req.roomMember = member;
+    return handler(req, res, next);
+  });
+}
+
+function setRoomSession(res, token) {
+  tracking.setCookie(res, room.SESSION_COOKIE, token, { maxAge: room.SESSION_TTL_MS / 1000 });
+}
+
+function clearRoomSession(res) {
+  tracking.setCookie(res, room.SESSION_COOKIE, '', { maxAge: 0 });
+}
+
+// Login
+app.get('/room/login', (req, res) => {
+  res.send(roomViews.loginPage({ error: req.query.error ? 'Please log in to continue.' : null, email: '' }));
+});
+
+app.post('/room/login', ah(async (req, res) => {
+  const email = (req.body.email || '').trim().toLowerCase();
+  const password = req.body.password || '';
+  const member = await room.getMember(email);
+  if (!member || member.status !== 'active' || !member.password_hash) {
+    return res.send(roomViews.loginPage({
+      error: 'We could not find an active membership for that email. If you just paid, claim your access first.',
+      email,
+    }));
+  }
+  if (!room.verifyPassword(password, member.password_hash)) {
+    return res.send(roomViews.loginPage({ error: 'Incorrect password. Please try again.', email }));
+  }
+  setRoomSession(res, await room.createSession(email));
+  res.redirect('/room');
+}));
+
+// Claim access (first-time: member paid via Stripe, now sets a password)
+app.get('/room/claim', (req, res) => {
+  res.send(roomViews.claimPage({}));
+});
+
+app.post('/room/claim', ah(async (req, res) => {
+  const email = (req.body.email || '').trim().toLowerCase();
+  const password = req.body.password || '';
+  const password2 = req.body.password2 || '';
+  const fail = (error) => res.send(roomViews.claimPage({ error, email }));
+  if (!EMAIL_RE.test(email)) return fail('Please enter a valid email address.');
+  const member = await room.getMember(email);
+  if (!member || member.status !== 'active') {
+    return fail('We could not find a paid membership for that email yet. Make sure you use the email you paid with — and that your Stripe payment finished.');
+  }
+  if (member.password_hash) {
+    return fail('This email already claimed access. Please log in instead.');
+  }
+  if (password.length < 8) return fail('Please choose a password of at least 8 characters.');
+  if (password !== password2) return fail('The two passwords do not match.');
+  await room.setMemberPassword(email, password);
+  setRoomSession(res, await room.createSession(email));
+  res.redirect('/room');
+}));
+
+app.get('/room/logout', ah(async (req, res) => {
+  const cookies = req.cookies || tracking.getCookies(req);
+  await room.destroySession(cookies[room.SESSION_COOKIE]);
+  clearRoomSession(res);
+  res.redirect('/');
+}));
+
+// Dashboard
+app.get('/room', requireRoomMember(async (req, res) => {
+  const plan = room.getPlan();
+  const progress = await room.getProgress(req.roomMember.email);
+  const total = plan.weeks.reduce((n, w) => n + w.actions.length, 0);
+  const done = Object.values(progress).filter(Boolean).length;
+  const announcements = await db.all(
+    "SELECT * FROM room_posts WHERE kind = 'announcement' ORDER BY created_at DESC LIMIT 3"
+  );
+  res.send(roomViews.dashboardPage({
+    member: req.roomMember,
+    progress: { total, done, pct: total ? Math.round((done / total) * 100) : 0 },
+    announcements,
+  }));
+}));
+
+// Classroom
+app.get('/room/classroom', requireRoomMember(async (req, res) => {
+  res.send(roomViews.classroomIndexPage({ member: req.roomMember, pillars: room.getPillars() }));
+}));
+
+app.get('/room/classroom/:pillar', requireRoomMember(async (req, res) => {
+  const pillars = room.getPillars();
+  const idx = pillars.findIndex((p) => p.id === req.params.pillar);
+  if (idx < 0) return res.status(404).send(roomViews.roomLayout({ title: 'Not found', member: req.roomMember, body: '<h1>Lesson not found</h1><p><a href="/room/classroom">Back to the classroom</a></p>' }));
+  const pillar = room.getPillar(pillars[idx].id);
+  if (!pillar) return res.status(404).send(roomViews.roomLayout({ title: 'Not found', member: req.roomMember, body: '<h1>Lesson not found</h1><p><a href="/room/classroom">Back to the classroom</a></p>' }));
+  res.send(roomViews.pillarPage({
+    member: req.roomMember,
+    pillar,
+    index: idx,
+    prev: idx > 0 ? pillars[idx - 1] : null,
+    next: idx < pillars.length - 1 ? pillars[idx + 1] : null,
+  }));
+}));
+
+// 90-day plan
+app.get('/room/plan', requireRoomMember(async (req, res) => {
+  res.send(roomViews.planPage({
+    member: req.roomMember,
+    plan: room.getPlan(),
+    progress: await room.getProgress(req.roomMember.email),
+  }));
+}));
+
+app.post('/room/plan/toggle', requireRoomMember(async (req, res) => {
+  const checked = req.body.checked === '1' || req.body.checked === 'on';
+  await room.setProgress(req.roomMember.email, req.body.week, req.body.item, checked);
+  res.redirect('/room/plan');
+}));
+
+// Community
+app.get('/room/community', requireRoomMember(async (req, res) => {
+  res.send(roomViews.communityPage({
+    member: req.roomMember,
+    posts: await room.listPosts(50),
+    error: req.query.error || null,
+    notice: req.query.notice || null,
+  }));
+}));
+
+app.post('/room/community/post', requireRoomMember(async (req, res) => {
+  const member = req.roomMember;
+  try {
+    await room.createPost({
+      authorEmail: member.email,
+      authorName: member.name || member.email.split('@')[0],
+      kind: 'post',
+      title: req.body.title || '',
+      body: req.body.body || '',
+    });
+    res.redirect('/room/community?notice=' + encodeURIComponent('Posted!'));
+  } catch (err) {
+    res.redirect('/room/community?error=' + encodeURIComponent(err.message));
+  }
+}));
+
+app.get('/room/community/post/:id', requireRoomMember(async (req, res) => {
+  const post = await room.getPost(req.params.id);
+  if (!post) return res.redirect('/room/community');
+  res.send(roomViews.postPage({
+    member: req.roomMember,
+    post,
+    comments: await room.listComments(post.id),
+    error: req.query.error || null,
+  }));
+}));
+
+app.post('/room/community/post/:id/comment', requireRoomMember(async (req, res) => {
+  const member = req.roomMember;
+  try {
+    await room.createComment({
+      postId: req.params.id,
+      authorEmail: member.email,
+      authorName: member.name || member.email.split('@')[0],
+      body: req.body.body || '',
+    });
+  } catch (err) {
+    return res.redirect(`/room/community/post/${encodeURIComponent(req.params.id)}?error=` + encodeURIComponent(err.message));
+  }
+  res.redirect(`/room/community/post/${encodeURIComponent(req.params.id)}`);
 }));
 
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------
@@ -633,6 +829,44 @@ function verifyStripeSignature(rawBody, sigHeader, secret) {
  * match the charged amount (amount_total, in cents) against the configured
  * products' priceCents (Basic $50 = 5000, Complete $100 = 10000).
  */
+/**
+ * Provision a Wealth Builder's Room membership from a completed $49/month
+ * Stripe purchase. The member record is keyed by the Stripe customer email —
+ * no funnel lead row is required, because Room buyers may never have gone
+ * through the TransitNow lead flow. Idempotent: re-running for the same
+ * Stripe session records the purchase only once and never resets a password.
+ */
+async function handleRoomPurchase({ email, name, amountCents, mode, sessionId }) {
+  const clean = String(email || '').trim().toLowerCase();
+  if (!clean) return false;
+  await room.upsertMemberFromPurchase({ email: clean, name });
+  if (sessionId) {
+    const seen = await db.get(
+      "SELECT id FROM events WHERE type = 'ROOM_PURCHASED' AND meta LIKE ?",
+      [`%${String(sessionId).replace(/[%_]/g, '')}%`]
+    );
+    if (seen) {
+      console.log('[webhook:stripe] duplicate room purchase event ignored', { sessionId });
+      return true;
+    }
+  }
+  const lead = await db.get('SELECT * FROM leads WHERE email = ?', [clean]);
+  const cents = Number.isFinite(Number(amountCents)) ? Number(amountCents) : 4900;
+  await db.run(
+    `INSERT INTO purchases (lead_id, product_id, amount_cents, mode, kind, ts)
+     VALUES (?, 'room', ?, ?, 'initial', ?)`,
+    [lead ? lead.id : null, cents, mode, Date.now()]
+  );
+  await db.recordEvent({
+    lead_id: lead ? lead.id : null,
+    type: 'ROOM_PURCHASED',
+    product_id: 'room',
+    meta: { email: clean, amount_cents: cents, session_id: sessionId || null },
+  });
+  console.log('[webhook:stripe] room member provisioned', { email: clean, amountCents: cents });
+  return true;
+}
+
 async function handleStripeEvent(event) {
   if (!event || event.type !== 'checkout.session.completed') {
     console.log('[webhook:stripe] ignoring event type', event && event.type);
@@ -649,6 +883,15 @@ async function handleStripeEvent(event) {
   if (!product) {
     console.warn('[webhook:stripe] no configured product matches amount_total', amountCents);
     return false;
+  }
+  if (product.id === 'room') {
+    return handleRoomPurchase({
+      email,
+      name: (session.customer_details && session.customer_details.name) || '',
+      amountCents,
+      mode: 'stripe',
+      sessionId: session.id || null,
+    });
   }
   const lead = await db.get('SELECT * FROM leads WHERE email = ?', [email]);
   if (!lead) {
@@ -685,6 +928,12 @@ app.post('/webhooks/stripe', ah(async (req, res) => {
   const { email, productId, amountCents } = req.body || {};
   console.log('[webhook:stripe] unsigned payload received', { email, productId, amountCents });
   const cleanEmail = (email || '').trim().toLowerCase();
+  const roomProduct = productId && config.getProduct(productId).id === 'room' ? config.getProduct(productId) : null;
+  if (cleanEmail && roomProduct) {
+    // Room membership purchase (dev/test shape): provision the member.
+    await handleRoomPurchase({ email: cleanEmail, name: '', amountCents: amountCents || 4900, mode: 'stripe-webhook', sessionId: null });
+    return res.json({ ok: true, note: 'unsigned (no STRIPE_WEBHOOK_SECRET configured)' });
+  }
   const lead = cleanEmail ? await db.get('SELECT * FROM leads WHERE email = ?', [cleanEmail]) : null;
   if (lead && productId) {
     await recordPurchase(lead.id, productId, 'stripe-webhook', { amountCents });
@@ -924,6 +1173,47 @@ app.post('/admin/suppressions/remove', ah(async (req, res) => {
   const emailAddr = (req.body.email || '').trim().toLowerCase();
   if (emailAddr) await db.run('DELETE FROM suppressions WHERE email = ?', [emailAddr]);
   res.redirect('/admin/suppressions');
+}));
+
+// --- Wealth Builder's Room admin -------------------------------------------------------------
+// Members list, announcements, pin/delete posts (all behind the admin token).
+app.get('/admin/room', ah(async (req, res) => {
+  const members = await db.all(
+    'SELECT email, name, joined_at, last_login, password_hash, status FROM room_members ORDER BY joined_at DESC'
+  );
+  const posts = await room.listPosts(100);
+  res.send(adminViews.adminLayout("Wealth Builder's Room", roomViews.roomAdminPage({ members, posts })));
+}));
+
+app.post('/admin/room/announce', ah(async (req, res) => {
+  await room.createPost({
+    authorEmail: 'admin',
+    authorName: 'Davena',
+    kind: 'announcement',
+    title: (req.body.title || '').trim(),
+    body: (req.body.body || '').trim(),
+  });
+  res.redirect('/admin/room');
+}));
+
+app.post('/admin/room/pin', ah(async (req, res) => {
+  await room.setPinned(req.body.id, req.body.pinned === '1');
+  res.redirect('/admin/room');
+}));
+
+app.post('/admin/room/delete-post', ah(async (req, res) => {
+  await room.deletePost(req.body.id);
+  res.redirect('/admin/room');
+}));
+
+app.post('/admin/room/delete-comment', ah(async (req, res) => {
+  await room.deleteComment(req.body.id);
+  res.redirect('/admin/room');
+}));
+
+app.post('/admin/room/member-status', ah(async (req, res) => {
+  await room.setMemberStatus((req.body.email || '').trim().toLowerCase(), req.body.status);
+  res.redirect('/admin/room');
 }));
 
 app.get('/admin/config', (req, res) => {
