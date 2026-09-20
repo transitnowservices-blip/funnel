@@ -1916,6 +1916,44 @@ async function main() {
       ['features', 'Everything in Essential\nPriority dispatch queue'], ['active', '1'],
     ]});
 
+    /* ---- Phase L: operations dashboard / reports / audit -------------- */
+    res = await req(`${BASE}/admin/operations`, {});
+    check('operations dashboard requires token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/operations?token=${ADMIN_TOKEN}`, {});
+    const opsHtml = await res.text();
+    check('operations dashboard renders stat cards + investigation',
+      res.status === 200 && opsHtml.includes('Operations dashboard') &&
+      opsHtml.includes('Open exceptions') && opsHtml.includes('Open tickets') &&
+      opsHtml.includes('Package investigation') && opsHtml.includes('Recent custody events'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/operations/investigate?package_id=${encodeURIComponent(pkg.package_id)}&token=${ADMIN_TOKEN}`, { redirect: 'manual' });
+    check('package investigation redirects to package page',
+      res.status === 302 && (res.headers.get('location') || '').includes(`/admin/packages/${pkg.package_id}`),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/operations/investigate?package_id=TN-2099-999999&token=${ADMIN_TOKEN}`, {});
+    check('investigation of unknown package shows not-found',
+      res.status === 200 && (await res.text()).includes('No package found'), `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/reports`, {});
+    check('reports require token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/reports?token=${ADMIN_TOKEN}`, {});
+    const repHtml = await res.text();
+    check('reports page renders aggregates',
+      res.status === 200 && repHtml.includes('Packages by status') &&
+      repHtml.includes('Exceptions by type') && repHtml.includes('Tickets by category') &&
+      repHtml.includes('Custody events per day'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/audit`, {});
+    check('audit requires token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/audit?token=${ADMIN_TOKEN}`, {});
+    const auditHtml = await res.text();
+    check('audit trail renders append-only history',
+      res.status === 200 && auditHtml.includes('Audit trail') &&
+      auditHtml.includes('driver status') && auditHtml.includes('custody'),
+      `status=${res.status}`);
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

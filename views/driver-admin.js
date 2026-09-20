@@ -283,7 +283,115 @@ module.exports = {
   adminTicketHtml,
   communityModHtml,
   plansAdminHtml,
+  opsDashboardHtml,
+  reportsHtml,
+  auditHtml,
 };
+
+// --- Operations dashboard / reports / audit (Phase L) ------------------------------
+function statCard(label, value, href) {
+  const inner = `<div class="stat-num">${esc(String(value))}</div><div class="stat-label">${esc(label)}</div>`;
+  return href ? `<a class="stat-card" href="${href}">${inner}</a>` : `<div class="stat-card">${inner}</div>`;
+}
+
+function opsDashboardHtml({ overview, recentEvents, recentStatusChanges }) {
+  const eventRows = recentEvents
+    .map((e) => `<tr><td><a href="/admin/packages/${esc(e.package_id)}">${esc(e.package_id)}</a></td>
+      <td>${esc(drivers.CUSTODY_EVENT_LABELS[e.event_type] || e.event_type)}</td>
+      <td>${esc(e.driver_name || '—')}</td><td>${fmtTs(e.ts)}</td></tr>`)
+    .join('');
+  const statusRows = recentStatusChanges
+    .map((h) => `<tr><td><a href="/admin/drivers/${h.driver_id}">${esc(h.driver_name || '#' + h.driver_id)}</a></td>
+      <td>${esc(h.from_status || '—')} → ${esc(h.to_status)}</td>
+      <td>${esc(h.changed_by || '')}</td><td>${fmtTs(h.ts)}</td></tr>`)
+    .join('');
+  return `
+<h2>Operations dashboard</h2>
+<div class="stat-grid">
+  ${statCard('Open exceptions', overview.openExceptions, '/admin/exceptions?status=open')}
+  ${statCard('Open tickets', overview.openTickets, '/admin/tickets')}
+  ${statCard('Urgent tickets', overview.urgentTickets, '/admin/tickets')}
+  ${statCard('Pending plan requests', overview.pendingPlanRequests, '/admin/plans')}
+  ${statCard('Open community reports', overview.openReports, '/admin/community')}
+</div>
+<div class="card">
+  <h3>Package investigation</h3>
+  <form method="GET" action="/admin/operations/investigate" class="form">
+    <label>Package ID <input type="text" name="package_id" placeholder="TN-2026-000001" required></label>
+    <button type="submit" class="btn">Investigate</button>
+  </form>
+</div>
+<h3>Drivers by status</h3>
+<table class="admin-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>
+${Object.entries(overview.driversByStatus).map(([s, c]) => `<tr><td>${esc(drivers.STATUS_LABELS[s] || s)}</td><td>${c}</td></tr>`).join('') || '<tr><td colspan="2">No drivers.</td></tr>'}
+</tbody></table>
+<h3>Packages by status</h3>
+<table class="admin-table"><thead><tr><th>Status</th><th>Count</th></tr></thead><tbody>
+${Object.entries(overview.packagesByStatus).map(([s, c]) => `<tr><td>${esc(drivers.PACKAGE_STATUS_LABELS[s] || s)}</td><td>${c}</td></tr>`).join('') || '<tr><td colspan="2">No packages.</td></tr>'}
+</tbody></table>
+<h3>Recent custody events</h3>
+<table class="admin-table"><thead><tr><th>Package</th><th>Event</th><th>Driver</th><th>When</th></tr></thead><tbody>
+${eventRows || '<tr><td colspan="4">No events yet.</td></tr>'}
+</tbody></table>
+<h3>Recent driver status changes</h3>
+<table class="admin-table"><thead><tr><th>Driver</th><th>Change</th><th>By</th><th>When</th></tr></thead><tbody>
+${statusRows || '<tr><td colspan="4">No changes yet.</td></tr>'}
+</tbody></table>`;
+}
+
+function aggTable(title, obj, labelFn) {
+  const rows = Object.entries(obj || {})
+    .map(([k, v]) => `<tr><td>${esc(labelFn ? labelFn(k) : k)}</td><td>${v}</td></tr>`)
+    .join('');
+  return `<h3>${esc(title)}</h3>
+<table class="admin-table"><thead><tr><th>Category</th><th>Count</th></tr></thead><tbody>
+${rows || '<tr><td colspan="2">No data.</td></tr>'}</tbody></table>`;
+}
+
+function reportsHtml({ reports }) {
+  return `
+<h2>Reports</h2>
+${aggTable('Packages by status', reports.packagesByStatus, (k) => drivers.PACKAGE_STATUS_LABELS[k] || k)}
+${aggTable('Exceptions by type', reports.exceptionsByType, (k) => drivers.EXCEPTION_TYPE_LABELS[k] || k)}
+${aggTable('Exceptions by status', reports.exceptionsByStatus, (k) => drivers.EXCEPTION_STATUS_LABELS[k] || k)}
+${aggTable('Tickets by category', reports.ticketsByCategory, (k) => drivers.TICKET_CATEGORY_LABELS[k] || k)}
+${aggTable('Tickets by priority', reports.ticketsByPriority, (k) => drivers.TICKET_PRIORITY_LABELS[k] || k)}
+${aggTable('Tickets by status', reports.ticketsByStatus, (k) => drivers.TICKET_STATUS_LABELS[k] || k)}
+${aggTable('Plan changes by event', reports.planChangesByEvent)}
+${aggTable('Community posts by category', reports.communityPostsByCategory, (k) => drivers.COMMUNITY_CATEGORY_LABELS[k] || k)}
+<h3>Custody events per day (last 14 days)</h3>
+<table class="admin-table"><thead><tr><th>Day</th><th>Events</th></tr></thead><tbody>
+${reports.custodyByDay.map((r) => `<tr><td>${esc(r.day)}</td><td>${r.count}</td></tr>`).join('') || '<tr><td colspan="2">No events.</td></tr>'}
+</tbody></table>`;
+}
+
+function auditHtml({ statusChanges, custodyEvents, planChanges }) {
+  const scRows = statusChanges
+    .map((h) => `<tr><td>${fmtTs(h.ts)}</td><td>driver status</td>
+      <td><a href="/admin/drivers/${h.driver_id}">${esc(h.driver_name || '#' + h.driver_id)}</a></td>
+      <td>${esc(h.from_status || '—')} → ${esc(h.to_status)}${h.note ? ' — ' + esc(h.note) : ''}</td>
+      <td>${esc(h.changed_by || '')}</td></tr>`)
+    .join('');
+  const ceRows = custodyEvents
+    .map((e) => `<tr><td>${fmtTs(e.ts)}</td><td>custody</td>
+      <td><a href="/admin/packages/${esc(e.package_id)}">${esc(e.package_id)}</a></td>
+      <td>${esc(drivers.CUSTODY_EVENT_LABELS[e.event_type] || e.event_type)}${e.note ? ' — ' + esc(e.note) : ''}</td>
+      <td>${esc(e.driver_name || e.created_by || '')}</td></tr>`)
+    .join('');
+  const pcRows = planChanges
+    .map((c) => `<tr><td>${fmtTs(c.created_at)}</td><td>plan ${esc(c.event)}</td>
+      <td><a href="/admin/drivers/${c.driver_id}">${esc(c.driver_name || '#' + c.driver_id)}</a></td>
+      <td>${c.from_plan_id ? esc(c.from_plan_id) + ' → ' : ''}${esc(c.to_plan_id || '')}${c.note ? ' — ' + esc(c.note) : ''}</td>
+      <td>${esc(c.created_by || '')}</td></tr>`)
+    .join('');
+  return `
+<h2>Audit trail</h2>
+<p class="microcopy">Append-only history across driver status, custody, and plan changes. Records are never edited or deleted — corrections are new entries.</p>
+<table class="admin-table">
+<thead><tr><th>When</th><th>Type</th><th>Subject</th><th>Detail</th><th>By</th></tr></thead>
+<tbody>${scRows}${ceRows}${pcRows || '<tr><td colspan="5">No audit records yet.</td></tr>'}</tbody>
+</table>`;
+}
 
 // --- Service plans (Phase K: admin configuration + request triage) ------------------
 function plansAdminHtml({ plans, settings, pendingRequests, driversById }) {

@@ -55,6 +55,9 @@ pre.config-view{background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto;
   <a href="/admin/tickets">Support</a>
   <a href="/admin/community">Community</a>
   <a href="/admin/plans">Plans</a>
+  <a href="/admin/operations">Operations</a>
+  <a href="/admin/reports">Reports</a>
+  <a href="/admin/audit">Audit</a>
   <a href="/admin/config">Config</a>
 </nav>
 <main class="container admin">

@@ -261,3 +261,10 @@ a.dash-card.disabled { opacity: .55; }
 .bar-track { background: #e8e8e8; border-radius: 6px; height: 22px; overflow: hidden; margin: 8px 0; }
 .bar-fill { background: #1F3A5F; height: 100%; min-width: 4px; transition: width .5s; }
 .progress-line { font-size: 18px; }
+
+/* Phase L: operations dashboard stat cards */
+.stat-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; margin: 16px 0; }
+.stat-card { display: block; background: #fff; border: 1px solid #e2e8f0; border-radius: 8px; padding: 16px; text-align: center; text-decoration: none; color: inherit; }
+a.stat-card:hover { border-color: #1F3A5F; }
+.stat-num { font-size: 32px; font-weight: 700; }
+.stat-label { font-size: 14px; color: #555; }

@@ -1662,6 +1662,40 @@ app.post('/admin/plans/requests/:driverId/reject', adminAuth, ah(async (req, res
   res.redirect('/admin/plans');
 }));
 
+// --- Phase L: operations dashboard, package investigation, reports, audit --------
+app.get('/admin/operations', adminAuth, ah(async (req, res) => {
+  const [overview, recentEvents, recentStatusChanges] = await Promise.all([
+    drivers.getOpsOverview(),
+    drivers.getRecentCustodyEvents(25),
+    drivers.getRecentDriverStatusChanges(25),
+  ]);
+  res.send(adminViews.adminLayout('Operations dashboard', driverAdminViews.opsDashboardHtml({ overview, recentEvents, recentStatusChanges })));
+}));
+
+app.get('/admin/operations/investigate', adminAuth, ah(async (req, res) => {
+  const packageId = String(req.query.package_id || '').trim().toUpperCase();
+  const pkg = packageId ? await drivers.getPackage(packageId) : null;
+  if (!pkg) {
+    return res.send(adminViews.adminLayout('Investigate',
+      `<h2>Package investigation</h2><div class="card"><p>No package found for ID <strong>${packageId || '(blank)'}</strong>.</p><p><a href="/admin/operations">&larr; Back to dashboard</a></p></div>`));
+  }
+  res.redirect(`/admin/packages/${encodeURIComponent(pkg.package_id)}`);
+}));
+
+app.get('/admin/reports', adminAuth, ah(async (req, res) => {
+  const reports = await drivers.getReports();
+  res.send(adminViews.adminLayout('Reports', driverAdminViews.reportsHtml({ reports })));
+}));
+
+app.get('/admin/audit', adminAuth, ah(async (req, res) => {
+  const [statusChanges, custodyEvents, planChanges] = await Promise.all([
+    drivers.getRecentDriverStatusChanges(50),
+    drivers.getRecentCustodyEvents(50),
+    drivers.getRecentPlanChanges(50),
+  ]);
+  res.send(adminViews.adminLayout('Audit trail', driverAdminViews.auditHtml({ statusChanges, custodyEvents, planChanges })));
+}));
+
 // --- Phase E: phone-camera scanning (manual fallback always available) --------
 app.get('/d/:token/scan', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
