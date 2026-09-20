@@ -1510,13 +1510,13 @@ async function main() {
       res.status === 200 && scanHtml.includes('/vendor/html5-qrcode.min.js') && scanHtml.includes('name="code"'),
       `status=${res.status}`);
     res = await req(`${BASE}/d/${pdDrv.access_token}/scan`, { method: 'POST', form: [['code', pkg.package_id]] });
-    const foundHtml = await res.text();
-    check('scan lookup finds own package',
-      res.status === 200 && foundHtml.includes('Package found') && foundHtml.includes('Acme Corp'),
+    check('scan lookup redirects to driver package page',
+      res.status === 302 && (res.headers.get('location') || '').includes(`/packages/${pkg.package_id}`),
       `status=${res.status}`);
     res = await req(`${BASE}/d/${pdDrv.access_token}/scan`, { method: 'POST', form: [['code', '  ' + pkg.package_id.toLowerCase() + '  ']] });
     check('scan lookup is case/whitespace tolerant',
-      res.status === 200 && (await res.text()).includes('Package found'), `status=${res.status}`);
+      res.status === 302 && (res.headers.get('location') || '').includes(`/packages/${pkg.package_id}`),
+      `status=${res.status}`);
     res = await req(`${BASE}/d/${pdDrv.access_token}/scan`, { method: 'POST', form: [['code', 'TN-2026-999999']] });
     check('scan lookup of unknown id shows not-found',
       res.status === 200 && (await res.text()).includes('No package found'), `status=${res.status}`);
@@ -1526,6 +1526,70 @@ async function main() {
       res.status === 200 && (await res.text()).includes('No package found'), `status=${res.status}`);
     res = await req(`${BASE}/vendor/html5-qrcode.min.js`, {});
     check('vendored scanner library is served', res.status === 200, `status=${res.status}`);
+
+    /* ---- Phase F: custody + handoff history -------------------------- */
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}`, {});
+    const pkgPageHtml = await res.text();
+    check('driver package page shows custody buttons + empty history',
+      res.status === 200 && pkgPageHtml.includes('Record custody event') && pkgPageHtml.includes('PICKED UP') &&
+      pkgPageHtml.includes('No custody events recorded yet'), `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/event`, { method: 'POST', form: [
+      ['event_type', 'picked_up'], ['note', 'Picked up at dock 3'],
+    ]});
+    let pkgAfter = db.prepare('SELECT status FROM packages WHERE package_id = ?').get(pkg.package_id);
+    let events = db.prepare('SELECT event_type, driver_id, note, created_by FROM custody_events WHERE package_id = ? ORDER BY ts').all(pkg.package_id);
+    check('custody event recorded; package status advances',
+      res.status === 302 && pkgAfter.status === 'picked_up' && events.length === 1 &&
+      events[0].event_type === 'picked_up' && Number(events[0].driver_id) === pdDrv.id &&
+      events[0].note === 'Picked up at dock 3' && events[0].created_by === 'driver',
+      `status=${res.status}`);
+
+    await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/event`, { method: 'POST', form: [
+      ['event_type', 'delivered'], ['note', 'Left at front desk'],
+    ]});
+    events = db.prepare('SELECT event_type FROM custody_events WHERE package_id = ? ORDER BY ts').all(pkg.package_id);
+    pkgAfter = db.prepare('SELECT status FROM packages WHERE package_id = ?').get(pkg.package_id);
+    check('custody history is append-only (both events kept, in order)',
+      events.length === 2 && events[0].event_type === 'picked_up' && events[1].event_type === 'delivered' &&
+      pkgAfter.status === 'delivered');
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/event`, { method: 'POST', form: [
+      ['event_type', 'handoff'], ['note', ''],
+    ]});
+    check('handoff without a recipient note is rejected (400)', res.status === 400, `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/event`, { method: 'POST', form: [
+      ['event_type', 'handoff'], ['note', 'Handed to Maria at front desk'],
+    ]});
+    events = db.prepare('SELECT event_type, note FROM custody_events WHERE package_id = ? ORDER BY ts').all(pkg.package_id);
+    check('handoff with note recorded',
+      res.status === 302 && events.length === 3 && events[2].event_type === 'handoff' &&
+      events[2].note === 'Handed to Maria at front desk', `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/packages/${pkg.package_id}/event`, { method: 'POST', form: [
+      ['event_type', 'bogus_event'],
+    ]});
+    check('unknown custody event rejected (400)', res.status === 400, `status=${res.status}`);
+
+    // Another driver cannot record events on this package.
+    res = await req(`${BASE}/d/${pd2Token}/packages/${pkg.package_id}/event`, { method: 'POST', form: [
+      ['event_type', 'picked_up'],
+    ]});
+    check('driver cannot record custody on another driver\'s package (404)', res.status === 404, `status=${res.status}`);
+    res = await req(`${BASE}/d/${pd2Token}/packages/${pkg.package_id}`, {});
+    check('driver cannot view another driver\'s package page (404)', res.status === 404, `status=${res.status}`);
+
+    // Admin package investigation.
+    res = await req(`${BASE}/admin/packages/${pkg.package_id}?token=${ADMIN_TOKEN}`, {});
+    const adminPkgHtml = await res.text();
+    check('admin package page shows read-only custody timeline',
+      res.status === 200 && adminPkgHtml.includes('Custody history') && adminPkgHtml.includes('Picked up') &&
+      adminPkgHtml.includes('Handoff') && adminPkgHtml.includes('Handed to Maria'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/packages/${pkg.package_id}`, {});
+    check('admin package page requires token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/packages/TN-2026-999999?token=${ADMIN_TOKEN}`, {});
+    check('admin package page 404s for unknown id', res.status === 404, `status=${res.status}`);
 
   } finally {
     try { if (db) db.close(); } catch {}

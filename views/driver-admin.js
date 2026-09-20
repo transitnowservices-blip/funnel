@@ -215,7 +215,7 @@ function routeDetailHtml({ route, driver, packages, counts }) {
   const pkgRows = packages
     .map(
       (p) => `<tr>
-        <td><strong>${esc(p.package_id)}</strong></td>
+        <td><a href="/admin/packages/${esc(p.package_id)}"><strong>${esc(p.package_id)}</strong></a></td>
         <td>${esc(p.recipient_name)}<br><span class="muted">${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}</span></td>
         <td>${packageStatusBadge(p.status)}</td>
       </tr>`
@@ -268,4 +268,31 @@ module.exports = {
   routeDetailHtml,
   routeStatusBadge,
   packageStatusBadge,
+  adminPackageHtml,
 };
+
+// --- Package investigation (Phase F: read-only custody timeline) ------------------
+function adminPackageHtml({ pkg, driver, route, events }) {
+  const timeline = (events || [])
+    .map(
+      (ev) => `<li><strong>${esc(drivers.CUSTODY_EVENT_LABELS[ev.event_type] || ev.event_type)}</strong>
+        <span class="ts">${fmtTs(ev.ts)} · by ${esc(ev.created_by || 'driver')}${ev.driver_name ? ' (' + esc(ev.driver_name) + ')' : ''}</span>
+        ${ev.note ? `<br>${esc(ev.note)}` : ''}</li>`
+    )
+    .join('');
+  return `
+<p><a href="/admin/routes${route ? '/' + route.id : ''}">&larr; ${route ? 'Back to ' + esc(route.route_code) : 'Back to routes'}</a></p>
+<h2>${esc(pkg.package_id)} ${packageStatusBadge(pkg.status)}</h2>
+<div class="card">
+  <h3>Package</h3>
+  <div><strong>Recipient:</strong> ${esc(pkg.recipient_name)}</div>
+  <div><strong>Address:</strong> ${esc([pkg.address, pkg.city, pkg.state, pkg.zip].filter(Boolean).join(', '))}</div>
+  ${pkg.special_instructions ? `<div><strong>Instructions:</strong> ${esc(pkg.special_instructions)}</div>` : ''}
+  <div><strong>Driver:</strong> ${driver ? `<a href="/admin/drivers/${driver.id}">${esc(driver.full_name)}</a>` : '—'}</div>
+  <div><strong>Route:</strong> ${route ? `<a href="/admin/routes/${route.id}">${esc(route.route_code)}</a>` : '—'}</div>
+</div>
+<div class="card">
+  <h3>Custody history (append-only)</h3>
+  <ul class="timeline">${timeline || '<li>No custody events recorded yet.</li>'}</ul>
+</div>`;
+}

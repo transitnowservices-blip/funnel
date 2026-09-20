@@ -1463,6 +1463,18 @@ app.post('/admin/routes/:id/packages', adminAuth, ah(async (req, res) => {
   res.redirect(`/admin/routes/${route.id}`);
 }));
 
+// --- Phase F: admin package investigation (read-only custody timeline) ---------
+app.get('/admin/packages/:packageId', adminAuth, ah(async (req, res) => {
+  const pkg = await drivers.getPackage(req.params.packageId);
+  if (!pkg) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Package not found.</p>'));
+  const [driver, route, events] = await Promise.all([
+    pkg.driver_id ? drivers.getDriverById(pkg.driver_id) : null,
+    pkg.route_id ? drivers.getRouteById(pkg.route_id) : null,
+    drivers.getCustodyHistory(pkg.package_id),
+  ]);
+  res.send(adminViews.adminLayout('Package ' + pkg.package_id, driverAdminViews.adminPackageHtml({ pkg, driver, route, events })));
+}));
+
 // --- Phase E: phone-camera scanning (manual fallback always available) --------
 app.get('/d/:token/scan', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
@@ -1481,7 +1493,44 @@ app.post('/d/:token/scan', requireDriver, ah(async (req, res) => {
   if (!pkg || Number(pkg.driver_id) !== Number(driver.id)) {
     return page(res, 'Scan a package', driverViews.scanResultPage({ driver, pkg: null, error: `No package ${code} found among your assigned packages.` }), site);
   }
-  page(res, 'Package found', driverViews.scanResultPage({ driver, pkg, error: null }), site);
+  res.redirect(`/d/${driver.access_token}/packages/${encodeURIComponent(pkg.package_id)}`);
+}));
+
+// --- Phase F: append-only custody + handoff history -----------------------------
+app.get('/d/:token/packages/:packageId', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const pkg = await drivers.getPackage(req.params.packageId);
+  if (!pkg || Number(pkg.driver_id) !== Number(driver.id)) {
+    res.status(404);
+    return page(res, 'Not found', '<section><h1>Package not found</h1><p class="subhead">This package is not assigned to you.</p></section>', site);
+  }
+  const events = await drivers.getCustodyHistory(pkg.package_id);
+  page(res, pkg.package_id, driverViews.driverPackagePage({ driver, pkg, events }), site);
+}));
+
+app.post('/d/:token/packages/:packageId/event', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const pkg = await drivers.getPackage(req.params.packageId);
+  if (!pkg || Number(pkg.driver_id) !== Number(driver.id)) {
+    res.status(404);
+    return page(res, 'Not found', '<section><h1>Package not found</h1><p class="subhead">This package is not assigned to you.</p></section>', site);
+  }
+  try {
+    await drivers.recordCustodyEvent({
+      packageId: pkg.package_id,
+      eventType: req.body.event_type,
+      driverId: driver.id,
+      note: req.body.note || '',
+      createdBy: 'driver',
+    });
+  } catch (err) {
+    res.status(400);
+    const events = await drivers.getCustodyHistory(pkg.package_id);
+    return page(res, pkg.package_id, `<section><div class="form-error" role="alert">${err.message}</div></section>` + driverViews.driverPackagePage({ driver, pkg, events }), site);
+  }
+  res.redirect(`/d/${driver.access_token}/packages/${encodeURIComponent(pkg.package_id)}`);
 }));
 
 // --- Unsubscribe / preferences / privacy ----------------------------------------------------

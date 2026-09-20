@@ -204,7 +204,7 @@ function driverRoutePage({ site, driver, route, packages }) {
   const pkgRows = packages
     .map(
       (p) => `<div class="card">
-        <h3>${esc(p.package_id)}</h3>
+        <h3><a href="/d/${esc(driver.access_token)}/packages/${esc(p.package_id)}">${esc(p.package_id)}</a></h3>
         <p><strong>${esc(p.recipient_name)}</strong><br>${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}</p>
         <p>Status: <strong>${esc(drivers.PACKAGE_STATUS_LABELS[p.status] || p.status)}</strong></p>
         ${p.special_instructions ? `<p class="muted">Note: ${esc(p.special_instructions)}</p>` : ''}
@@ -237,7 +237,7 @@ function driverPackagesPage({ site, driver, packages }) {
       ([status, list]) => `
 <h2>${esc(drivers.PACKAGE_STATUS_LABELS[status] || status)} (${list.length})</h2>
 ${list.map((p) => `<div class="card">
-  <h3>${esc(p.package_id)}</h3>
+  <h3><a href="/d/${esc(driver.access_token)}/packages/${esc(p.package_id)}">${esc(p.package_id)}</a></h3>
   <p><strong>${esc(p.recipient_name)}</strong><br>${esc([p.address, p.city, p.state, p.zip].filter(Boolean).join(', '))}</p>
   ${p.special_instructions ? `<p class="muted">Note: ${esc(p.special_instructions)}</p>` : ''}
 </div>`).join('')}`
@@ -336,4 +336,38 @@ function scanResultPage({ driver, pkg, error }) {
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, selectField, textField, checkboxGroup };
+// --- Phase F: package detail with append-only custody history --------------------
+function driverPackagePage({ driver, pkg, events }) {
+  const buttons = drivers.CUSTODY_EVENTS.map((e) => `
+    <button type="submit" name="event_type" value="${e}" class="btn big-btn">${esc(drivers.CUSTODY_EVENT_LABELS[e]).toUpperCase()}</button>`).join('\n');
+  const timeline = (events || [])
+    .map(
+      (ev) => `<li><strong>${esc(drivers.CUSTODY_EVENT_LABELS[ev.event_type] || ev.event_type)}</strong>
+        <span class="ts">${new Date(Number(ev.ts)).toLocaleString()}${ev.driver_name ? ' · ' + esc(ev.driver_name) : ''}</span>
+        ${ev.note ? `<br>${esc(ev.note)}` : ''}</li>`
+    )
+    .join('');
+  return `
+<section>
+  <h1>${esc(pkg.package_id)}</h1>
+  <div class="card">
+    <p><strong>${esc(pkg.recipient_name)}</strong><br>
+    ${esc([pkg.address, pkg.city, pkg.state, pkg.zip].filter(Boolean).join(', '))}</p>
+    <p>Status: <strong>${esc(drivers.PACKAGE_STATUS_LABELS[pkg.status] || pkg.status)}</strong></p>
+    ${pkg.special_instructions ? `<p class="muted">Note: ${esc(pkg.special_instructions)}</p>` : ''}
+  </div>
+  <h2>Record custody event</h2>
+  <form method="POST" action="/d/${esc(driver.access_token)}/packages/${esc(pkg.package_id)}/event" class="form">
+    <label>Note / handed to <span class="hint">Required for handoff — who received the package?</span>
+      <input type="text" name="note" placeholder="e.g. Handed to Maria at front desk">
+    </label>
+    ${buttons}
+  </form>
+  <h2>Custody history</h2>
+  <ul class="timeline">${timeline || '<li>No custody events recorded yet.</li>'}</ul>
+  <p><a class="btn big-btn" href="/d/${esc(driver.access_token)}/scan">SCAN ANOTHER</a></p>
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, selectField, textField, checkboxGroup };
