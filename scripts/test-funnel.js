@@ -997,6 +997,14 @@ async function main() {
       res.status === 200 && (res.headers.get('content-type') || '').includes('image/png'),
       `status=${res.status} ct=${res.headers.get('content-type')}`);
 
+    // Admin accountability summary must reflect the uploaded proof (regression:
+    // it previously read the unselected proof_blob column and always showed "—").
+    res = await req(`${BASE}/admin/room?token=${ADMIN_TOKEN}`, {});
+    const acctAdminProof = await res.text();
+    check('admin accountability proof column shows Uploaded after proof upload',
+      res.status === 200 && acctAdminProof.includes('<td>Uploaded</td>'),
+      `status=${res.status}`);
+
     // Proof without the confirm checkbox is rejected.
     res = await multipartReq(`${BASE}/room/checkin`, {
       jar: acctJar1,
