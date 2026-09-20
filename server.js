@@ -1546,6 +1546,68 @@ app.post('/admin/tickets/:ticketId/status', adminAuth, ah(async (req, res) => {
   res.redirect(`/admin/tickets/${encodeURIComponent(req.params.ticketId)}`);
 }));
 
+// --- Phase J: admin community moderation ------------------------------------------
+app.get('/admin/community', adminAuth, ah(async (req, res) => {
+  const [posts, reports] = await Promise.all([
+    drivers.listCommunityPosts({ includeHidden: true }),
+    drivers.listCommunityReports({}),
+  ]);
+  const commentsByPost = {};
+  for (const p of posts) commentsByPost[p.id] = await drivers.listCommunityComments(p.id, { includeHidden: true });
+  const ids = new Set();
+  posts.forEach((p) => p.driver_id && ids.add(p.driver_id));
+  Object.values(commentsByPost).flat().forEach((c) => c.driver_id && ids.add(c.driver_id));
+  reports.forEach((r) => r.reporter_driver_id && ids.add(r.reporter_driver_id));
+  const driversById = {};
+  for (const id of ids) driversById[id] = await drivers.getDriverById(id);
+  res.send(adminViews.adminLayout('Driver community', driverAdminViews.communityModHtml({ posts, commentsByPost, reports, driversById })));
+}));
+
+app.post('/admin/community/announce', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.createCommunityPost({ driverId: null, authorType: 'admin', category: 'announcements', title: req.body.title, body: req.body.body });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect('/admin/community');
+}));
+
+app.post('/admin/community/posts/:id/pin', adminAuth, ah(async (req, res) => {
+  const p = await drivers.getCommunityPost(req.params.id);
+  if (!p) return res.status(404).send('Not found');
+  await drivers.setCommunityPostPinned(p.id, !p.pinned);
+  res.redirect('/admin/community');
+}));
+
+app.post('/admin/community/posts/:id/hide', adminAuth, ah(async (req, res) => {
+  await drivers.setCommunityPostStatus(req.params.id, 'hidden');
+  res.redirect('/admin/community');
+}));
+
+app.post('/admin/community/posts/:id/restore', adminAuth, ah(async (req, res) => {
+  await drivers.setCommunityPostStatus(req.params.id, 'visible');
+  res.redirect('/admin/community');
+}));
+
+app.post('/admin/community/comments/:id/hide', adminAuth, ah(async (req, res) => {
+  await drivers.setCommunityCommentStatus(req.params.id, 'hidden');
+  res.redirect('/admin/community');
+}));
+
+app.post('/admin/community/comments/:id/restore', adminAuth, ah(async (req, res) => {
+  await drivers.setCommunityCommentStatus(req.params.id, 'visible');
+  res.redirect('/admin/community');
+}));
+
+app.post('/admin/community/reports/:id/review', adminAuth, ah(async (req, res) => {
+  try {
+    await drivers.reviewCommunityReport(req.params.id, req.body.outcome);
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
+  }
+  res.redirect('/admin/community');
+}));
+
 // --- Phase E: phone-camera scanning (manual fallback always available) --------
 app.get('/d/:token/scan', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
@@ -1725,6 +1787,86 @@ app.post('/d/:token/support/:ticketId/reply', requireDriver, requireDriverTicket
     return page(res, req.ticket.ticket_id, driverViews.ticketDetailPage({ driver: req.driver, ticket: req.ticket, replies, error: err.message }), site);
   }
   res.redirect(`/d/${req.driver.access_token}/support/${encodeURIComponent(req.ticket.ticket_id)}`);
+}));
+
+// --- Phase J: private driver community -------------------------------------------
+async function communityAuthors(items) {
+  const ids = [...new Set(items.map((i) => i.driver_id).filter(Boolean))];
+  const map = {};
+  for (const id of ids) map[id] = await drivers.getDriverById(id);
+  return map;
+}
+
+app.get('/d/:token/community', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const category = drivers.COMMUNITY_CATEGORIES.includes(req.query.category) ? req.query.category : null;
+  const posts = await drivers.listCommunityPosts({ category });
+  const authors = await communityAuthors(posts);
+  page(res, 'Driver community', driverViews.communityPage({ driver: req.driver, posts, categoryFilter: category, authors, error: null }), site);
+}));
+
+app.post('/d/:token/community', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  try {
+    const post = await drivers.createCommunityPost({
+      driverId: driver.id, authorType: 'driver',
+      category: req.body.category, title: req.body.title, body: req.body.body,
+    });
+    res.redirect(`/d/${driver.access_token}/community/${post.id}`);
+  } catch (err) {
+    res.status(400);
+    const posts = await drivers.listCommunityPosts({});
+    const authors = await communityAuthors(posts);
+    return page(res, 'Driver community', driverViews.communityPage({ driver, posts, categoryFilter: null, authors, error: err.message }), site);
+  }
+}));
+
+app.get('/d/:token/community/:postId', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const post = await drivers.getCommunityPost(req.params.postId);
+  if (!post || post.status !== 'visible') {
+    res.status(404);
+    return page(res, 'Not found', '<section><h1>Post not found</h1></section>', site);
+  }
+  const comments = await drivers.listCommunityComments(post.id);
+  const authors = await communityAuthors([post, ...comments]);
+  page(res, post.title, driverViews.communityPostPage({ driver: req.driver, post, comments, authors, error: null }), site);
+}));
+
+app.post('/d/:token/community/:postId/comments', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const post = await drivers.getCommunityPost(req.params.postId);
+  if (!post || post.status !== 'visible') {
+    res.status(404);
+    return page(res, 'Not found', '<section><h1>Post not found</h1></section>', site);
+  }
+  try {
+    await drivers.createCommunityComment({ postId: post.id, driverId: driver.id, authorType: 'driver', body: req.body.body });
+  } catch (err) {
+    res.status(400);
+    const comments = await drivers.listCommunityComments(post.id);
+    const authors = await communityAuthors([post, ...comments]);
+    return page(res, post.title, driverViews.communityPostPage({ driver, post, comments, authors, error: err.message }), site);
+  }
+  res.redirect(`/d/${driver.access_token}/community/${post.id}`);
+}));
+
+app.post('/d/:token/community/report', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  try {
+    await drivers.reportCommunityContent({
+      postId: req.body.post_id || null,
+      commentId: req.body.comment_id || null,
+      reporterDriverId: req.driver.id,
+      reason: req.body.reason,
+    });
+  } catch (err) {
+    res.status(400);
+    return page(res, 'Report', `<section><div class="form-error" role="alert">${err.message}</div></section>`, site);
+  }
+  page(res, 'Reported', '<section><h1>Thanks</h1><p class="subhead">Operations will review this content.</p><p><a href="/d/' + req.driver.access_token + '/community">&larr; Back to community</a></p></section>', site);
 }));
 
 // --- Phase G: polling-based route progress (JSON; no real-time claims) ---------

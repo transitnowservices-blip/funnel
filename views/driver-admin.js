@@ -281,7 +281,85 @@ module.exports = {
   exceptionsListHtml,
   ticketsListHtml,
   adminTicketHtml,
+  communityModHtml,
 };
+
+// --- Community moderation (Phase J) -----------------------------------------------
+function communityModHtml({ posts, commentsByPost, reports, driversById }) {
+  const postRows = posts
+    .map((p) => {
+      const d = driversById[p.driver_id];
+      return `<tr>
+        <td><strong>${p.pinned ? '📌 ' : ''}${esc(p.title)}</strong><br>
+          <span class="muted">${esc(drivers.COMMUNITY_CATEGORY_LABELS[p.category] || p.category)} ·
+          ${p.author_type === 'admin' ? 'TransitNow' : esc(d ? d.full_name : '?')} · ${fmtTs(p.created_at)}</span></td>
+        <td>${esc(p.status)}</td>
+        <td>
+          <form method="POST" action="/admin/community/posts/${p.id}/pin" style="display:inline"><button class="btn btn-small">${p.pinned ? 'Unpin' : 'Pin'}</button></form>
+          ${p.status === 'visible'
+            ? `<form method="POST" action="/admin/community/posts/${p.id}/hide" style="display:inline"><button class="btn btn-small">Hide</button></form>`
+            : `<form method="POST" action="/admin/community/posts/${p.id}/restore" style="display:inline"><button class="btn btn-small">Restore</button></form>`}
+        </td>
+      </tr>`;
+    })
+    .join('');
+  const commentRows = Object.values(commentsByPost)
+    .flat()
+    .map((c) => {
+      const d = driversById[c.driver_id];
+      return `<tr>
+        <td>${esc((c.body || '').slice(0, 90))}<br>
+          <span class="muted">on post #${c.post_id} · ${c.author_type === 'admin' ? 'TransitNow' : esc(d ? d.full_name : '?')} · ${fmtTs(c.created_at)}</span></td>
+        <td>${esc(c.status)}</td>
+        <td>${c.status === 'visible'
+          ? `<form method="POST" action="/admin/community/comments/${c.id}/hide" style="display:inline"><button class="btn btn-small">Hide</button></form>`
+          : `<form method="POST" action="/admin/community/comments/${c.id}/restore" style="display:inline"><button class="btn btn-small">Restore</button></form>`}
+        </td>
+      </tr>`;
+    })
+    .join('');
+  const reportRows = reports
+    .map((r) => {
+      const rep = driversById[r.reporter_driver_id];
+      return `<tr>
+        <td>${r.post_id ? `post #${r.post_id}` : ''}${r.comment_id ? `comment #${r.comment_id}` : ''}<br>
+          <span class="muted">by ${esc(rep ? rep.full_name : '?')} · ${fmtTs(r.created_at)}</span></td>
+        <td>${esc(r.reason)}</td>
+        <td>${esc(r.status)}</td>
+        <td>${r.status === 'open'
+          ? `<form method="POST" action="/admin/community/reports/${r.id}/review" style="display:inline">
+               <button class="btn btn-small" name="outcome" value="reviewed">Mark reviewed</button>
+               <button class="btn btn-small" name="outcome" value="dismissed">Dismiss</button>
+             </form>` : ''}</td>
+      </tr>`;
+    })
+    .join('');
+  return `
+<h2>Driver community — moderation</h2>
+<div class="card">
+  <h3>Post an announcement</h3>
+  <form method="POST" action="/admin/community/announce" class="form">
+    <label>Title <input type="text" name="title" required></label>
+    <label>Message <textarea name="body" rows="3" required></textarea></label>
+    <button type="submit" class="btn">Publish announcement</button>
+  </form>
+</div>
+<h3>Posts (${posts.length})</h3>
+<table class="admin-table">
+<thead><tr><th>Post</th><th>Status</th><th>Actions</th></tr></thead>
+<tbody>${postRows || '<tr><td colspan="3">No posts.</td></tr>'}</tbody>
+</table>
+<h3>Comments</h3>
+<table class="admin-table">
+<thead><tr><th>Comment</th><th>Status</th><th>Actions</th></tr></thead>
+<tbody>${commentRows || '<tr><td colspan="3">No comments.</td></tr>'}</tbody>
+</table>
+<h3>Reports (${reports.length})</h3>
+<table class="admin-table">
+<thead><tr><th>Target</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead>
+<tbody>${reportRows || '<tr><td colspan="4">No reports.</td></tr>'}</tbody>
+</table>`;
+}
 
 // --- Support tickets (Phase I: admin triage) --------------------------------------
 function ticketsListHtml({ list, statusFilter, driversById }) {

@@ -510,4 +510,95 @@ function ticketDetailPage({ driver, ticket, replies, error }) {
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, selectField, textField, checkboxGroup };
+// --- Phase J: driver community ---------------------------------------------------
+function communityPage({ driver, posts, categoryFilter, authors, error }) {
+  const tabs = drivers.COMMUNITY_CATEGORIES.map((c) => {
+    const active = categoryFilter === c ? ' class="active"' : '';
+    return `<a${active} href="/d/${esc(driver.access_token)}/community?category=${c}">${esc(drivers.COMMUNITY_CATEGORY_LABELS[c])}</a>`;
+  }).join('');
+  const allActive = !categoryFilter ? ' class="active"' : '';
+  const catOpts = drivers.COMMUNITY_CATEGORIES.filter((c) => c !== 'announcements').map(
+    (c) => `<option value="${c}">${esc(drivers.COMMUNITY_CATEGORY_LABELS[c])}</option>`
+  ).join('');
+  const rows = (posts || [])
+    .map((p) => {
+      const a = authors[p.driver_id];
+      return `<a class="card" href="/d/${esc(driver.access_token)}/community/${p.id}">
+        <h3>${p.pinned ? '📌 ' : ''}${esc(p.title)}</h3>
+        <p>${esc(drivers.COMMUNITY_CATEGORY_LABELS[p.category] || p.category)} ·
+        by ${esc(a ? drivers.communityDisplayName(a) : 'TransitNow')} ·
+        <span class="ts">${new Date(Number(p.created_at)).toLocaleDateString()}</span></p>
+      </a>`;
+    })
+    .join('');
+  return `
+<section>
+  <h1>Driver community</h1>
+  <p class="subhead">A private space for TransitNow drivers — tips, questions, and wins. Be kind and keep customer info private.</p>
+  <div class="pipeline-nav"><a${allActive} href="/d/${esc(driver.access_token)}/community">All</a>${tabs}</div>
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  <div class="card">
+    <h2>Start a post</h2>
+    <form method="POST" action="/d/${esc(driver.access_token)}/community" class="form">
+      <label>Category *
+        <select name="category" required>${catOpts}</select>
+      </label>
+      <label>Title *
+        <input type="text" name="title" required placeholder="e.g. Shortcut that saves me 20 minutes">
+      </label>
+      <label>Your post *
+        <textarea name="body" rows="4" required placeholder="Share your tip, question, or win…"></textarea>
+      </label>
+      <button type="submit" class="btn btn-large big-btn">POST</button>
+    </form>
+  </div>
+  <h2>Posts</h2>
+  ${rows || '<div class="card"><p>No posts yet — be the first.</p></div>'}
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
+function communityPostPage({ driver, post, comments, authors, error }) {
+  const a = authors[post.driver_id];
+  const commentHtml = (comments || [])
+    .map((c) => {
+      const ca = authors[c.driver_id];
+      return `<div class="card"><p><strong>${esc(ca ? drivers.communityDisplayName(ca) : 'TransitNow')}</strong>
+        <span class="ts">${new Date(Number(c.created_at)).toLocaleString()}</span></p>
+        <p>${esc(c.body)}</p>
+        <form method="POST" action="/d/${esc(driver.access_token)}/community/report" class="form" style="display:inline">
+          <input type="hidden" name="comment_id" value="${c.id}">
+          <input type="text" name="reason" placeholder="Report: reason" required style="width:140px">
+          <button type="submit" class="btn btn-small">Report</button>
+        </form></div>`;
+    })
+    .join('');
+  return `
+<section>
+  <p><a href="/d/${esc(driver.access_token)}/community">&larr; Back to community</a></p>
+  <h1>${post.pinned ? '📌 ' : ''}${esc(post.title)}</h1>
+  <p class="subhead">${esc(drivers.COMMUNITY_CATEGORY_LABELS[post.category] || post.category)} ·
+  by ${esc(a ? drivers.communityDisplayName(a) : 'TransitNow')} ·
+  <span class="ts">${new Date(Number(post.created_at)).toLocaleString()}</span></p>
+  <div class="card"><p>${esc(post.body)}</p></div>
+  <form method="POST" action="/d/${esc(driver.access_token)}/community/report" class="form">
+    <input type="hidden" name="post_id" value="${post.id}">
+    <label>Report this post <input type="text" name="reason" placeholder="Why are you reporting this?" required></label>
+    <button type="submit" class="btn btn-small">Report post</button>
+  </form>
+  <h2>Comments (${(comments || []).length})</h2>
+  ${commentHtml || '<div class="card"><p>No comments yet.</p></div>'}
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  <div class="card">
+    <h3>Add a comment</h3>
+    <form method="POST" action="/d/${esc(driver.access_token)}/community/${post.id}/comments" class="form">
+      <label>Your comment
+        <textarea name="body" rows="3" required></textarea>
+      </label>
+      <button type="submit" class="btn">Post comment</button>
+    </form>
+  </div>
+</section>`;
+}
+
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, selectField, textField, checkboxGroup };

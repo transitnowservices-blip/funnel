@@ -1753,6 +1753,84 @@ async function main() {
     res = await req(`${BASE}/admin/tickets/${urgentTicket.ticket_id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['status', 'bogus']] });
     check('admin rejects invalid ticket status (400)', res.status === 400, `status=${res.status}`);
 
+    /* ---- Phase J: driver community ------------------------------------ */
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community`, {});
+    check('driver community page renders with categories',
+      res.status === 200 && (await res.text()).includes('Driver community'), `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community`, { method: 'POST', form: [
+      ['category', 'route_tips'], ['title', 'Skip the construction on 5th'], ['body', 'Take the river road instead.'],
+    ]});
+    const post = db.prepare('SELECT * FROM community_posts WHERE driver_id = ? ORDER BY id DESC LIMIT 1').get(pdDrv.id);
+    check('driver creates community post',
+      res.status === 302 && post && post.category === 'route_tips' && post.status === 'visible',
+      post ? `id=${post.id}` : 'no post');
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community`, { method: 'POST', form: [
+      ['category', 'announcements'], ['title', 'Fake announce'], ['body', 'x'],
+    ]});
+    check('drivers cannot post announcements (400)', res.status === 400, `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community`, { method: 'POST', form: [
+      ['category', 'questions'], ['title', ''], ['body', 'x'],
+    ]});
+    check('community post validation rejects empty title (400)', res.status === 400, `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${pd2Token}/community/${post.id}/comments`, { method: 'POST', form: [['body', 'Great tip, thanks!']] });
+    const comment = db.prepare('SELECT * FROM community_comments WHERE post_id = ? ORDER BY id DESC LIMIT 1').get(post.id);
+    check('driver comments on post',
+      res.status === 302 && comment && comment.body === 'Great tip, thanks!', `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community/${post.id}`, {});
+    const postHtml = await res.text();
+    check('community post page shows post + comment',
+      res.status === 200 && postHtml.includes('Skip the construction') && postHtml.includes('Great tip'),
+      `status=${res.status}`);
+    check('community shows first names only (privacy)',
+      postHtml.includes('Route') === false || !postHtml.includes(pdDrv.full_name), 'full name not shown');
+
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community/report`, { method: 'POST', form: [
+      ['comment_id', String(comment.id)], ['reason', 'Testing the report flow'],
+    ]});
+    const report = db.prepare('SELECT * FROM community_reports ORDER BY id DESC LIMIT 1').get();
+    check('driver can report content; ops notified',
+      res.status === 200 && report && report.comment_id === comment.id && report.status === 'open',
+      `status=${res.status}`);
+    const repMail = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'community-report'").get().n;
+    check('report notifies operations', repMail === 1, `count=${repMail}`);
+
+    // Admin moderation.
+    res = await req(`${BASE}/admin/community`, {});
+    check('admin community requires token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/community/announce?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['title', 'Holiday schedule'], ['body', 'No routes on the holiday.'],
+    ]});
+    const ann = db.prepare("SELECT * FROM community_posts WHERE category = 'announcements' ORDER BY id DESC LIMIT 1").get();
+    check('admin posts announcement', res.status === 302 && ann && ann.author_type === 'admin', `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community`, {});
+    check('announcement visible to drivers',
+      (await res.text()).includes('Holiday schedule'), 'announcement shown');
+
+    res = await req(`${BASE}/admin/community/posts/${post.id}/pin?token=${ADMIN_TOKEN}`, { method: 'POST' });
+    check('admin pins post', res.status === 302 && db.prepare('SELECT pinned FROM community_posts WHERE id = ?').get(post.id).pinned === 1, `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community`, {});
+    const pinnedHtml = await res.text();
+    check('pinned post sorts first', pinnedHtml.indexOf('Skip the construction') < pinnedHtml.indexOf('Holiday schedule'), 'order ok');
+
+    res = await req(`${BASE}/admin/community/comments/${comment.id}/hide?token=${ADMIN_TOKEN}`, { method: 'POST' });
+    check('admin hides comment', res.status === 302 && db.prepare('SELECT status FROM community_comments WHERE id = ?').get(comment.id).status === 'hidden', `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community/${post.id}`, {});
+    check('hidden comment invisible to drivers', !(await res.text()).includes('Great tip, thanks!'), 'hidden ok');
+    res = await req(`${BASE}/admin/community/comments/${comment.id}/restore?token=${ADMIN_TOKEN}`, { method: 'POST' });
+    check('admin restores comment', res.status === 302 && db.prepare('SELECT status FROM community_comments WHERE id = ?').get(comment.id).status === 'visible', `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/community/posts/${post.id}/hide?token=${ADMIN_TOKEN}`, { method: 'POST' });
+    check('admin hides post', res.status === 302 && db.prepare('SELECT status FROM community_posts WHERE id = ?').get(post.id).status === 'hidden', `status=${res.status}`);
+    res = await req(`${BASE}/d/${pdDrv.access_token}/community/${post.id}`, {});
+    check('hidden post returns 404 to drivers', res.status === 404, `status=${res.status}`);
+    res = await req(`${BASE}/admin/community/posts/${post.id}/restore?token=${ADMIN_TOKEN}`, { method: 'POST' });
+    check('admin restores post', res.status === 302 && db.prepare('SELECT status FROM community_posts WHERE id = ?').get(post.id).status === 'visible', `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/community/reports/${report.id}/review?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['outcome', 'dismissed']] });
+    check('admin dismisses report', res.status === 302 && db.prepare('SELECT status FROM community_reports WHERE id = ?').get(report.id).status === 'dismissed', `status=${res.status}`);
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);
