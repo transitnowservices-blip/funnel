@@ -6769,3 +6769,52 @@ module.exports = {
   roomAdminPage,
 };
 ```
+
+---
+
+## 2026-09-20 — ACTION + ACCOUNTABILITY upgrade (additive, no rebuild)
+
+Implements Davena's LEARN → ACT → PROVE → REFLECT → REPEAT membership loop on
+top of the existing Wealth Builder's Room. Nothing existing was removed or
+changed in behavior; all additions are new routes, tables, views, and emails.
+
+New database tables (lib/db.js, auto-created at boot): `room_goals`,
+`room_checkins` (UNIQUE(email, week)), `room_reviews`. Proof files stored on
+disk under `data/proofs/<sha256(email)>/`, served only to the owning member
+via GET /room/proof/:id (ownership-checked, path-contained).
+
+New lib/room.js functions: getGoal, saveGoal (dates fixed on create, never on
+edit), weekInfo (currentWeek clamped 1..12), getCheckin, getCheckinById,
+listCheckins, saveCheckin (server timestamp on insert only; proof columns only
+on new upload), getReview, saveReview, progressStats (streak counts back from
+current/previous week, no shaming), accountabilitySummary.
+
+New lib/multipart.js: minimal multipart/form-data parser (node built-ins;
+8 MB file cap; PNG/JPG/GIF/WebP/PDF only; filename sanitized).
+
+New member routes (server.js, all requireRoomMember): GET/POST /room/goal,
+GET/POST /room/checkin (express.raw multipart on POST only; proof requires
+confirm checkbox), GET /room/progress (12-week tracker, "PROGRESS, NOT
+PERFECTION."), GET /room/proof/:id, GET/POST /room/review (journey summary).
+Dashboard shows goal card + check-in CTA; nav gains "My Progress"; lesson
+pages end with "NOW PUT IT INTO ACTION." → /room/checkin.
+
+Community: 12 weekly accountability posts (WEEK 1 … WEEK 12) seeded
+idempotently at boot, never pinned.
+
+Emails (lib/automation.js, existing email_queue): queueCheckinReminders()
+runs inside runSchedulerPass() — one reminder per active claimed member with
+a goal missing the current week's check-in, idempotent per (email, week);
+processOneEmail() has a `room-` branch that still cancels for suppressed /
+unsubscribed / inactive members. queueCheckinConfirmation() queues
+"Progress documented ✓" per check-in id.
+
+Admin /admin/room gains an Accountability section: per-member week, goal,
+check-ins n/12, checked-in-this-week, streak, last check-in, proof status,
+latest accomplishment/lesson/next commitment, review status, plus
+checked-in / not-checked-in lists. No rankings or leaderboard.
+
+Tests: scripts/test-funnel.js section 13 adds 27 assertions (goal lifecycle,
+server timestamps, proof upload + confirm guard + privacy, week math,
+reminder eligibility/dedupe/inactive/suppressed guards, confirmation email,
+admin accountability, 12 seeded posts). Full suite: 143/143 passing.
