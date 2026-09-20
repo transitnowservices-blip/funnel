@@ -35,6 +35,7 @@
 const { spawn } = require('node:child_process');
 const { DatabaseSync } = require('node:sqlite');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const path = require('node:path');
 
 const APP_ROOT = path.resolve(__dirname, '..');
@@ -526,6 +527,97 @@ async function main() {
     const hits = labels.filter(l => adminBody.includes(l));
     check('GET /admin dashboard 200 with key metric labels', res.status === 200 && hits.length >= 3,
       `status=${res.status} labels found=[${hits.join(',')}]`);
+
+    /* ---- 10. Stripe webhook signature verification ------------------ */
+    // Second server instance WITH STRIPE_WEBHOOK_SECRET set, exercising the
+    // real signature-verification path end to end.
+    const WEBHOOK_PORT = 3112;
+    const WEBHOOK_BASE = `http://127.0.0.1:${WEBHOOK_PORT}`;
+    const WEBHOOK_SECRET = `whsec_test_${ts}`;
+    const child2 = spawn('node', ['server.js'], {
+      cwd: APP_ROOT,
+      env: { ...process.env, ADMIN_TOKEN, PORT: String(WEBHOOK_PORT), EMAIL_PROVIDER: 'local', STRIPE_WEBHOOK_SECRET: WEBHOOK_SECRET },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    child2.stdout.on('data', d => process.stdout.write(`[server2] ${d}`));
+    child2.stderr.on('data', d => process.stderr.write(`[server2:err] ${d}`));
+    try {
+      const t1 = Date.now();
+      for (;;) {
+        try {
+          const hr = await req(`${WEBHOOK_BASE}/healthz`, {});
+          if (hr.status === 200 && (await hr.text()).trim() === 'ok') break;
+        } catch { /* not up yet */ }
+        if (Date.now() - t1 > SERVER_START_TIMEOUT_MS) failFast('webhook test server did not boot in time');
+        await new Promise(r => setTimeout(r, 300));
+      }
+      check('webhook test server boots with STRIPE_WEBHOOK_SECRET set', true);
+
+      const emailW = `e2e-webhook-${ts}@example.com`;
+      const jarW = new Jar();
+      await req(`${WEBHOOK_BASE}/`, { jar: jarW });
+      await req(`${WEBHOOK_BASE}/lead`, { jar: jarW, method: 'POST', form: { first_name: 'Webhook', email: emailW, consent: 'on' } });
+      const leadW = leadIdByEmail(db, S, emailW);
+      check('webhook test lead saved', leadW != null);
+
+      const stripeEvent = (type, amountTotal, email = emailW) => ({
+        id: `evt_test_${ts}`,
+        type,
+        data: { object: { id: `cs_test_${ts}`, customer_details: { email }, amount_total: amountTotal } },
+      });
+      const signPayload = (payload, secret) => {
+        const t = Math.floor(Date.now() / 1000);
+        const raw = JSON.stringify(payload);
+        const v1 = crypto.createHmac('sha256', secret).update(`${t}.${raw}`, 'utf8').digest('hex');
+        return { raw, header: `t=${t},v1=${v1}` };
+      };
+      const postWebhook = async (raw, sigHeader) => {
+        const headers = { 'content-type': 'application/json' };
+        if (sigHeader) headers['stripe-signature'] = sigHeader;
+        const ctl = new AbortController();
+        const to = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+        try {
+          return await fetch(`${WEBHOOK_BASE}/webhooks/stripe`, { method: 'POST', headers, body: raw, redirect: 'manual', signal: ctl.signal });
+        } finally { clearTimeout(to); }
+      };
+      const purchaseRows = () => db.prepare(
+        `SELECT product_id, mode, amount_cents FROM "${S.purchases}" WHERE "${S.purLead}" = ?`
+      ).all(S.purLead === 'email' ? emailW : leadW);
+
+      // 10a. Valid signature on checkout.session.completed ($100 -> Complete).
+      const evt1 = stripeEvent('checkout.session.completed', 10000);
+      const s1 = signPayload(evt1, WEBHOOK_SECRET);
+      let r = await postWebhook(s1.raw, s1.header);
+      let rows = purchaseRows();
+      check('signed checkout.session.completed records purchase (200)', r.status === 200 && rows.length === 1,
+        `status=${r.status} purchases=${rows.length}`);
+      check('webhook purchase mapped to Complete ($100) with mode=stripe',
+        rows[0] && rows[0].product_id === 'transitnow-complete' && rows[0].mode === 'stripe',
+        `row=${JSON.stringify(rows[0])}`);
+
+      // 10b. Tampered signature -> 400, no new purchase.
+      const s2 = signPayload(evt1, WEBHOOK_SECRET);
+      r = await postWebhook(s2.raw, s2.header.replace(/v1=./, 'v1=x'));
+      check('tampered stripe-signature rejected with 400', r.status === 400, `status=${r.status}`);
+      check('no purchase recorded for tampered signature', purchaseRows().length === 1,
+        `purchases=${purchaseRows().length}`);
+
+      // 10c. Missing signature while secret configured -> 400.
+      r = await postWebhook(JSON.stringify({ email: emailW, productId: 'transitnow-complete' }), null);
+      check('unsigned webhook rejected with 400 when secret configured', r.status === 400, `status=${r.status}`);
+
+      // 10d. Valid signature but non-purchase event type -> 200, handled=false, no purchase.
+      const evt4 = stripeEvent('customer.created', 10000);
+      const s4 = signPayload(evt4, WEBHOOK_SECRET);
+      r = await postWebhook(s4.raw, s4.header);
+      const b4 = await r.json().catch(() => ({}));
+      check('non-purchase event acknowledged without recording (200, handled=false)',
+        r.status === 200 && b4.handled === false, `status=${r.status} body=${JSON.stringify(b4)}`);
+      check('no purchase recorded for non-purchase event', purchaseRows().length === 1,
+        `purchases=${purchaseRows().length}`);
+    } finally {
+      await stopServer(child2);
+    }
 
   } finally {
     try { if (db) db.close(); } catch {}
