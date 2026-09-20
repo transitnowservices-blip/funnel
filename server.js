@@ -1216,6 +1216,15 @@ app.post('/admin/room/member-status', ah(async (req, res) => {
   res.redirect('/admin/room');
 }));
 
+
+app.post('/admin/room/add-member', ah(async (req, res) => {
+  const email = (req.body.email || '').trim().toLowerCase();
+  const name = (req.body.name || '').trim();
+  if (!EMAIL_RE.test(email)) return res.redirect('/admin/room');
+  await room.upsertMemberFromPurchase({ email, name: name || null });
+  res.redirect('/admin/room');
+}));
+
 app.get('/admin/config', (req, res) => {
   res.send(
     adminViews.adminLayout(
