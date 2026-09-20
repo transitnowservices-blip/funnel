@@ -373,6 +373,14 @@ function roomAdminPage({ members, posts }) {
 <th>Email</th><th>Name</th><th>Joined</th><th>Last login</th><th>Access</th><th>Status</th><th>Action</th>
 </tr></thead><tbody>${mrows || '<tr><td colspan="7">No members yet.</td></tr>'}</tbody></table>
 
+<h2>Add a member</h2>
+<form method="POST" action="/admin/room/add-member" class="form" style="max-width:640px">
+  <label for="memail">Email</label>
+  <input type="email" id="memail" name="email" required>
+  <label for="mname">Name (optional)</label>
+  <input type="text" id="mname" name="name" maxlength="120">
+  <p><button type="submit" class="btn">Add member</button></p>
+</form>
 <h2>Post an announcement</h2>
 <form method="POST" action="/admin/room/announce" class="form" style="max-width:640px">
   <label for="atitle">Title (optional)</label>
