@@ -126,8 +126,11 @@ function contractDetailHtml({ contract: c, history, documents, opportunity, rela
     <tr><td>${fmtTs(h.ts)}</td><td>${esc(h.from_status || '—')} → ${esc(h.to_status)}</td>
     <td>${esc(h.changed_by || '')}</td><td>${esc(h.note || '')}</td></tr>`).join('');
   const docRows = (documents || []).map((d) => `
-    <tr><td>${esc(d.doc_type || '—')}</td><td>${esc(d.file_name || '—')}</td>
-    <td>${esc(d.notes || '')}</td><td>${esc(d.uploaded_by || '')}<br><span class="muted">${fmtTs(d.uploaded_at)}</span></td></tr>`).join('');
+    <tr><td>${esc(d.doc_type || '—')}</td><td>${esc(d.file_name || '—')}${d.document_id ? `<br><a class="btn btn-small" href="/admin/documents/${d.document_id}/download">Download</a>` : ''}</td>
+    <td>${esc(d.notes || '')}</td>
+    <td>${d.document_id ? `${esc(d.verification_status || 'unverified')}${d.verified_by ? `<br><span class="muted">by ${esc(d.verified_by)} ${fmtTs(d.verified_at)}</span>` : ''}` : '<span class="muted">reference only</span>'}</td>
+    <td>${d.expires_at ? esc(new Date(Number(d.expires_at)).toLocaleDateString()) : '—'}</td>
+    <td>${esc(d.uploaded_by || '')}<br><span class="muted">${fmtTs(d.uploaded_at)}</span></td></tr>`).join('');
   const routeRows = (linkedRoutes || []).map((r) => `
     <tr><td><a href="/admin/routes/${r.id}">${esc(r.route_code)}</a></td>
     <td>${esc(r.title || '')}</td><td>${esc(r.status)}</td></tr>`).join('');
@@ -204,16 +207,34 @@ ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
 </div>
 
 <div class="card">
-  <h3>Document references (${(documents || []).length})</h3>
-  <p class="microcopy"><strong>Placeholder:</strong> references only — file upload and secure document storage arrive in Phase 6 (spec section 23).</p>
+  <h3>Documents (${(documents || []).length})</h3>
+  <div class="card">
+    <h4>Upload a real document</h4>
+    <form method="POST" action="/admin/contracts/${c.id}/documents/upload" enctype="multipart/form-data" class="filter-form">
+      <label>Document type
+        <select name="doc_type">
+          <option value="contract_document">Contract document</option>
+          <option value="agreement">Agreement</option>
+          <option value="insurance">Insurance</option>
+          <option value="other">Other</option>
+        </select>
+      </label>
+      <label>Expires <input type="date" name="expires_at" style="min-height:44px"></label>
+      <input type="text" name="notes" placeholder="Notes (optional)" style="min-height:44px;flex:1;min-width:160px">
+      <input type="file" name="file" accept=".png,.jpg,.jpeg,.gif,.webp,.pdf" required>
+      <button type="submit" class="btn btn-small">Upload</button>
+    </form>
+    <p class="microcopy">Uploaded files are stored securely server-side with verification status and optional expiration; expiring documents feed the alerts system.</p>
+  </div>
+  <h4>Document references</h4>
   <form method="POST" action="/admin/contracts/${c.id}/document" class="form">
     <label>Document type <input type="text" name="doc_type" placeholder="e.g. Master services agreement"></label>
     <label>File / reference name <input type="text" name="file_name" placeholder="e.g. MSA-2026-signed.pdf"></label>
     <label>Notes <input type="text" name="notes"></label>
     <button type="submit" class="btn btn-small">Add reference</button>
   </form>
-  <table class="admin-table"><thead><tr><th>Type</th><th>Reference</th><th>Notes</th><th>Added</th></tr></thead>
-  <tbody>${docRows || '<tr><td colspan="4">No document references yet.</td></tr>'}</tbody></table>
+  <table class="admin-table"><thead><tr><th>Type</th><th>File</th><th>Notes</th><th>Verification</th><th>Expires</th><th>Added</th></tr></thead>
+  <tbody>${docRows || '<tr><td colspan="6">No documents yet.</td></tr>'}</tbody></table>
 </div>
 
 <h2>Status history</h2>

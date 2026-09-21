@@ -61,7 +61,7 @@ function filterFormHtml({ f, options }) {
     <a class="btn btn-small" href="/admin/operations">Clear</a>
   </form>
   <p class="microcopy">
-    State metrics (routes, drivers, packages in transit / remaining, exceptions, support, opportunities) are
+    State metrics (routes, drivers, packages in transit / remaining, exceptions, support, opportunities, alerts, follow-ups due, community reports, plan requests) are
     <strong>current as of now</strong> — the app keeps no "as of" history for them, so they are not back-dated.
     "New" and "delivered" metrics use the selected date window (${esc(f.windowLabel)}).
     The status filter applies per table (route / driver / package / exception / ticket / opportunity statuses).
@@ -83,7 +83,7 @@ function commandCenterHtml({ metrics, options }) {
 
   return `
 <h2>Operations command center</h2>
-<p class="microcopy">Today's operation at a glance — every number below is computed live from the real tables (routes, packages, drivers, exceptions, support tickets, leads, opportunities).</p>
+<p class="microcopy">Today's operation at a glance — every number below is computed live from the real tables (routes, packages, drivers, exceptions, support tickets, leads, opportunities, alerts, follow-ups, community reports, plan requests).</p>
 ${filterFormHtml({ f, options })}
 ${hasFilters ? `<p class="microcopy"><strong>Filters active:</strong> ${esc(activeBits.join(' · '))}</p>` : ''}
 <div class="metric-cards">

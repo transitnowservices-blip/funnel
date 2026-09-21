@@ -163,7 +163,10 @@ function dashboardPage({ site, driver, dashUrl }) {
     ['Support', '/d/' + driver.access_token + '/support', 'Get help or report an urgent issue.', true],
     ['Go live with operations', '/d/' + driver.access_token + '/go-live', 'Request a live video/audio session with operations.', true],
     ['Community', '/d/' + driver.access_token + '/community', 'Connect with other TransitNow drivers.', true],
-    ['My plan', '/d/' + driver.access_token + '/plan', 'Your service plan and billing.', true],
+    ['My plan', '/d/' + driver.access_token + '/plan', 'Your service plan and requests.', true],
+    // Phase 6: referral code + document upload, driver-scoped.
+    ['Referrals', '/d/' + driver.access_token + '/referral', 'Your referral code and share link.', true],
+    ['My documents', '/d/' + driver.access_token + '/documents', 'Upload and view your documents.', true],
   ];
   const cardsHtml = cards
     .map(

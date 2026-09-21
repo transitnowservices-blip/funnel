@@ -101,7 +101,7 @@ async function runScheduler() {
 }
 
 /** POST a multipart/form-data body (for the proof-of-progress upload route). */
-async function multipartReq(url, { jar = null, fields = {}, file = null } = {}) {
+async function multipartReq(url, { jar = null, fields = {}, file = null, fileField = 'proof' } = {}) {
   const boundary = '----e2eboundary' + Date.now();
   const parts = [];
   for (const [k, v] of Object.entries(fields)) {
@@ -109,7 +109,7 @@ async function multipartReq(url, { jar = null, fields = {}, file = null } = {}) 
   }
   if (file) {
     parts.push(Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="proof"; filename="${file.filename}"\r\nContent-Type: ${file.mime}\r\n\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="${fileField}"; filename="${file.filename}"\r\nContent-Type: ${file.mime}\r\n\r\n`,
       'utf8'
     ));
     parts.push(file.buffer);
@@ -2653,7 +2653,8 @@ async function main() {
       p3DetailHtml.includes('Up to 150 stops') && p3DetailHtml.includes('Cargo van or larger') &&
       p3DetailHtml.includes('2 yrs experience') && p3DetailHtml.includes('Commercial auto $1M') &&
       p3DetailHtml.includes('98% on-time') && p3DetailHtml.includes('Net 30') &&
-      p3DetailHtml.includes('MSA draft') && p3DetailHtml.includes('Phase 6'),
+      p3DetailHtml.includes('MSA draft') && p3DetailHtml.includes('Upload a real document') &&
+      p3DetailHtml.includes('/documents/upload'),
       'status=' + res.status);
 
     res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [
@@ -3233,6 +3234,424 @@ async function main() {
       db.prepare("SELECT COUNT(*) n FROM live_session_events WHERE session_id LIKE 'TN-LIVE-%' AND session_id IN (" +
         (p5Sids.length ? p5Sids.map(() => '?').join(',') : "''") + ")").get(...p5Sids).n === 0,
       'leftover rows');
+
+    /* ---- Phase 6: referrals / follow-ups / alerts / document management ---- */
+    // Covers: referral code issue → driver referral page → ?ref= prefill →
+    // attribution → status update → revoke; lead follow-up history with exact
+    // spec statuses; alerts generated from real seeded data (tickets,
+    // exceptions, lost packages, leads, missing/expiring documents) with
+    // preferences, ack/resolve, auto-resolution, idempotency; document
+    // upload → DB record → stored bytes → download → verify → contract
+    // linkage; driver/own vs sensitive document boundaries; command-center
+    // wiring for community + plans; driver dashboard cards.
+    const p6ts = Date.now();
+    const p6 = (n) => `p6-${String(n).toLowerCase()}-${p6ts}@example.com`;
+    const p6OutboxBefore = outboxFiles();
+    const p6qBefore = (db.prepare('SELECT MAX(id) m FROM email_queue').get().m || 0);
+    async function p6Onboard(name, email) {
+      const r = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+        ['full_name', name], ['email', email], ['phone', '4145550100'],
+        ['contact_method', 'text'], ['vehicle_type', 'cargo_van'], ['vehicle_make_model', 'Ford Transit'],
+        ['home_city', 'Milwaukee'], ['home_state', 'WI'], ['days_available', 'mon'],
+        ['work_prefs', 'local'], ['looking_for', 'routes'],
+      ]});
+      if (r.status !== 200) failFast('phase6: driver onboard failed: ' + r.status);
+      return db.prepare('SELECT * FROM drivers WHERE email = ?').get(email);
+    }
+    const p6drvA = await p6Onboard('P6 Driver A', p6('drvA'));
+    const p6drvB = await p6Onboard('P6 Driver B', p6('drvB'));
+    check('phase6: two test drivers created', !!p6drvA && !!p6drvB, 'missing driver rows');
+
+    // --- Referrals ---
+    res = await req(`${BASE}/admin/referrals/issue?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['issued_to_type', 'driver'], ['issued_to_id', String(p6drvA.id)],
+      ['name', 'P6 Driver A'], ['email', p6('drvA')],
+    ]});
+    const p6Code = db.prepare('SELECT * FROM referral_codes WHERE issued_to_id = ?').get(p6drvA.id);
+    check('phase6: referral code issued to driver with TN-XXXXXX format',
+      res.status === 302 && !!p6Code && /^TN-[A-Z0-9]{6}$/.test(p6Code.code) && p6Code.status === 'active',
+      `status=${res.status} code=${p6Code && p6Code.code}`);
+
+    res = await req(`${BASE}/d/${p6drvA.access_token}/referral`, {});
+    const p6RefHtml = await res.text();
+    check('phase6: driver referral page shows code, share link, no-payment copy, mobile viewport',
+      res.status === 200 && p6RefHtml.includes(p6Code.code) &&
+      p6RefHtml.includes('/grow/apply?ref=' + p6Code.code) &&
+      p6RefHtml.includes('No referral payment program') &&
+      p6RefHtml.includes('name="viewport"'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/grow/apply?ref=${p6Code.code}`, {});
+    check('phase6: /grow/apply?ref=CODE prefills the referral code field',
+      res.status === 200 && (await res.text()).includes(`value="${p6Code.code}"`),
+      `status=${res.status}`);
+
+    const p6LeadId = db.prepare(
+      "INSERT INTO opportunity_leads (lead_type, status, first_name, last_name, email, phone, city, state, created_at, updated_at) VALUES ('GROW','NEW','P6','RefLead', ?, '4145550100','Milwaukee','WI', ?, ?)"
+    ).run(p6('reflead'), p6ts, p6ts).lastInsertRowid;
+    db.prepare('INSERT INTO lead_sources (lead_id, source, referral_code) VALUES (?, ?, ?)').run(p6LeadId, 'referral', p6Code.code);
+    res = await req(`${BASE}/admin/referrals/attribute?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    const p6AttrLoc = res.headers.get('location') || '';
+    let p6AttrSummary = {};
+    try { p6AttrSummary = JSON.parse(decodeURIComponent((p6AttrLoc.split('attributed=')[1] || '').split('&')[0])); } catch {}
+    const p6Attr = db.prepare('SELECT * FROM referral_attributions WHERE code_id = ?').get(p6Code.id);
+    check('phase6: attribution links referred lead to the referral code',
+      res.status === 302 && !!p6Attr && p6Attr.referred_lead_id === p6LeadId &&
+      p6Attr.status === 'applied' && p6AttrSummary.created === 1,
+      `status=${res.status} attr=${JSON.stringify(p6Attr && { lead: p6Attr.referred_lead_id, status: p6Attr.status })} summary=${JSON.stringify(p6AttrSummary)}`);
+
+    const p6NopeLeadId = db.prepare(
+      "INSERT INTO opportunity_leads (lead_type, status, first_name, last_name, email, phone, city, state, created_at, updated_at) VALUES ('GROW','NEW','P6','Nope', ?, '4145550100','Milwaukee','WI', ?, ?)"
+    ).run(p6('nope'), p6ts, p6ts).lastInsertRowid;
+    db.prepare('INSERT INTO lead_sources (lead_id, source, referral_code) VALUES (?, ?, ?)').run(p6NopeLeadId, 'referral', 'TN-NOPE12');
+    res = await req(`${BASE}/admin/referrals/attribute?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    const p6NopeLoc = res.headers.get('location') || '';
+    let p6NopeSummary = {};
+    try { p6NopeSummary = JSON.parse(decodeURIComponent((p6NopeLoc.split('attributed=')[1] || '').split('&')[0])); } catch {}
+    check('phase6: unknown referral code attributes nothing',
+      res.status === 302 && p6NopeSummary.created === 0 &&
+      !db.prepare('SELECT * FROM referral_attributions WHERE referred_lead_id = ?').get(p6NopeLeadId),
+      `status=${res.status} summary=${JSON.stringify(p6NopeSummary)}`);
+
+    res = await req(`${BASE}/admin/referrals/attributions/${p6Attr.id}?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['status', 'qualified'], ['outcome', 'Submitted full application'],
+    ]});
+    const p6AttrRow = db.prepare('SELECT status s, outcome o FROM referral_attributions WHERE id = ?').get(p6Attr.id);
+    check('phase6: attribution status + outcome updated',
+      res.status === 302 && p6AttrRow.s === 'qualified' && p6AttrRow.o === 'Submitted full application',
+      `status=${res.status} row=${JSON.stringify(p6AttrRow)}`);
+
+    res = await req(`${BASE}/admin/referrals?token=${ADMIN_TOKEN}`, {});
+    const p6RefsHtml = await res.text();
+    check('phase6: admin referrals page lists code + no-payment-program copy',
+      res.status === 200 && p6RefsHtml.includes(p6Code.code) &&
+      p6RefsHtml.includes('No referral payment program'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/referrals/${p6Code.id}/revoke?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: referral code revoked',
+      res.status === 302 && db.prepare('SELECT status FROM referral_codes WHERE id = ?').get(p6Code.id).status === 'revoked',
+      `status=${res.status}`);
+
+    // --- Follow-ups ---
+    const p6Tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10); // YYYY-MM-DD
+    res = await req(`${BASE}/admin/crm/leads/${p6LeadId}/followup?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['followup_status', 'WAITING ON RESPONSE'], ['next_follow_up_at', p6Tomorrow],
+      ['assigned_to', 'Ops Team'], ['note', 'Called, no answer. Try again.'], ['outcome', 'Callback requested'],
+      ['contact_attempt', '1'], ['reminder', '1'],
+    ]});
+    const p6Fu = db.prepare('SELECT * FROM lead_followups WHERE lead_id = ? ORDER BY id DESC LIMIT 1').get(p6LeadId);
+    check('phase6: follow-up recorded with exact status, contact attempt, assignment, reminder',
+      res.status === 302 && !!p6Fu && p6Fu.followup_status === 'WAITING ON RESPONSE' &&
+      p6Fu.contact_attempt === 1 && p6Fu.assigned_to === 'Ops Team' &&
+      p6Fu.last_contact_at != null && p6Fu.next_follow_up_at != null && p6Fu.reminder === 1,
+      `status=${res.status} row=${JSON.stringify(p6Fu && { status: p6Fu.followup_status, attempt: p6Fu.contact_attempt })}`);
+
+    res = await req(`${BASE}/admin/crm/leads/${p6LeadId}/followup?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['followup_status', 'BOGUS-STATUS'], ['note', 'Invalid status attempt'],
+    ]});
+    check('phase6: invalid follow-up status falls back to FOLLOW UP',
+      res.status === 302 &&
+      db.prepare('SELECT followup_status s FROM lead_followups WHERE lead_id = ? ORDER BY id DESC LIMIT 1').get(p6LeadId).s === 'FOLLOW UP',
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/crm/leads/${p6LeadId}?token=${ADMIN_TOKEN}`, {});
+    const p6LeadHtml = await res.text();
+    check('phase6: lead profile shows follow-up history, contact attempts, referral attribution, exact status list',
+      res.status === 200 && p6LeadHtml.includes('WAITING ON RESPONSE') &&
+      p6LeadHtml.includes('Contact attempts') && p6LeadHtml.includes(p6Code.code) &&
+      /value="NURTURE"/.test(p6LeadHtml) && /value="CLOSED"/.test(p6LeadHtml) &&
+      p6LeadHtml.includes('Called, no answer'),
+      `status=${res.status}`);
+
+    // --- Alerts from real data ---
+    res = await req(`${BASE}/d/${p6drvA.access_token}/support`, { method: 'POST', form: [
+      ['category', 'safety_concern'], ['priority', 'urgent'],
+      ['subject', 'P6 urgent ' + p6ts], ['description', 'Engine warning light on'],
+    ]});
+    check('phase6: driver urgent ticket created via real support flow', res.status === 302, `status=${res.status}`);
+    const p6PkgId = 'P6PKG' + p6ts;
+    const p6LostId = 'P6LOST' + p6ts;
+    db.prepare("INSERT INTO packages (package_id, driver_id, status, created_at, updated_at) VALUES (?, ?, 'in_transit', ?, ?)").run(p6PkgId, p6drvA.id, p6ts, p6ts);
+    db.prepare("INSERT INTO packages (package_id, driver_id, status, created_at, updated_at) VALUES (?, ?, 'lost_investigation', ?, ?)").run(p6LostId, p6drvA.id, p6ts, p6ts);
+    const p6ExId = db.prepare(
+      "INSERT INTO package_exceptions (package_id, route_id, driver_id, exception_type, description, status, created_by, created_at) VALUES (?, NULL, ?, 'damaged_package', 'P6 exception', 'open', 'driver', ?)"
+    ).run(p6PkgId, p6drvA.id, p6ts).lastInsertRowid;
+    db.prepare(
+      "INSERT INTO opportunity_leads (lead_type, status, first_name, last_name, email, phone, city, state, created_at, updated_at) VALUES ('GROW','NEW','P6','App', ?, '4145550100','Milwaukee','WI', ?, ?)"
+    ).run(p6('app'), p6ts, p6ts);
+    db.prepare(
+      "INSERT INTO opportunity_leads (lead_type, status, first_name, last_name, email, phone, city, state, created_at, updated_at) VALUES ('RSP','RSP INTEREST','P6','Rsp', ?, '4145550100','Milwaukee','WI', ?, ?)"
+    ).run(p6('rsp'), p6ts, p6ts);
+    res = await req(`${BASE}/admin/drivers/${p6drvA.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['status', 'active']] });
+    check('phase6: driver set active (triggers missing-document alerts)', res.status === 302, `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/alerts/generate?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    const p6Types = new Set(db.prepare('SELECT alert_type FROM alerts').all().map((r) => r.alert_type));
+    check('phase6: alerts generated from real data across all seed types',
+      res.status === 302 &&
+      ['urgent_support', 'package_exception', 'lost_package', 'new_applicant', 'new_rsp_lead', 'required_document']
+        .every((t) => p6Types.has(t)),
+      `status=${res.status} types=[${[...p6Types].join(',')}]`);
+
+    res = await req(`${BASE}/admin/alerts?token=${ADMIN_TOKEN}`, {});
+    const p6AlertsHtml = await res.text();
+    check('phase6: alerts page lists open alerts with type labels',
+      res.status === 200 && p6AlertsHtml.includes('Alerts (') && p6AlertsHtml.includes('Urgent support') &&
+      p6AlertsHtml.includes('Package exception') && p6AlertsHtml.includes('/admin/alerts'),
+      `status=${res.status}`);
+
+    const p6NewOutbox = newFilesSince(p6OutboxBefore);
+    check('phase6: alert notifications queued to ops email (no delivery claim)',
+      p6NewOutbox.length >= 1 && filesMentioning('transitnowservices@gmail.com', p6NewOutbox).length >= 1,
+      `new outbox files=${p6NewOutbox.length}`);
+
+    const p6AlertCount = db.prepare('SELECT COUNT(*) n FROM alerts').get().n;
+    await req(`${BASE}/admin/alerts/generate?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: alert generation is idempotent (no duplicates on re-run)',
+      db.prepare('SELECT COUNT(*) n FROM alerts').get().n === p6AlertCount,
+      `before=${p6AlertCount} after=${db.prepare('SELECT COUNT(*) n FROM alerts').get().n}`);
+
+    const p6LostAlert = db.prepare("SELECT * FROM alerts WHERE alert_type = 'lost_package' LIMIT 1").get();
+    res = await req(`${BASE}/admin/alerts/${p6LostAlert.id}/acknowledge?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: alert acknowledged',
+      res.status === 302 && db.prepare('SELECT status FROM alerts WHERE id = ?').get(p6LostAlert.id).status === 'acknowledged',
+      `status=${res.status}`);
+    const p6RspAlert = db.prepare("SELECT * FROM alerts WHERE alert_type = 'new_rsp_lead' ORDER BY id DESC LIMIT 1").get();
+    res = await req(`${BASE}/admin/alerts/${p6RspAlert.id}/resolve?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: alert resolved',
+      res.status === 302 && db.prepare('SELECT status FROM alerts WHERE id = ?').get(p6RspAlert.id).status === 'resolved',
+      `status=${res.status}`);
+
+    // Overdue follow-up reminder -> shown in the alerts page "Overdue follow-up reminders" section.
+    db.prepare(
+      'INSERT INTO lead_followups (lead_id, followup_status, next_follow_up_at, reminder, created_by, created_at) VALUES (?, ?, ?, 1, ?, ?)'
+    ).run(p6LeadId, 'FOLLOW UP', Date.now() - 7200_000, 'admin', p6ts);
+    res = await req(`${BASE}/admin/alerts?token=${ADMIN_TOKEN}`, {});
+    const p6AlertsHtml2 = await res.text();
+    check('phase6: overdue follow-up reminder appears on the alerts page',
+      res.status === 200 && p6AlertsHtml2.includes('Overdue follow-up reminders') &&
+      p6AlertsHtml2.includes('P6') && p6AlertsHtml2.includes(`/admin/crm/leads/${p6LeadId}`),
+      `status=${res.status}`);
+
+    // Notification preference: disable new_rsp_lead emails; alert still records, email not queued.
+    res = await req(`${BASE}/admin/alerts/prefs?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['type_urgent_support', '1'], ['type_package_exception', '1'], ['type_lost_package', '1'],
+      ['type_new_applicant', '1'], ['type_required_document', '1'],
+      ['type_expiring_document', '1'],
+    ]});
+    check('phase6: notification preference disables an alert channel',
+      res.status === 302 &&
+      db.prepare("SELECT notify_enabled e FROM notification_prefs WHERE alert_type = 'new_rsp_lead'").get().e === 0,
+      `status=${res.status}`);
+    db.prepare(
+      "INSERT INTO opportunity_leads (lead_type, status, first_name, last_name, email, phone, city, state, created_at, updated_at) VALUES ('RSP','RSP INTEREST','P6','Rsp2', ?, '4145550100','Milwaukee','WI', ?, ?)"
+    ).run(p6('rsp2'), p6ts, p6ts);
+    const p6OutboxMid = newFilesSince(p6OutboxBefore);
+    await req(`${BASE}/admin/alerts/generate?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: disabled alert type still records the alert but queues no email',
+      db.prepare("SELECT COUNT(*) n FROM alerts WHERE alert_type = 'new_rsp_lead' AND status = 'open'").get().n >= 1 &&
+      newFilesSince(p6OutboxBefore).length === p6OutboxMid.length,
+      `open rsp alerts=${db.prepare("SELECT COUNT(*) n FROM alerts WHERE alert_type = 'new_rsp_lead' AND status = 'open'").get().n}`);
+
+    // Auto-resolution: resolve the exception -> its alert auto-resolves on next generate.
+    db.prepare("UPDATE package_exceptions SET status = 'resolved' WHERE id = ?").run(p6ExId);
+    await req(`${BASE}/admin/alerts/generate?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: resolving the underlying exception auto-resolves its alert',
+      db.prepare("SELECT status s FROM alerts WHERE alert_type = 'package_exception' AND source_id = ?").get(String(p6ExId)).s === 'resolved',
+      'alert not auto-resolved');
+
+    // --- Document management ---
+    res = await multipartReq(`${BASE}/admin/documents/upload?token=${ADMIN_TOKEN}`, {
+      fields: { owner_type: 'driver', owner_id: String(p6drvA.id), doc_type: 'driver_license' },
+      fileField: 'file',
+      file: { filename: 'license.png', mime: 'image/png', buffer: TINY_PNG },
+    });
+    const p6Doc = db.prepare("SELECT * FROM driver_documents WHERE owner_id = ? AND doc_type = 'driver_license' ORDER BY id DESC LIMIT 1").get(p6drvA.id);
+    check('phase6: admin document upload stores record + file bytes',
+      res.status === 302 && !!p6Doc && Buffer.from(p6Doc.file_blob).equals(TINY_PNG) &&
+      p6Doc.file_mime === 'image/png' && p6Doc.size_bytes === TINY_PNG.length,
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/documents/${p6Doc.id}/download?token=${ADMIN_TOKEN}`, {});
+    const p6Dl = Buffer.from(await res.arrayBuffer());
+    check('phase6: admin document download returns the exact stored bytes',
+      res.status === 200 && String(res.headers.get('content-type') || '').startsWith('image/png') && p6Dl.equals(TINY_PNG),
+      `status=${res.status} ct=${res.headers.get('content-type')}`);
+
+    res = await req(`${BASE}/admin/documents/${p6Doc.id}/verify?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['verification_status', 'verified'], ['notes', 'Readable'],
+    ]});
+    const p6DocV = db.prepare('SELECT verification_status s, verified_by b FROM driver_documents WHERE id = ?').get(p6Doc.id);
+    check('phase6: admin verifies document',
+      res.status === 302 && p6DocV.s === 'verified' && p6DocV.b === 'admin',
+      `status=${res.status} row=${JSON.stringify(p6DocV)}`);
+
+    res = await multipartReq(`${BASE}/d/${p6drvA.access_token}/documents/upload`, {
+      fields: { doc_type: 'insurance' },
+      fileField: 'file',
+      file: { filename: 'insurance.png', mime: 'image/png', buffer: TINY_PNG },
+    });
+    const p6Ins = db.prepare("SELECT * FROM driver_documents WHERE owner_id = ? AND doc_type = 'insurance' ORDER BY id DESC LIMIT 1").get(p6drvA.id);
+    check('phase6: driver uploads own document',
+      res.status === 302 && !!p6Ins,
+      `status=${res.status}`);
+
+    res = await multipartReq(`${BASE}/d/${p6drvA.access_token}/documents/upload`, {
+      fields: { doc_type: 'w9' },
+      fileField: 'file',
+      file: { filename: 'w9.png', mime: 'image/png', buffer: TINY_PNG },
+    });
+    check('phase6: driver cannot upload a sensitive document type (400)',
+      res.status === 400 &&
+      db.prepare("SELECT COUNT(*) n FROM driver_documents WHERE owner_id = ? AND doc_type = 'w9' AND uploaded_by = ?").get(p6drvA.id, 'driver').n === 0,
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${p6drvB.access_token}/documents/${p6Doc.id}/download`, {});
+    check('phase6: driver cannot download another driver\u2019s document (403)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/documents/${p6Doc.id}/download`, {});
+    check('phase6: unauthenticated admin document download blocked (403)', res.status === 403, `status=${res.status}`);
+
+    res = await multipartReq(`${BASE}/admin/documents/upload?token=${ADMIN_TOKEN}`, {
+      fields: { owner_type: 'driver', owner_id: String(p6drvA.id), doc_type: 'w9' },
+      fileField: 'file',
+      file: { filename: 'w9.png', mime: 'image/png', buffer: TINY_PNG },
+    });
+    const p6W9 = db.prepare("SELECT * FROM driver_documents WHERE owner_id = ? AND doc_type = 'w9' ORDER BY id DESC LIMIT 1").get(p6drvA.id);
+    res = await req(`${BASE}/d/${p6drvA.access_token}/documents`, {});
+    const p6DrvDocsHtml = await res.text();
+    check('phase6: sensitive documents are hidden from the driver\u2019s list',
+      res.status === 200 && !!p6W9 && !p6DrvDocsHtml.includes('w9.png') && p6DrvDocsHtml.includes('license.png') &&
+      p6DrvDocsHtml.includes('name="viewport"'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/d/${p6drvA.access_token}/documents/${p6W9.id}/download`, {});
+    check('phase6: driver blocked from downloading a sensitive document (403)', res.status === 403, `status=${res.status}`);
+
+    await req(`${BASE}/admin/alerts/generate?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: documents on file auto-resolve required-document alerts (verified or pending review)',
+      db.prepare("SELECT status s FROM alerts WHERE alert_type = 'required_document' AND source_id = ? ORDER BY id DESC LIMIT 1").get(`${p6drvA.id}:driver_license`).s === 'resolved' &&
+      db.prepare("SELECT status s FROM alerts WHERE alert_type = 'required_document' AND source_id = ? ORDER BY id DESC LIMIT 1").get(`${p6drvA.id}:insurance`).s === 'resolved',
+      'auto-resolution mismatch');
+
+    // Rejecting a document marks it rejected at the document level.
+    res = await req(`${BASE}/admin/documents/${p6Ins.id}/verify?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['verification_status', 'rejected'], ['notes', 'Unreadable scan'],
+    ]});
+    check('phase6: admin can reject a document',
+      res.status === 302 &&
+      db.prepare('SELECT verification_status s FROM driver_documents WHERE id = ?').get(p6Ins.id).s === 'rejected',
+      `status=${res.status}`);
+
+    // --- Contract documents ---
+    res = await req(`${BASE}/admin/contracts?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['client', 'P6 Client'], ['contract_name', 'P6 Contract'], ['start_date', '2026-09-01'], ['end_date', '2027-09-01'],
+    ]});
+    const p6ContractId = Number(((res.headers.get('location') || '').match(/\/admin\/contracts\/(\d+)/) || [])[1]);
+    check('phase6: test contract created', res.status === 302 && p6ContractId > 0, `status=${res.status}`);
+    const p6Exp = new Date(Date.now() + 5 * 864e5).toISOString().slice(0, 10);
+    res = await multipartReq(`${BASE}/admin/contracts/${p6ContractId}/documents/upload?token=${ADMIN_TOKEN}`, {
+      fields: { doc_type: 'agreement', expires_at: p6Exp, notes: 'Signed MSA' },
+      fileField: 'file',
+      file: { filename: 'msa.png', mime: 'image/png', buffer: TINY_PNG },
+    });
+    const p6CDoc = db.prepare('SELECT * FROM contract_documents WHERE contract_id = ?').get(p6ContractId);
+    check('phase6: contract document upload links a real stored file to the contract',
+      res.status === 302 && !!p6CDoc && !!p6CDoc.document_id && p6CDoc.verification_status === 'unverified' &&
+      Buffer.from(db.prepare('SELECT file_blob b FROM driver_documents WHERE id = ?').get(p6CDoc.document_id).b).equals(TINY_PNG),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/contracts/${p6ContractId}?token=${ADMIN_TOKEN}`, {});
+    const p6ContractHtml = await res.text();
+    check('phase6: contract page shows the real document with download + verification state',
+      res.status === 200 && p6ContractHtml.includes('Download') && p6ContractHtml.includes('unverified'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/documents/${p6CDoc.document_id}/verify?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['verification_status', 'verified'],
+    ]});
+    await req(`${BASE}/admin/alerts/generate?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    check('phase6: verified expiring contract document raises an expiring-document alert',
+      db.prepare('SELECT verification_status s FROM contract_documents WHERE id = ?').get(p6CDoc.id).s === 'verified' &&
+      db.prepare("SELECT COUNT(*) n FROM alerts WHERE alert_type = 'expiring_document' AND source_id = ?").get(String(p6CDoc.document_id)).n === 1,
+      'no expiring_document alert');
+
+    // --- Community + plans wiring (existing modules, deep links) ---
+    res = await req(`${BASE}/admin/operations?token=${ADMIN_TOKEN}`, {});
+    const p6OpsHtml = await res.text();
+    check('phase6: command center wires alerts, follow-ups, community, plans (cards + deep links)',
+      res.status === 200 && p6OpsHtml.includes('Open alerts') && p6OpsHtml.includes('/admin/alerts') &&
+      p6OpsHtml.includes('Follow-ups due') && p6OpsHtml.includes('Community reports (open)') &&
+      p6OpsHtml.includes('/admin/community') && p6OpsHtml.includes('Plan requests (pending)') &&
+      p6OpsHtml.includes('/admin/plans'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/d/${p6drvA.access_token}/community`, { method: 'POST', form: [
+      ['category', 'general'], ['title', 'P6 hello ' + p6ts], ['body', 'Testing community wiring'],
+    ]});
+    check('phase6: driver community post created', res.status === 302, `status=${res.status}`);
+    res = await req(`${BASE}/admin/community?token=${ADMIN_TOKEN}`, {});
+    check('phase6: admin community page lists the real driver post',
+      res.status === 200 && (await res.text()).includes('P6 hello ' + p6ts),
+      `status=${res.status}`);
+
+    const p6PlansEnabledBefore = db.prepare('SELECT plans_enabled e FROM service_plan_settings WHERE id = 1').get().e;
+    await req(`${BASE}/admin/plans/settings?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['plans_enabled', '1'], ['billing_frequency', 'weekly'],
+    ]});
+    res = await req(`${BASE}/d/${p6drvA.access_token}/plan/request`, { method: 'POST', form: [['plan_id', 'essential']] });
+    check('phase6: driver requests a service plan', res.status === 302, `status=${res.status}`);
+    res = await req(`${BASE}/admin/operations?token=${ADMIN_TOKEN}`, {});
+    check('phase6: command center shows the pending plan request card',
+      (await res.text()).includes('Plan requests (pending)'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/plans?token=${ADMIN_TOKEN}`, {});
+    check('phase6: admin plans page shows the pending request',
+      res.status === 200 && (await res.text()).includes('P6 Driver A'),
+      `status=${res.status}`);
+    db.prepare('UPDATE service_plan_settings SET plans_enabled = ? WHERE id = 1').run(p6PlansEnabledBefore);
+
+    // --- Driver dashboard cards ---
+    res = await req(`${BASE}/d/${p6drvA.access_token}`, {});
+    const p6Dash = await res.text();
+    check('phase6: driver dashboard links Referrals + My documents, no billing-engine wording',
+      res.status === 200 && p6Dash.includes(`/d/${p6drvA.access_token}/referral`) &&
+      p6Dash.includes(`/d/${p6drvA.access_token}/documents`) &&
+      !p6Dash.includes('plan and billing'),
+      `status=${res.status}`);
+
+    // --- Phase 6 cleanup ---
+    db.prepare('DELETE FROM referral_attributions').run();
+    db.prepare('DELETE FROM referral_codes').run();
+    db.prepare('DELETE FROM lead_followups').run();
+    db.prepare('DELETE FROM alerts').run();
+    db.prepare("UPDATE notification_prefs SET notify_enabled = 1").run();
+    db.prepare('DELETE FROM contract_documents WHERE contract_id = ?').run(p6ContractId);
+    db.prepare('DELETE FROM contracts WHERE id = ?').run(p6ContractId);
+    db.prepare("DELETE FROM driver_documents WHERE owner_type = 'contract' AND owner_id = ?").run(p6ContractId);
+    db.prepare("DELETE FROM driver_documents WHERE owner_type = 'driver' AND owner_id IN (SELECT id FROM drivers WHERE email LIKE 'p6-%')").run();
+    db.prepare("DELETE FROM community_posts WHERE title LIKE 'P6 hello%'").run();
+    db.prepare("DELETE FROM driver_plan_changes WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE 'p6-%')").run();
+    db.prepare("DELETE FROM support_tickets WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE 'p6-%')").run();
+    db.prepare("DELETE FROM package_exceptions WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE 'p6-%')").run();
+    db.prepare("DELETE FROM packages WHERE package_id LIKE 'P6PKG%' OR package_id LIKE 'P6LOST%'").run();
+    db.prepare("DELETE FROM lead_sources WHERE lead_id IN (SELECT id FROM opportunity_leads WHERE email LIKE 'p6-%')").run();
+    db.prepare("DELETE FROM opportunity_leads WHERE email LIKE 'p6-%'").run();
+    db.prepare("DELETE FROM driver_status_history WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE 'p6-%')").run();
+    db.prepare("DELETE FROM drivers WHERE email LIKE 'p6-%'").run();
+    const p6NewQids = db.prepare('SELECT id FROM email_queue WHERE id > ?').all(p6qBefore).map((r) => r.id);
+    const p6NewOutboxFinal = newFilesSince(p6OutboxBefore);
+    for (const qid of p6NewQids) {
+      for (const f of p6NewOutboxFinal) {
+        if (f.startsWith(`${qid}-`) && f.endsWith('.html')) fs.unlinkSync(path.join(OUTBOX, f));
+      }
+    }
+    if (p6NewQids.length) db.prepare(`DELETE FROM email_queue WHERE id IN (${p6NewQids.map(() => '?').join(',')})`).run(...p6NewQids);
+    check('phase6: test data cleaned up',
+      db.prepare("SELECT COUNT(*) n FROM drivers WHERE email LIKE 'p6-%'").get().n === 0 &&
+      db.prepare('SELECT COUNT(*) n FROM referral_codes').get().n === 0 &&
+      db.prepare('SELECT COUNT(*) n FROM lead_followups').get().n === 0 &&
+      db.prepare('SELECT COUNT(*) n FROM alerts').get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM driver_documents WHERE owner_type = 'driver' AND owner_id NOT IN (SELECT id FROM drivers)").get().n === 0,
+      'leftover rows');
+
 
   } finally {
     try { if (db) db.close(); } catch {}

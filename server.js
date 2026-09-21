@@ -57,6 +57,14 @@ const commandLib = require('./lib/command');
 const commandViews = require('./views/command');
 // Phase 5: live video support — provider abstraction (spec section 15).
 const video = require('./lib/video');
+// Phase 6: referrals, follow-up, alerts, documents (additive; existing routes
+// untouched). Community (Phase J) and service plans (Phase K) are wired into
+// the command center and lead profile — not rebuilt.
+const referralsLib = require('./lib/referrals');
+const followupsLib = require('./lib/followups');
+const alertsLib = require('./lib/alerts');
+const documentsLib = require('./lib/documents');
+const phase6Views = require('./views/phase6');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1620,10 +1628,14 @@ app.get('/admin/crm/leads/:id', adminAuth, ah(async (req, res) => {
   const profile = await grow.getLeadProfile(req.params.id);
   if (!profile) return res.status(404).type('text').send('Lead not found');
   // Phase 2 (additive): driver-application linkage + potential matches.
-  const [driverLink, matches, opportunities] = await Promise.all([
+  // Phase 6 (additive): follow-up history and referral attribution.
+  const [driverLink, matches, opportunities, followupHistory, attempts, referralAttr] = await Promise.all([
     opps.getDriverLinkForLead(profile.lead.id),
     opps.listMatchesForPerson('lead', profile.lead.id),
     opps.listOpportunities({}),
+    followupsLib.listFollowups(profile.lead.id),
+    followupsLib.countAttempts(profile.lead.id),
+    db.get('SELECT * FROM referral_attributions WHERE referred_lead_id = ?', [profile.lead.id]),
   ]);
   res.send(adminViews.adminLayout(`Lead #${profile.lead.id}`,
     growViews.crmLeadProfileHtml(profile, {
@@ -1632,6 +1644,10 @@ app.get('/admin/crm/leads/:id', adminAuth, ah(async (req, res) => {
       error: req.query.error || '',
       driverLink, matches, opportunities,
       linkedJustNow: req.query.linked === '1',
+      // Phase 6: follow-up system (extends the profile, nothing duplicated).
+      followupHistory, attempts,
+      followupLatest: followupHistory[0] || null,
+      referralAttr,
     })));
 }));
 
@@ -1657,7 +1673,33 @@ app.post('/admin/crm/leads/:id/note', adminAuth, ah(async (req, res) => {
 
 app.post('/admin/crm/leads/:id/followup', adminAuth, ah(async (req, res) => {
   const id = req.params.id;
-  await grow.setFollowUp(id, req.body.follow_up_date || '', req.body.assigned_to || '');
+  const b = req.body || {};
+  // Phase 6 (additive): every follow-up is logged with the exact spec status,
+  // last contact, next follow-up, assigned staff, contact attempts, outcome.
+  // The legacy follow_up_date/assigned_to columns are still updated so the
+  // pipeline view keeps working.
+  const nextAt = followupsLib.dateToMs(b.next_follow_up_at);
+  const contactAttempt = b.contact_attempt === '1' || b.contact_attempt === 'on';
+  try {
+    await followupsLib.createFollowup(id, {
+      status: b.followup_status || 'FOLLOW UP',
+      lastContactAt: contactAttempt ? Date.now() : null,
+      nextFollowUpAt: nextAt,
+      assignedTo: b.assigned_to || '',
+      note: b.note || '',
+      outcome: b.outcome || '',
+      contactAttempt,
+      reminder: b.reminder === '1' || b.reminder === 'on',
+      createdBy: 'admin',
+    });
+    await grow.setFollowUp(
+      id,
+      nextAt ? new Date(nextAt).toISOString().slice(0, 10) : (b.follow_up_date || ''),
+      b.assigned_to || ''
+    );
+  } catch (err) {
+    return res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
   res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}`);
 }));
 
@@ -2203,6 +2245,280 @@ app.get('/admin/audit', adminAuth, ah(async (req, res) => {
   res.send(adminViews.adminLayout('Audit trail', driverAdminViews.auditHtml({ statusChanges, custodyEvents, planChanges })));
 }));
 
+// --- Phase 6: referrals, follow-up, alerts, documents (spec sections 31/32/22/23)
+// Additive — existing routes untouched. Admin routes use the explicit
+// adminAuth pattern; driver-scoped routes use the existing token pattern.
+
+// --- Referrals ---
+app.get('/admin/referrals', adminAuth, ah(async (req, res) => {
+  const [codes, attributions, opportunities] = await Promise.all([
+    referralsLib.listCodes(),
+    referralsLib.listAttributions(),
+    opps.listOpportunities({}),
+  ]);
+  res.send(adminViews.adminLayout('Referrals',
+    phase6Views.referralsAdminHtml({
+      codes, attributions, opportunities,
+      error: req.query.error || '',
+      attributed: req.query.attributed ? JSON.parse(req.query.attributed) : null,
+    })));
+}));
+
+app.post('/admin/referrals/issue', adminAuth, ah(async (req, res) => {
+  const issuedToType = req.body.issued_to_type === 'lead' ? 'lead' : 'driver';
+  const email = String(req.body.email || '').trim().toLowerCase();
+  if (!email) return res.redirect('/admin/referrals?error=' + encodeURIComponent('Email is required.'));
+  let id = null, name = '';
+  if (issuedToType === 'driver') {
+    const d = await drivers.getDriverByEmail(email);
+    if (!d) return res.redirect('/admin/referrals?error=' + encodeURIComponent(`No driver found for ${email}.`));
+    id = d.id; name = d.full_name;
+  } else {
+    const l = await db.get('SELECT id, first_name, last_name FROM opportunity_leads WHERE email = ?', [email]);
+    if (!l) return res.redirect('/admin/referrals?error=' + encodeURIComponent(`No lead found for ${email}.`));
+    id = l.id; name = `${l.first_name || ''} ${l.last_name || ''}`.trim();
+  }
+  try {
+    await referralsLib.issueCode({ issuedToType, issuedToId: id, issuedToName: name, issuedBy: 'admin', notes: req.body.notes || '' });
+  } catch (err) {
+    return res.redirect('/admin/referrals?error=' + encodeURIComponent(err.message));
+  }
+  res.redirect('/admin/referrals');
+}));
+
+app.post('/admin/referrals/attribute', adminAuth, ah(async (req, res) => {
+  const attributed = await referralsLib.runAttribution();
+  res.redirect('/admin/referrals?attributed=' + encodeURIComponent(JSON.stringify(attributed)));
+}));
+
+app.post('/admin/referrals/:id/revoke', adminAuth, ah(async (req, res) => {
+  await referralsLib.revokeCode(req.params.id);
+  res.redirect('/admin/referrals');
+}));
+
+app.post('/admin/referrals/attributions/:id', adminAuth, ah(async (req, res) => {
+  try {
+    await referralsLib.updateAttribution(req.params.id, {
+      status: req.body.status || '',
+      opportunityId: req.body.opportunity_id || '',
+      outcome: req.body.outcome || '',
+    });
+  } catch (err) {
+    return res.redirect('/admin/referrals?error=' + encodeURIComponent(err.message));
+  }
+  res.redirect('/admin/referrals');
+}));
+
+// --- Alerts ---
+app.get('/admin/alerts', adminAuth, ah(async (req, res) => {
+  const [alertsList, prefs, reminders] = await Promise.all([
+    alertsLib.listAlerts({}),
+    alertsLib.getPrefs(),
+    followupsLib.dueReminders(),
+  ]);
+  res.send(adminViews.adminLayout('Alerts',
+    phase6Views.alertsAdminHtml({ alertsList, prefs, reminders, error: req.query.error || '' })));
+}));
+
+app.post('/admin/alerts/generate', adminAuth, ah(async (req, res) => {
+  const result = await alertsLib.generateAlerts();
+  res.redirect(`/admin/alerts?error=${encodeURIComponent(
+    `Generated ${result.created.length} new alert(s); ${result.resolved} stale alert(s) auto-resolved.`)}`);
+}));
+
+app.post('/admin/alerts/prefs', adminAuth, ah(async (req, res) => {
+  const types = Object.keys(alertsLib.ALERT_TYPES);
+  for (const t of types) {
+    await alertsLib.setPref(t, !!(req.body[`type_${t}`] === '1' || req.body[`type_${t}`] === 'on'));
+  }
+  res.redirect('/admin/alerts');
+}));
+
+app.post('/admin/alerts/:id/acknowledge', adminAuth, ah(async (req, res) => {
+  try { await alertsLib.acknowledgeAlert(req.params.id, 'admin'); }
+  catch (err) { return res.redirect('/admin/alerts?error=' + encodeURIComponent(err.message)); }
+  res.redirect('/admin/alerts');
+}));
+
+app.post('/admin/alerts/:id/resolve', adminAuth, ah(async (req, res) => {
+  try { await alertsLib.resolveAlert(req.params.id, 'admin'); }
+  catch (err) { return res.redirect('/admin/alerts?error=' + encodeURIComponent(err.message)); }
+  res.redirect('/admin/alerts');
+}));
+
+// --- Documents (admin) ---
+app.get('/admin/documents', adminAuth, ah(async (req, res) => {
+  const docs = await documentsLib.listDocuments({
+    ownerType: String(req.query.owner_type || ''),
+    docType: String(req.query.doc_type || ''),
+    status: String(req.query.status || ''),
+  });
+  res.send(adminViews.adminLayout('Documents',
+    phase6Views.documentsAdminHtml({
+      docs,
+      error: req.query.error || '',
+      ownerType: String(req.query.owner_type || ''),
+      ownerId: String(req.query.owner_id || ''),
+    })));
+}));
+
+app.post('/admin/documents/upload',
+  adminAuth,
+  express.raw({ type: 'multipart/form-data', limit: '10mb' }),
+  ah(async (req, res) => {
+    let fields, file;
+    try {
+      ({ fields, file } = multipart.parseMultipart(req, {
+        maxFileBytes: documentsLib.MAX_FILE_BYTES,
+        allowedMimes: documentsLib.ALLOWED_MIMES,
+      }));
+    } catch (err) {
+      return res.status(400).send(adminViews.adminLayout('Documents',
+        phase6Views.documentsAdminHtml({ docs: [], error: err.message })));
+    }
+    const expiresAt = followupsLib.dateToMs(fields.expires_at);
+    try {
+      await documentsLib.uploadDocument({
+        ownerType: fields.owner_type,
+        ownerId: Number(fields.owner_id),
+        docType: fields.doc_type,
+        file: file ? { buffer: file.buffer, mime: file.mime, originalName: file.originalName } : null,
+        uploadedBy: 'admin',
+        uploadedByRole: 'admin',
+        expiresAt,
+        notes: fields.notes || '',
+      });
+    } catch (err) {
+      return res.status(400).send(adminViews.adminLayout('Documents',
+        phase6Views.documentsAdminHtml({ docs: [], error: err.message })));
+    }
+    res.redirect('/admin/documents');
+  })
+);
+
+app.get('/admin/documents/:id/download', adminAuth, ah(async (req, res) => {
+  const doc = await documentsLib.getDocument(req.params.id);
+  if (!doc || !doc.file_blob) return res.status(404).type('text').send('Document not found.');
+  res.type(doc.file_mime || 'application/octet-stream');
+  res.set('Content-Disposition', `attachment; filename="${String(doc.file_name || 'document').replace(/"/g, '')}"`);
+  res.send(Buffer.from(doc.file_blob));
+}));
+
+app.post('/admin/documents/:id/verify', adminAuth, ah(async (req, res) => {
+  try {
+    await documentsLib.setVerification(req.params.id, {
+      status: req.body.status || '',
+      verificationStatus: req.body.verification_status || '',
+      by: 'admin',
+    });
+  } catch (err) {
+    return res.redirect('/admin/documents?error=' + encodeURIComponent(err.message));
+  }
+  res.redirect('/admin/documents');
+}));
+
+// --- Contract documents: real upload wired into document management ------------
+app.post('/admin/contracts/:id/documents/upload',
+  adminAuth,
+  express.raw({ type: 'multipart/form-data', limit: '10mb' }),
+  ah(async (req, res) => {
+    const id = req.params.id;
+    let fields, file;
+    try {
+      ({ fields, file } = multipart.parseMultipart(req, {
+        maxFileBytes: documentsLib.MAX_FILE_BYTES,
+        allowedMimes: documentsLib.ALLOWED_MIMES,
+      }));
+    } catch (err) {
+      return res.redirect(`/admin/contracts/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+    }
+    try {
+      await documentsLib.attachContractDocument(id, {
+        docType: fields.doc_type || 'contract_document',
+        file: file ? { buffer: file.buffer, mime: file.mime, originalName: file.originalName } : null,
+        expiresAt: followupsLib.dateToMs(fields.expires_at),
+        notes: fields.notes || '',
+        by: 'admin',
+      });
+    } catch (err) {
+      return res.redirect(`/admin/contracts/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+    }
+    res.redirect(`/admin/contracts/${encodeURIComponent(id)}`);
+  })
+);
+
+// --- Driver: referral code page ---
+app.get('/d/:token/referral', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const code = await referralsLib.getActiveCodeForUser('driver', driver.id);
+  const baseUrl = (site.baseUrl || 'http://localhost:3000').replace(/\/$/, '');
+  page(res, 'My referral code', phase6Views.driverReferralHtml({ driver, code, baseUrl }), site);
+}));
+
+// --- Driver: documents (own, non-sensitive only) ---
+const docLimiter = publicRateLimit({ windowMs: 10 * 60 * 1000, max: 30 });
+
+app.get('/d/:token/documents', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const docs = (await documentsLib.listDocuments({ ownerType: 'driver', ownerId: driver.id }))
+    .filter((d) => !documentsLib.isSensitive(d.doc_type));
+  page(res, 'My documents', phase6Views.driverDocumentsHtml({ driver, docs, error: req.query.error || '' }), site);
+}));
+
+app.post('/d/:token/documents/upload',
+  requireDriver,
+  docLimiter,
+  express.raw({ type: 'multipart/form-data', limit: '10mb' }),
+  ah(async (req, res) => {
+    const site = config.getSite();
+    const driver = req.driver;
+    const fail = async (error) => {
+      const docs = (await documentsLib.listDocuments({ ownerType: 'driver', ownerId: driver.id }))
+        .filter((d) => !documentsLib.isSensitive(d.doc_type));
+      res.status(400);
+      page(res, 'My documents', phase6Views.driverDocumentsHtml({ driver, docs, error }), site);
+    };
+    let fields, file;
+    try {
+      ({ fields, file } = multipart.parseMultipart(req, {
+        maxFileBytes: documentsLib.MAX_FILE_BYTES,
+        allowedMimes: documentsLib.ALLOWED_MIMES,
+      }));
+    } catch (err) {
+      return fail(err.message);
+    }
+    try {
+      await documentsLib.uploadDocument({
+        ownerType: 'driver',
+        ownerId: driver.id,
+        docType: fields.doc_type,
+        file: file ? { buffer: file.buffer, mime: file.mime, originalName: file.originalName } : null,
+        uploadedBy: driver.full_name,
+        uploadedByRole: 'driver',
+        expiresAt: followupsLib.dateToMs(fields.expires_at),
+        notes: '',
+      });
+    } catch (err) {
+      return fail(err.message);
+    }
+    res.redirect(`/d/${driver.access_token}/documents`);
+  })
+);
+
+app.get('/d/:token/documents/:id/download', requireDriver, ah(async (req, res) => {
+  const doc = await documentsLib.getDocument(req.params.id);
+  // Drivers may only ever see/download their OWN non-sensitive documents.
+  if (!documentsLib.canView(doc, { role: 'driver', ownerId: req.driver.id })) {
+    return res.status(403).type('text').send('Not found.');
+  }
+  if (!doc.file_blob) return res.status(404).type('text').send('No file attached.');
+  res.type(doc.file_mime || 'application/octet-stream');
+  res.set('Content-Disposition', `attachment; filename="${String(doc.file_name || 'document').replace(/"/g, '')}"`);
+  res.send(Buffer.from(doc.file_blob));
+}));
+
 // --- Phase 2: extended driver onboarding, opportunity database, matching -----
 // Additive — existing routes untouched. Admin routes use the explicit
 // adminAuth pattern (registered before app.use('/admin', adminAuth)).
@@ -2413,7 +2729,9 @@ async function renderContractDetail(req, res) {
   if (!c) return res.status(404).type('text').send('Contract not found');
   const [history, documents, opportunity, relatedOpps, linkedRoutes, allOpportunities] = await Promise.all([
     contracts.listContractHistory(c.id),
-    contracts.listDocuments(c.id),
+    // Phase 6: contract documents wired into document management (real
+    // upload/verification treatment; the rows carry document_id links).
+    documentsLib.listContractDocuments(c.id),
     contracts.getLinkedOpportunity(c.id),
     contracts.relatedOpportunities(c),
     contracts.listRoutesForContract(c.contract_number),

@@ -4,6 +4,9 @@
 'use strict';
 
 const { esc } = require('./layout');
+// Phase 6: follow-up section rendered by the shared Phase-6 views module
+// (extends the CRM lead profile — the profile itself is not duplicated).
+const phase6Views = require('./phase6');
 
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -158,6 +161,8 @@ function growApplyPage(opts = {}) {
   const { query = {}, prefill = null, resumeStep = 1, draftToken = '', errors = [] } = opts;
   const src = escAttr(query.src || query.source || (prefill && prefill.src) || '');
   const cmp = escAttr(query.cmp || query.campaign || (prefill && prefill.cmp) || '');
+  // Phase 6: referral links (/grow/apply?ref=TN-XXXXXX) prefill the referral code.
+  const refCode = escAttr(query.ref || (prefill && prefill.referral_code) || '');
   const prefillJson = prefill ? JSON.stringify(prefill) : 'null';
 
   const step = (n, title, inner) => `
@@ -281,7 +286,7 @@ ${step(11, 'Something Else', `
 ${step(12, 'How Did You Find Us?', `
   ${radioGroup('source', 'How did you hear about TransitNow?', LABELS.source, '')}
   ${textField('referral_name', 'Who referred you?', '', { hint: 'Optional' })}
-  ${textField('referral_code', 'Referral code', '', { hint: 'Optional — if someone gave you a code, enter it here.' })}
+  ${textField('referral_code', 'Referral code', refCode, { hint: 'Optional — if someone gave you a code, enter it here.' })}
 `)}
 
 ${step(13, 'Communication', `
@@ -757,12 +762,13 @@ function crmLeadProfileHtml(p, opts = {}) {
     <button type="submit" class="btn">Add note</button>
   </form>`;
 
-  const followForm = `
-  <form method="POST" action="${profileLink}/followup" class="filter-form">
-    <input type="date" name="follow_up_date" value="${escAttr(lead.follow_up_date || '')}" style="min-height:44px">
-    <input type="text" name="assigned_to" value="${escAttr(lead.assigned_to || '')}" placeholder="Assigned team member" style="min-height:44px">
-    <button type="submit" class="btn">Save follow-up</button>
-  </form>`;
+  // Phase 6 (additive): full follow-up system replaces the basic follow-up
+  // form. Shows last contact, next follow-up, assigned staff, notes, contact
+  // attempts, outcome, reminders, and any referral attribution for the lead.
+  const { followupHistory = [], attempts = 0, followupLatest = null, referralAttr = null } = opts;
+  const followupSection = phase6Views.leadFollowupHtml({
+    lead, latest: followupLatest, history: followupHistory, attempts, referralAttr,
+  });
 
   return `
 <p><a href="/admin/crm">← Back to pipeline</a></p>
@@ -847,8 +853,7 @@ ${row('Marketing consent', lead.marketing_consent ? 'Yes' : 'No')}
 <h3>Internal tags (admin only)</h3>
 ${tagForm}
 
-<h3>Follow-up &amp; assignment</h3>
-${followForm}
+${followupSection}
 
 <h3>Potential matches</h3>
 ${matchSection}
