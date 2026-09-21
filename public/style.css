@@ -268,3 +268,153 @@ a.dash-card.disabled { opacity: .55; }
 a.stat-card:hover { border-color: #1F3A5F; }
 .stat-num { font-size: 32px; font-weight: 700; }
 .stat-label { font-size: 14px; color: #555; }
+
+/* Phase 1: Growth Ecosystem — public nav, grow funnel, CRM (mobile-first) */
+
+.public-nav {
+  background: var(--navy-dark);
+  border-top: 1px solid rgba(255,255,255,.15);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.nav-inner {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  white-space: nowrap;
+}
+.public-nav a {
+  color: #dfe7f1;
+  text-decoration: none;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .04em;
+  padding: 10px 12px;
+  border-radius: 8px;
+  flex-shrink: 0;
+}
+.public-nav a:hover { color: #fff; background: rgba(255,255,255,.08); }
+.public-nav a.nav-cta {
+  background: var(--yellow);
+  color: var(--navy-dark);
+}
+.public-nav a.nav-cta:hover { background: var(--yellow-dark); color: var(--navy-dark); }
+
+.eyebrow {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  color: var(--navy);
+  margin-bottom: 4px;
+}
+.lede { font-size: 19px; }
+.req { color: #c0392b; }
+.disclosure {
+  font-size: 14px;
+  color: var(--muted);
+  border-left: 4px solid var(--yellow);
+  padding: 10px 14px;
+  background: var(--card-bg);
+  border-radius: 0 8px 8px 0;
+  margin: 20px 0;
+}
+.grow-errors {
+  background: #fdecec;
+  border: 1.5px solid #d64545;
+  color: #8f1d1d;
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-weight: 600;
+  margin: 16px 0;
+}
+
+/* 13-step form */
+.step-header { margin: 20px 0 8px; }
+.step-count {
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  color: var(--navy);
+  margin-bottom: 6px;
+}
+.progress {
+  height: 10px;
+  background: #e8ecf1;
+  border-radius: 999px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--yellow);
+  border-radius: 999px;
+  transition: width .25s ease;
+}
+.grow-step .step-title { margin-top: 8px; }
+.step-nav {
+  display: flex;
+  gap: 12px;
+  margin: 24px 0;
+  flex-wrap: wrap;
+}
+.step-nav .btn { flex: 1; min-width: 140px; margin: 0; }
+.grow-field textarea,
+.grow-field select,
+.form input[type=time],
+.form input[type=url],
+.form input[type=number],
+.form input[type=date] {
+  display: block;
+  width: 100%;
+  min-height: 52px;
+  margin-top: 6px;
+  padding: 10px 14px;
+  font-size: 17px;
+  font-family: inherit;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+}
+.grow-field textarea { min-height: 110px; resize: vertical; }
+.grow-field fieldset {
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin: 0 0 16px;
+}
+.grow-field legend { font-weight: 700; padding: 0 6px; }
+.check-list { display: flex; flex-direction: column; gap: 4px; }
+.check {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  font-weight: 400;
+  margin-bottom: 0;
+  padding: 8px 0;
+  min-height: 44px;
+}
+.check input[type=checkbox],
+.check input[type=radio] {
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  margin-top: 2px;
+  accent-color: var(--navy);
+}
+.marketing-consent {
+  background: var(--card-bg);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  padding: 14px;
+  margin: 16px 0;
+}
+.draft-row { margin: 24px 0; text-align: center; }
+.draft-result { margin-top: 12px; font-size: 15px; overflow-wrap: anywhere; }
+@media (min-width: 700px) {
+  .check-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+}
+
+/* CRM */
+.crm-group { margin: 24px 0; }
+.crm-group h3 { margin-bottom: 8px; }

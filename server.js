@@ -38,6 +38,10 @@ const roomFunnelViews = require('./views/room-funnel');
 const drivers = require('./lib/drivers');
 const driverViews = require('./views/drivers');
 const driverAdminViews = require('./views/driver-admin');
+// Phase 1: TransitNow Growth Ecosystem — Grow/Business/RSP funnels + lead CRM
+// (additive; existing routes untouched).
+const grow = require('./lib/grow');
+const growViews = require('./views/grow');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -101,8 +105,24 @@ function fmtTs(ts) {
 }
 
 /** Render a funnel page: views return inner markup, layout wraps it. */
+// Public navigation (spec section 27). Room-branded pages (the Wealth
+// Builder's Room product) keep their own look and are excluded so the Room
+// branding is never disturbed.
+const PUBLIC_NAV = [
+  { href: '/', label: 'HOME' },
+  { href: '/drivers/onboard', label: 'DRIVERS' },
+  { href: '/grow', label: 'GROW WITH TRANSITNOW', cta: true },
+  { href: '/dispatch', label: 'DISPATCH' },
+  { href: '/business', label: 'BUSINESSES' },
+  { href: '/rsp', label: 'RSP' },
+  { href: '/support', label: 'SUPPORT' },
+  { href: '/contact', label: 'CONTACT' },
+];
 function page(res, title, bodyHtml, site) {
-  res.send(layoutFn({ title, body: bodyHtml, site }));
+  const s = site && site.businessName !== "Wealth Builder's Room"
+    ? { ...site, publicNav: PUBLIC_NAV }
+    : site;
+  res.send(layoutFn({ title, body: bodyHtml, site: s }));
 }
 
 /**
@@ -1315,6 +1335,316 @@ app.post('/drivers/onboard', ah(async (req, res) => {
   });
 
   page(res, 'Onboarding complete', driverViews.onboardDonePage({ site, driver, dashUrl }), site);
+}));
+
+// --- Phase 1: TransitNow Growth Ecosystem --------------------------------------
+// Grow funnel, 13-step application, business/RSP/dispatch funnels, public
+// support page, and the opportunity-lead CRM. Additive — existing routes
+// untouched. Admin CRM routes use the existing adminAuth pattern explicitly.
+
+/** Simple in-memory sliding-window rate limiter for public POST endpoints. */
+const rateBuckets = new Map();
+function publicRateLimit({ windowMs = 10 * 60 * 1000, max = 60 } = {}) {
+  return (req, res, next) => {
+    if (rateBuckets.size > 5000) rateBuckets.clear();
+    const key = `${req.ip || '?'}|${req.path}`;
+    const now = Date.now();
+    let bucket = rateBuckets.get(key);
+    if (!bucket || now - bucket.start > windowMs) bucket = { start: now, count: 0 };
+    bucket.count += 1;
+    rateBuckets.set(key, bucket);
+    if (bucket.count > max) {
+      res.status(429).type('text').send('Too many requests — please try again in a few minutes.');
+      return;
+    }
+    next();
+  };
+}
+const growLimiter = publicRateLimit();
+
+// --- /grow landing + 13-step application ---
+app.get('/grow', (req, res) => {
+  page(res, 'Grow With TransitNow', growViews.growLandingPage(), config.getSite());
+});
+
+app.get('/grow/apply', (req, res) => {
+  page(
+    res, 'Grow With TransitNow — Application',
+    growViews.growApplyPage({ query: req.query }), config.getSite()
+  );
+});
+
+// Save & Continue Later: server-side draft, private resume link.
+app.post('/grow/apply/draft', growLimiter, ah(async (req, res) => {
+  const b = req.body || {};
+  const clean = {};
+  for (const [k, v] of Object.entries(b)) {
+    if (grow.FORBIDDEN_FIELDS.includes(String(k).toLowerCase())) continue;
+    clean[String(k).slice(0, 60)] = v;
+  }
+  const { token, resumeUrl } = await grow.saveDraft({
+    token: b.draft_token, leadType: 'GROW', step: b.step, data: clean,
+  });
+  res.json({ ok: true, token, resumeUrl });
+}));
+
+app.get('/grow/apply/resume/:token', ah(async (req, res) => {
+  const d = await grow.getDraft(req.params.token);
+  if (!d) return res.status(404).type('text').send('This resume link was not found. It may have been used already or mistyped.');
+  page(
+    res, 'Grow With TransitNow — Application',
+    growViews.growApplyPage({
+      query: req.query, prefill: { ...d.data, draft_token: d.token },
+      resumeStep: d.step, draftToken: d.token,
+    }),
+    config.getSite()
+  );
+}));
+
+app.post('/grow/apply', growLimiter, ah(async (req, res) => {
+  const b = req.body || {};
+  const site = config.getSite();
+  const forbidden = Object.keys(b).filter((k) => grow.FORBIDDEN_FIELDS.includes(String(k).toLowerCase()));
+  const n = grow.normalizeGrow(b);
+  const errors = grow.validateGrow(n);
+  if (forbidden.length) errors.push('This form does not accept that kind of information.');
+  if (errors.length) {
+    res.status(400);
+    return page(
+      res, 'Grow With TransitNow — Application',
+      growViews.growApplyPage({ query: req.query, prefill: { ...b, draft_token: b.draft_token || '' }, errors }),
+      site
+    );
+  }
+  const { lead, created } = await grow.upsertLead('GROW', n.fields);
+  await grow.saveGrowRelated(lead.id, n);
+  await grow.addLeadTags(lead.id, grow.autoTagsFor(n.fields));
+  if (b.draft_token) await grow.deleteDraft(String(b.draft_token));
+  await db.recordEvent({
+    visitor_id: req.vid || null, lead_id: null, type: 'grow_application', product_id: null,
+    meta: { opportunity_lead_id: lead.id, resubmission: !created },
+  });
+  const profile = await grow.getLeadProfile(lead.id);
+  await grow.queueEmail({
+    to: lead.email, subject: 'We Received Your TransitNow Information',
+    html: grow.applicantConfirmationEmail(lead, 'GROW'), sequence: 'grow', step: 'applicant-confirmation',
+  });
+  await grow.queueEmail({
+    to: grow.opsEmail(), subject: `New Grow application: ${lead.first_name} ${lead.last_name}`,
+    html: grow.adminNotificationEmail(lead, profile, { funnelLabel: 'Grow', resubmission: !created }),
+    sequence: 'grow', step: 'admin-new-application',
+  });
+  await db.run(
+    `INSERT INTO lead_communications (lead_id, kind, subject, body, direction, ts)
+     VALUES (?, 'email', 'We Received Your TransitNow Information', 'Confirmation email queued to applicant.', 'outbound', ?)`,
+    [lead.id, Date.now()]
+  );
+  res.redirect('/grow/thank-you' + (created ? '' : '?updated=1'));
+}));
+
+app.get('/grow/thank-you', (req, res) => {
+  page(res, 'Thank You',
+    growViews.growThankYouPage({ resubmission: req.query.updated === '1' }), config.getSite());
+});
+
+// --- /business funnel (spec section 29) ---
+app.get('/business', (req, res) => {
+  page(res, 'Businesses — TransitNow', growViews.businessPage({ query: req.query }), config.getSite());
+});
+
+app.post('/business', growLimiter, ah(async (req, res) => {
+  const b = req.body || {};
+  const site = config.getSite();
+  const fields = grow.normalizeSimple(b, 'BUSINESS');
+  const errors = [];
+  if (!grow.str(b.company_name, 160)) errors.push('Company name is required.');
+  if (!fields.first_name) errors.push('Contact first name is required.');
+  if (!grow.EMAIL_RE.test(fields.email)) errors.push('A valid email address is required.');
+  if (!fields.phone) errors.push('Phone is required.');
+  if (errors.length) {
+    res.status(400);
+    return page(res, 'Businesses — TransitNow',
+      growViews.businessPage({ query: req.query, values: b, errors }), site);
+  }
+  const { lead, created } = await grow.upsertLead('BUSINESS', fields);
+  await grow.addLeadTags(lead.id, ['BUSINESS OWNER']);
+  await db.recordEvent({
+    visitor_id: req.vid || null, lead_id: null, type: 'business_inquiry', product_id: null,
+    meta: { opportunity_lead_id: lead.id, resubmission: !created },
+  });
+  const profile = await grow.getLeadProfile(lead.id);
+  await grow.queueEmail({
+    to: lead.email, subject: 'We Received Your TransitNow Business Inquiry',
+    html: grow.applicantConfirmationEmail(lead, 'BUSINESS'), sequence: 'grow', step: 'business-confirmation',
+  });
+  await grow.queueEmail({
+    to: grow.opsEmail(), subject: `New business inquiry: ${grow.str(b.company_name, 160)}`,
+    html: grow.adminNotificationEmail(lead, profile, { funnelLabel: 'Business', resubmission: !created }),
+    sequence: 'grow', step: 'admin-new-business',
+  });
+  res.redirect('/business/thank-you');
+}));
+
+app.get('/business/thank-you', (req, res) => {
+  page(res, 'Thank You', growViews.businessThankYouPage(), config.getSite());
+});
+
+// --- /rsp funnel (spec section 18) ---
+app.get('/rsp', (req, res) => {
+  page(res, 'RSP Interest — TransitNow', growViews.rspPage({ query: req.query }), config.getSite());
+});
+
+app.post('/rsp', growLimiter, ah(async (req, res) => {
+  const b = req.body || {};
+  const site = config.getSite();
+  const fields = grow.normalizeSimple(b, 'RSP');
+  const errors = [];
+  if (!fields.first_name) errors.push('First name is required.');
+  if (!grow.EMAIL_RE.test(fields.email)) errors.push('A valid email address is required.');
+  if (!fields.phone) errors.push('Phone is required.');
+  if (!fields.city) errors.push('City is required.');
+  if (!fields.state) errors.push('State is required.');
+  if (errors.length) {
+    res.status(400);
+    return page(res, 'RSP Interest — TransitNow',
+      growViews.rspPage({ query: req.query, values: b, errors }), site);
+  }
+  const { lead, created } = await grow.upsertLead('RSP', fields);
+  await grow.addLeadTags(lead.id, ['RSP']);
+  await db.recordEvent({
+    visitor_id: req.vid || null, lead_id: null, type: 'rsp_interest', product_id: null,
+    meta: { opportunity_lead_id: lead.id, resubmission: !created },
+  });
+  const profile = await grow.getLeadProfile(lead.id);
+  await grow.queueEmail({
+    to: lead.email, subject: 'We Received Your TransitNow RSP Interest',
+    html: grow.applicantConfirmationEmail(lead, 'RSP'), sequence: 'grow', step: 'rsp-confirmation',
+  });
+  await grow.queueEmail({
+    to: grow.opsEmail(), subject: `New RSP interest: ${lead.first_name} ${lead.last_name}`,
+    html: grow.adminNotificationEmail(lead, profile, { funnelLabel: 'RSP', resubmission: !created }),
+    sequence: 'grow', step: 'admin-new-rsp',
+  });
+  res.redirect('/rsp/thank-you');
+}));
+
+app.get('/rsp/thank-you', (req, res) => {
+  page(res, 'Thank You', growViews.rspThankYouPage(), config.getSite());
+});
+
+// --- /dispatch funnel (spec section 30) ---
+app.get('/dispatch', (req, res) => {
+  page(res, 'Dispatch Services — TransitNow', growViews.dispatchPage({ query: req.query }), config.getSite());
+});
+
+app.post('/dispatch', growLimiter, ah(async (req, res) => {
+  const b = req.body || {};
+  const site = config.getSite();
+  const fields = grow.normalizeSimple(b, 'GROW');
+  const errors = [];
+  if (!fields.first_name) errors.push('First name is required.');
+  if (!grow.EMAIL_RE.test(fields.email)) errors.push('A valid email address is required.');
+  if (!fields.phone) errors.push('Phone is required.');
+  if (errors.length) {
+    res.status(400);
+    return page(res, 'Dispatch Services — TransitNow',
+      growViews.dispatchPage({ query: req.query, values: b, errors }), site);
+  }
+  const { lead, created } = await grow.upsertLead('GROW', fields);
+  await grow.addLeadTags(lead.id, ['DISPATCH']);
+  await db.recordEvent({
+    visitor_id: req.vid || null, lead_id: null, type: 'dispatch_info_request', product_id: null,
+    meta: { opportunity_lead_id: lead.id, resubmission: !created },
+  });
+  const profile = await grow.getLeadProfile(lead.id);
+  await grow.queueEmail({
+    to: lead.email, subject: 'We Received Your Dispatch Information Request',
+    html: grow.applicantConfirmationEmail(lead, 'GROW'), sequence: 'grow', step: 'dispatch-confirmation',
+  });
+  await grow.queueEmail({
+    to: grow.opsEmail(), subject: `New dispatch info request: ${lead.first_name} ${lead.last_name}`,
+    html: grow.adminNotificationEmail(lead, profile, { funnelLabel: 'Dispatch', resubmission: !created }),
+    sequence: 'grow', step: 'admin-new-dispatch',
+  });
+  res.redirect('/dispatch/thank-you');
+}));
+
+app.get('/dispatch/thank-you', (req, res) => {
+  page(res, 'Thank You', growViews.dispatchThankYouPage(), config.getSite());
+});
+
+// --- Public /support page (no 24/7 human-staff claim) ---
+app.get('/support', (req, res) => {
+  page(res, 'Support — TransitNow', growViews.supportPage(), config.getSite());
+});
+
+// --- Admin CRM (spec sections 7-8) ----------------------------------------------
+app.get('/admin/crm', adminAuth, ah(async (req, res) => {
+  const type = String(req.query.type || '').toUpperCase();
+  const status = String(req.query.status || '').toUpperCase();
+  const types = grow.LEAD_TYPES;
+  const order = type === 'BUSINESS' ? grow.BUSINESS_STATUSES : grow.GROW_STATUSES;
+  const allStatuses = [...new Set([...grow.GROW_STATUSES, ...grow.BUSINESS_STATUSES])];
+  const conds = [];
+  const params = [];
+  if (types.includes(type)) { conds.push('lead_type = ?'); params.push(type); }
+  if (allStatuses.includes(status)) { conds.push('status = ?'); params.push(status); }
+  const leads = await db.all(
+    `SELECT * FROM opportunity_leads ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''} ORDER BY created_at DESC LIMIT 500`,
+    params
+  );
+  const grouped = {};
+  for (const l of leads) { (grouped[l.status] = grouped[l.status] || []).push(l); }
+  res.send(adminViews.adminLayout('Opportunity CRM',
+    growViews.crmPipelineHtml({ grouped, type, status, types, allStatuses: order })));
+}));
+
+app.get('/admin/crm/leads/:id', adminAuth, ah(async (req, res) => {
+  const profile = await grow.getLeadProfile(req.params.id);
+  if (!profile) return res.status(404).type('text').send('Lead not found');
+  res.send(adminViews.adminLayout(`Lead #${profile.lead.id}`,
+    growViews.crmLeadProfileHtml(profile, {
+      pipelines: { GROW: grow.GROW_STATUSES, BUSINESS: grow.BUSINESS_STATUSES, RSP: grow.GROW_STATUSES },
+      internalTags: grow.INTERNAL_TAGS,
+      error: req.query.error || '',
+    })));
+}));
+
+app.post('/admin/crm/leads/:id/status', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await grow.changeLeadStatus(id, String(req.body.status || '').toUpperCase(), 'admin', req.body.note || '');
+  } catch (err) {
+    return res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}`);
+}));
+
+app.post('/admin/crm/leads/:id/note', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await grow.addLeadNote(id, 'admin', req.body.note || '');
+  } catch (err) {
+    return res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}`);
+}));
+
+app.post('/admin/crm/leads/:id/followup', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  await grow.setFollowUp(id, req.body.follow_up_date || '', req.body.assigned_to || '');
+  res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}`);
+}));
+
+app.post('/admin/crm/leads/:id/tags', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  const selected = grow.arr(req.body.tags).filter((t) => grow.INTERNAL_TAGS.includes(t));
+  const now = Date.now();
+  await db.run('DELETE FROM opportunity_lead_tags WHERE lead_id = ?', [id]);
+  for (const t of selected) {
+    await db.run('INSERT INTO opportunity_lead_tags (lead_id, tag, ts) VALUES (?, ?, ?)', [id, t, now]);
+  }
+  res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}`);
 }));
 
 // --- Phase B: admin driver pipeline -----------------------------------------

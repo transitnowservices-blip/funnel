@@ -14,6 +14,14 @@ function layout({ title, body, site }) {
   const siteTitle = esc(site.businessName || 'TransitNow');
   const pageTitle = title ? `${esc(title)} | ${siteTitle}` : siteTitle;
   const year = new Date().getFullYear();
+  // Public navigation (spec section 27). Only rendered when site.publicNav
+  // is set — Room-branded pages never set it, so their look is unchanged.
+  const navItems = (site.publicNav || []).map((n) =>
+    `<a href="${esc(n.href)}"${n.cta ? ' class="nav-cta"' : ''}>${esc(n.label)}</a>`
+  ).join('');
+  const nav = navItems
+    ? `<nav class="public-nav" aria-label="Primary"><div class="container nav-inner">${navItems}</div></nav>`
+    : '';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -30,6 +38,7 @@ function layout({ title, body, site }) {
     <div class="tagline">${esc(site.tagline || '')}</div>
   </div>
 </header>
+${nav}
 <main class="container">
 ${body}
 </main>

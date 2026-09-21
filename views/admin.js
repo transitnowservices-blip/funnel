@@ -44,6 +44,7 @@ pre.config-view{background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto;
 <nav class="admin-nav">
   <a href="/admin">Dashboard</a>
   <a href="/admin/leads">Leads</a>
+  <a href="/admin/crm">CRM</a>
   <a href="/admin/carts">Carts</a>
   <a href="/admin/emails">Emails</a>
   <a href="/admin/outbox">Outbox</a>
