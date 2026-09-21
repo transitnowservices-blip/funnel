@@ -1849,7 +1849,19 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   } catch (err) {
     console.error('[dashboard] route match info failed:', err.message);
   }
-  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, matchInfo }), site);
+  // Private operations assistant (Complete tier only — hidden from everyone
+  // else, including Basic and unpaid drivers).
+  let assistantInfo = null;
+  try {
+    const ai = require('./lib/ai_assistant');
+    const isComplete = await ai.isCompleteActive(driver);
+    if (isComplete) {
+      assistantInfo = { isComplete: true, questions: await ai.listForDriver(driver.id, 20) };
+    }
+  } catch (err) {
+    console.error('[dashboard] assistant info failed:', err.message);
+  }
+  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, matchInfo, assistantInfo }), site);
 }));
 
 // --- Phase D: driver route + packages (scoped to the token's driver) -------------
@@ -2794,11 +2806,15 @@ const routeMatching = require('./lib/route_matching');
 
 app.get('/admin/route-matches', adminAuth, ah(async (req, res) => {
   const driverFilter = req.query.driver ? Number(req.query.driver) : null;
+  const ai = require('./lib/ai_assistant');
   const [cycles, driversList, opportunities] = await Promise.all([
     routeMatching.recentCycles(20),
     drivers.listDrivers({ limit: 500 }),
     opps.listOpportunities({ status: 'OPEN' }),
   ]);
+  // Private operations assistant queue: pending questions + tier badges.
+  const assistantQuestions = await ai.listPending(100);
+  const subMap = await subscriptions.mapForEmails(assistantQuestions.map((q) => q.driver_email));
   let matches;
   if (driverFilter) {
     matches = await routeMatching.matchesForDriver(driverFilter, 100);
@@ -2815,11 +2831,26 @@ app.get('/admin/route-matches', adminAuth, ah(async (req, res) => {
   res.send(adminViews.adminLayout('Route matching', routeMatchViews.adminPageHtml({
     cycles, matches, driversList, opportunities,
     driverFilter, error: req.query.error || '',
+    assistantQuestions, subMap,
   })));
 }));
 
 app.post('/admin/route-matches/run', adminAuth, ah(async (req, res) => {
   const r = await routeMatching.runMondayCycle({ force: true });
+  res.redirect('/admin/route-matches');
+}));
+
+// --- Private operations assistant: operator answers a driver question -------
+// The answer is stored and the driver is notified (email now, queued text).
+// The app never generates an answer on its own.
+app.post('/admin/assistant-questions/:id/answer', adminAuth, ah(async (req, res) => {
+  const ai = require('./lib/ai_assistant');
+  try {
+    await ai.answerQuestion(Number(req.params.id), req.body.answer, { by: 'admin' });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error',
+      `<p>${esc(err.message)}</p><p><a href="/admin/route-matches">&larr; Back to route matching</a></p>`));
+  }
   res.redirect('/admin/route-matches');
 }));
 
@@ -3273,6 +3304,47 @@ app.get('/d/:token/support', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
   const tickets = await drivers.listTickets({ driverId: req.driver.id });
   page(res, 'Support', driverViews.supportPage({ driver: req.driver, tickets, error: null }), site);
+}));
+
+// --- Private operations assistant (Complete tier) ------------------------------
+// Questions go to the operator/AI workflow — the app never generates an
+// answer. Only ACTIVE Complete subscribers may ask; everyone else gets the
+// same 402 paid-subscribers-only treatment as other dispatch gates.
+app.post('/d/:token/assistant', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  const ai = require('./lib/ai_assistant');
+  const isComplete = await ai.isCompleteActive(driver);
+  if (!isComplete) {
+    const sub = await subscriptions.getByEmail(driver.email);
+    const statusLine = sub && sub.status
+      ? `Your dispatch subscription is ${sub.status === 'past_due' ? 'past due' : sub.status} — not active.`
+      : 'You do not have an active TransitNow dispatch subscription on file.';
+    res.status(402);
+    return page(res, 'Payment required', `
+<section><h1>Paid subscribers only</h1>
+<p>${statusLine}</p>
+<p>Your private operations assistant is included with the <strong>Complete $100/month</strong> dispatch plan.</p>
+<p>Once your Complete subscription is active (Stripe notifies us automatically, including renewals), you can ask your assistant anything.</p>
+<p class="disclosure">Subscriptions are month-to-month. No guaranteed loads, routes, revenue, or earnings.</p>
+<p><a href="/d/${driver.access_token}">&larr; Back to your dashboard</a></p></section>`, site);
+  }
+  try {
+    await ai.askQuestion(driver.id, req.body.question);
+    res.redirect(`/d/${driver.access_token}`);
+  } catch (err) {
+    res.status(400);
+    const assistantInfo = { isComplete: true, questions: await ai.listForDriver(driver.id, 20) };
+    const rm = require('./lib/route_matching');
+    let matchInfo = null;
+    try {
+      const [matches, prog] = await Promise.all([rm.activeMatches(driver.id), rm.goalProgress(driver.id)]);
+      matchInfo = { matches, prog };
+    } catch (e2) { /* dashboard still renders without match info */ }
+    return page(res, 'My dashboard',
+      `<section><p class="error">${esc(req.body.question ? err.message : 'Enter your question first.')}</p></section>` +
+      driverViews.dashboardPage({ site, driver, dashUrl: drivers.driverDashUrl(driver.access_token), matchInfo, assistantInfo }), site);
+  }
 }));
 
 app.post('/d/:token/support', requireDriver, ah(async (req, res) => {

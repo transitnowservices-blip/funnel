@@ -193,6 +193,7 @@ function dispatchPricingSection() {
       <li><strong>Refilled back to 5 every Monday</strong></li>
       <li><strong>Matched first</strong> — ahead of Basic in every cycle</li>
       <li>Freight and lane preferences applied to your matches</li>
+      <li><strong>Private AI operations assistant</strong> — your unseen advantage, working behind the scenes</li>
       <li>Load-search prep</li>
       <li>Broker verification guidance</li>
       <li>Paperwork and route planning support</li>

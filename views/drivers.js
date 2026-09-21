@@ -172,7 +172,37 @@ function routeMatchDashCard(matchInfo) {
   </div>`;
 }
 
-function dashboardPage({ site, driver, dashUrl, matchInfo = null }) {
+// --- Private operations assistant (Complete tier) ---------------------------------
+// Only rendered for ACTIVE Complete subscribers — Basic and unpaid drivers
+// never see it. Public copy never names the AI or any vendor/model.
+// assistantInfo: { isComplete: bool, questions: [] }.
+function assistantDashCard(driver, assistantInfo) {
+  if (!assistantInfo || !assistantInfo.isComplete) return '';
+  const qs = assistantInfo.questions || [];
+  const items = qs.map((q) => {
+    const answered = q.status === 'answered' && q.answer;
+    return `<div class="q-item" style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #eee">
+      <p><strong>You asked:</strong> ${esc(q.question)}</p>
+      ${answered
+        ? `<p><strong>Assistant:</strong> ${esc(q.answer)}</p><p class="microcopy">Answered — no guaranteed outcomes; guidance only.</p>`
+        : `<p class="microcopy"><em>Awaiting reply — your private operations assistant will respond soon.</em></p>`}
+    </div>`;
+  }).join('');
+  return `<div class="card highlight-card"><h3>Your Private Operations Assistant</h3>
+    <p>Ask anything about dispatch, routes, brokers, paperwork, or growing your operation. This is your unseen advantage — working behind the scenes as part of your Complete plan.</p>
+    <form method="POST" action="/d/${esc(driver.access_token)}/assistant" class="form">
+      <label for="assistant-q">Your question</label>
+      <textarea id="assistant-q" name="question" rows="3" maxlength="2000" required
+        placeholder="e.g. What should I have ready before I call a broker about a lane?"></textarea>
+      <button type="submit" class="btn">ASK MY ASSISTANT</button>
+    </form>
+    <h4 style="margin-top:16px">Your past questions</h4>
+    ${items || '<p class="microcopy">No questions yet — ask your first one above.</p>'}
+    <p class="microcopy">Guidance only. TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income.</p>
+  </div>`;
+}
+
+function dashboardPage({ site, driver, dashUrl, matchInfo = null, assistantInfo = null }) {
   const stage = drivers.STATUS_LABELS[driver.status] || driver.status;
   const nextSteps = {
     new: 'We are reviewing your onboarding information. No action needed right now.',
@@ -211,6 +241,7 @@ function dashboardPage({ site, driver, dashUrl, matchInfo = null }) {
   <p class="subhead">Status: ${esc(stage)}</p>
   <div class="card highlight-card"><p><strong>What happens next:</strong> ${esc(step)}</p></div>
   ${routeMatchDashCard(matchInfo)}
+  ${assistantDashCard(driver, assistantInfo)}
   <h2>Your hub</h2>
   <div class="dash-grid">
     ${cardsHtml}

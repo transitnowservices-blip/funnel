@@ -33,7 +33,37 @@ function cycleLogHtml(cycles) {
 </div>`;
 }
 
-function adminPageHtml({ cycles, matches, driversList, opportunities, driverFilter, error }) {
+function assistantQueueHtml({ questions, subMap }) {
+  const rows = (questions || []).map((q) => {
+    const sub = subMap[q.driver_email] || null;
+    const tier = sub && sub.plan ? (sub.plan === 'complete' ? 'Complete $100/mo' : 'Basic $50/mo') : '—';
+    const tierBadge = sub && sub.plan === 'complete'
+      ? '<span class="status-badge" style="background:#1c3faa;color:#fff">COMPLETE</span>'
+      : sub && sub.plan === 'basic'
+        ? '<span class="status-badge" style="background:#1c7a3d;color:#fff">BASIC</span>'
+        : '<span class="muted">no subscription row</span>';
+    return `<tr>
+    <td><a href="/admin/drivers/${q.driver_id}">${esc(q.driver_name || ('#' + q.driver_id))}</a><br><span class="muted">${esc(q.driver_email || '')}</span></td>
+    <td>${tierBadge}<br><span class="muted">${esc(tier)}</span></td>
+    <td>${esc(q.question)}</td>
+    <td class="ts">${fmtTs(q.created_at)}</td>
+    <td><form method="POST" action="/admin/assistant-questions/${q.id}/answer" class="form">
+      <label>Answer<textarea name="answer" rows="3" required style="width:100%"></textarea></label>
+      <button type="submit" class="btn">Send answer</button>
+    </form></td>
+  </tr>`;
+  }).join('');
+  return `<div class="card">
+  <h3>Assistant questions — pending</h3>
+  <p class="muted">Questions from Complete-tier drivers for the private operations assistant. Write the answer (or paste the AI's reply) and it is stored and emailed to the driver — the app never generates an answer on its own.</p>
+  <table class="admin-table">
+    <thead><tr><th>Driver</th><th>Tier</th><th>Question</th><th>Asked</th><th>Answer</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5">No pending questions.</td></tr>'}</tbody>
+  </table>
+</div>`;
+}
+
+function adminPageHtml({ cycles, matches, driversList, opportunities, driverFilter, error, assistantQuestions = [], subMap = {} }) {
   const matchRows = (matches || []).map((m) => `<tr>
     <td><a href="/admin/drivers/${m.driver_id}">${esc(m.driver_name || ('#' + m.driver_id))}</a></td>
     <td>${esc(m.opportunity_name || ('#' + m.opportunity_id))}<br><span class="muted">${esc(m.opportunity_location || '')}</span></td>
@@ -73,7 +103,8 @@ ${cycleLogHtml(cycles)}
     <thead><tr><th>Driver</th><th>Opportunity</th><th>Tier</th><th>Status</th><th>Matched</th><th></th></tr></thead>
     <tbody>${matchRows || '<tr><td colspan="6">No matches yet.</td></tr>'}</tbody>
   </table>
-</div>`;
+</div>
+${assistantQueueHtml({ questions: assistantQuestions, subMap })}`;
 }
 
 module.exports = { cycleLogHtml, adminPageHtml };
