@@ -1954,6 +1954,338 @@ async function main() {
       auditHtml.includes('driver status') && auditHtml.includes('custody'),
       `status=${res.status}`);
 
+    /* ---- Phase 1: Grow funnel / lead CRM / business / RSP / dispatch ---- */
+    const p1ts = Date.now();
+    const p1 = (n) => `p1-${n}-${p1ts}@example.com`;
+    const outboxBeforeP1 = outboxFiles();
+
+    // --- Public pages, exact copy, navigation ---
+    res = await req(`${BASE}/grow`, {});
+    const p1GrowHtml = await res.text();
+    check('phase1: GET /grow 200 with exact headline, CTA, disclosure',
+      res.status === 200 && p1GrowHtml.includes("WE'RE GROWING") && p1GrowHtml.includes('COME GROW WITH US.') &&
+      p1GrowHtml.includes('TELL US ABOUT YOU') && p1GrowHtml.includes('/grow/apply') &&
+      p1GrowHtml.includes('does not guarantee employment, routes, loads, contracts, income, partnership'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/grow/apply`, {});
+    const p1ApplyHtml = await res.text();
+    check('phase1: GET /grow/apply renders 13 steps, progress indicator, separate marketing consent',
+      res.status === 200 && (p1ApplyHtml.match(/class="grow-step"/g) || []).length === 13 &&
+      p1ApplyHtml.includes('STEP 1 OF 13') && p1ApplyHtml.includes('progress-fill') &&
+      p1ApplyHtml.includes('name="marketing_consent"') && p1ApplyHtml.includes('Save &amp; Continue Later'),
+      `status=${res.status}, steps=${(p1ApplyHtml.match(/class="grow-step"/g) || []).length}`);
+    check('phase1: apply form never asks for SSN/bank/password/card fields',
+      !/name="ssn"/i.test(p1ApplyHtml) && !/name="bank/i.test(p1ApplyHtml) &&
+      !/name="password"/i.test(p1ApplyHtml) && !/name="card_number"/i.test(p1ApplyHtml) &&
+      !/name="credit_card"/i.test(p1ApplyHtml),
+      'forbidden field name found');
+    check('phase1: apply page is mobile-ready (viewport meta)',
+      p1ApplyHtml.includes('name="viewport"'), 'no viewport meta');
+
+    res = await req(`${BASE}/business`, {});
+    const p1BizHtml = await res.text();
+    check('phase1: GET /business 200 with inquiry form',
+      res.status === 200 && p1BizHtml.includes('name="company_name"') && p1BizHtml.includes('name="service_needed"'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/rsp`, {});
+    const p1RspHtml = await res.text();
+    check('phase1: GET /rsp 200 with exact headline + disclosure',
+      res.status === 200 && p1RspHtml.includes('BUILD BEYOND THE DRIVER SEAT.') &&
+      p1RspHtml.includes('does not guarantee an RSP territory, contract, route, partnership, income or acceptance'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/dispatch`, {});
+    const p1DispHtml = await res.text();
+    check('phase1: GET /dispatch 200 with services + GET DISPATCH INFORMATION CTA',
+      res.status === 200 && p1DispHtml.includes('GET DISPATCH INFORMATION') &&
+      p1DispHtml.includes('No guaranteed loads, routes, contracts or earnings'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/support`, {});
+    const p1SupHtml = await res.text();
+    check('phase1: GET /support 200, no 24/7 human-staff claim, emergency note',
+      res.status === 200 && p1SupHtml.includes('contact emergency services first') &&
+      p1SupHtml.includes('not a claim that human staff are available 24/7'),
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/`, {});
+    const p1HomeHtml = await res.text();
+    const navLabels = ['HOME', 'DRIVERS', 'GROW WITH TRANSITNOW', 'DISPATCH', 'BUSINESSES', 'RSP', 'SUPPORT', 'CONTACT'];
+    check('phase1: public nav has all 8 links with GROW WITH TRANSITNOW as CTA',
+      res.status === 200 && navLabels.every((l) => p1HomeHtml.includes(`>${l}<`)) &&
+      p1HomeHtml.includes('class="nav-cta"'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/room/join`, {});
+    const p1RoomJoinHtml = await res.text();
+    check('phase1: Room-branded pages keep their own look (no TransitNow nav)',
+      res.status === 200 && !p1RoomJoinHtml.includes('GROW WITH TRANSITNOW'),
+      `status=${res.status}`);
+
+    // --- Grow validation ---
+    res = await req(`${BASE}/grow/apply`, { method: 'POST', form: { first_name: '', email: 'not-an-email', phone: '', city: '', state: '' } });
+    const p1BadHtml = await res.text();
+    check('phase1: POST /grow/apply invalid -> 400 with error text',
+      res.status === 400 && p1BadHtml.includes('A valid email address is required.'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/grow/apply`, { method: 'POST', form: { first_name: 'P1', email: p1('grow'), phone: '414-555-0101', city: 'Milwaukee', state: 'WI', ssn: '123-45-6789' } });
+    check('phase1: POST /grow/apply carrying an SSN field is rejected (400)',
+      res.status === 400 && (await res.text()).includes('does not accept that kind of information'),
+      `status=${res.status}`);
+
+    // --- Grow submit: full 13-step payload -> DB -> thank-you -> emails ---
+    const p1GrowForm = [
+      ['first_name', 'P1First'], ['last_name', 'P1Last'], ['email', p1('grow')], ['phone', '414-555-0101'],
+      ['preferred_contact', 'text'], ['city', 'Milwaukee'], ['state', 'WI'], ['zip', '53215'],
+      ['about_you', 'P1 about'], ['why_interested', 'P1 why'],
+      ['current_roles', 'independent-driver'], ['current_roles', 'courier'], ['experience_level', '3-5y'],
+      ['vehicle_type', 'cargo-van'], ['vehicle_ownership', 'own'], ['vehicle_year', '2019'],
+      ['vehicle_make', 'Ford'], ['vehicle_model', 'Transit'], ['cargo_capacity', '400 cu ft'],
+      ['avail_days', 'mon'], ['avail_days', 'tue'], ['avail_start', '08:00'], ['avail_end', '17:00'],
+      ['avail_days_per_week', '5'], ['avail_type', 'full-time'], ['schedule_notes', 'P1 schedule'],
+      ['service_area_type', 'within-50'], ['primary_city', 'Milwaukee'], ['primary_state', 'WI'],
+      ['has_business', 'no'], ['business_help', 'dispatch'],
+      ['growth_interests', 'route-management'], ['managed_before', 'no'],
+      ['opportunity_interests', 'local-routes'], ['opportunity_interests', 'rsp-opportunities'],
+      ['readiness', 'license'], ['goals_12mo', 'P1 goals'], ['growth_vision', 'P1 vision'],
+      ['future_role', 'route-manager'], ['something_else', 'P1 extra'],
+      ['source', 'google'], ['referral_code', 'P1CODE'], ['contact_pref', 'text'], ['marketing_consent', 'yes'],
+    ];
+    res = await req(`${BASE}/grow/apply`, { method: 'POST', form: p1GrowForm });
+    check('phase1: POST /grow/apply valid -> 302 to /grow/thank-you',
+      res.status === 302 && res.headers.get('location') === '/grow/thank-you',
+      `status=${res.status} loc=${res.headers.get('location')}`);
+    const p1Lead = db.prepare('SELECT * FROM opportunity_leads WHERE email = ?').get(p1('grow'));
+    check('phase1: grow lead row created (type GROW, status NEW)',
+      !!p1Lead && p1Lead.lead_type === 'GROW' && p1Lead.status === 'NEW' &&
+      p1Lead.marketing_consent === 1 && p1Lead.referral_code === 'P1CODE',
+      p1Lead ? `type=${p1Lead.lead_type} status=${p1Lead.status}` : 'no row');
+    check('phase1: related rows created (vehicle/business/goals/sources)',
+      !!db.prepare('SELECT 1 FROM lead_vehicles WHERE lead_id = ?').get(p1Lead.id) &&
+      !!db.prepare('SELECT 1 FROM lead_business_info WHERE lead_id = ?').get(p1Lead.id) &&
+      !!db.prepare('SELECT 1 FROM lead_goals WHERE lead_id = ?').get(p1Lead.id) &&
+      !!db.prepare('SELECT 1 FROM lead_sources WHERE lead_id = ?').get(p1Lead.id),
+      'missing related row');
+    const p1Hist = db.prepare('SELECT * FROM lead_status_history WHERE lead_id = ? ORDER BY id').all(p1Lead.id);
+    check('phase1: status history seeded append-only (NULL -> NEW)',
+      p1Hist.length === 1 && p1Hist[0].from_status == null && p1Hist[0].to_status === 'NEW',
+      `rows=${p1Hist.length}`);
+    const p1Tags = db.prepare('SELECT tag FROM opportunity_lead_tags WHERE lead_id = ?').all(p1Lead.id).map((r) => r.tag);
+    check('phase1: auto-tags derived (DRIVER, ROUTE, RSP)',
+      p1Tags.includes('DRIVER') && p1Tags.includes('ROUTE') && p1Tags.includes('RSP'),
+      `tags=${p1Tags.join(',')}`);
+    check('phase1: grow_application event recorded',
+      !!db.prepare("SELECT 1 FROM events WHERE type = 'grow_application' AND meta LIKE ?").get(`%${p1Lead.id}%`),
+      'no event');
+
+    res = await req(`${BASE}/grow/thank-you`, {});
+    check('phase1: GET /grow/thank-you 200 with exact copy',
+      res.status === 200 && (await res.text()).includes('THANK YOU FOR TELLING US ABOUT YOU.'),
+      `status=${res.status}`);
+
+    const p1QueueRows = db.prepare("SELECT * FROM email_queue WHERE sequence = 'grow' AND email = ?").all(p1('grow'));
+    check('phase1: applicant confirmation queued to applicant',
+      p1QueueRows.some((r) => r.subject === 'We Received Your TransitNow Information' && r.status === 'sent'),
+      `rows=${p1QueueRows.length}`);
+    const p1AdminQueue = db.prepare("SELECT * FROM email_queue WHERE sequence = 'grow' AND step = 'admin-new-application' AND subject LIKE '%P1First P1Last%'").all();
+    check('phase1: admin notification queued with applicant name',
+      p1AdminQueue.length === 1 && p1AdminQueue[0].status === 'sent',
+      `rows=${p1AdminQueue.length}`);
+    const p1NewFiles = newFilesSince(outboxBeforeP1);
+    const p1ApplicantMail = filesMentioning(p1('grow'), p1NewFiles);
+    check('phase1: applicant email landed in outbox (local delivery)',
+      p1ApplicantMail.length >= 1 &&
+      fs.readFileSync(path.join(OUTBOX, p1ApplicantMail[0]), 'utf8').includes('We Received Your TransitNow Information'),
+      `files=${p1ApplicantMail.length}`);
+    const p1AdminMail = p1NewFiles.filter((f) => {
+      try { return fs.readFileSync(path.join(OUTBOX, f), 'utf8').includes('New Grow application'); } catch { return false; }
+    });
+    check('phase1: admin notification in outbox links to the lead profile',
+      p1AdminMail.length >= 1 &&
+      fs.readFileSync(path.join(OUTBOX, p1AdminMail[0]), 'utf8').includes(`/admin/crm/leads/${p1Lead.id}`),
+      `files=${p1AdminMail.length}`);
+    const p1Comm = db.prepare("SELECT * FROM lead_communications WHERE lead_id = ? AND kind = 'email'").all(p1Lead.id);
+    check('phase1: outbound confirmation logged in lead_communications', p1Comm.length >= 1, `rows=${p1Comm.length}`);
+
+    // --- Duplicate submission: update-in-place, no second lead row ---
+    const p1DupeForm = p1GrowForm.map(([k, v]) => (k === 'about_you' ? [k, 'P1 about UPDATED'] : [k, v]));
+    res = await req(`${BASE}/grow/apply`, { method: 'POST', form: p1DupeForm });
+    const p1DupeCount = db.prepare('SELECT COUNT(*) n FROM opportunity_leads WHERE email = ?').get(p1('grow')).n;
+    const p1LeadAfter = db.prepare('SELECT * FROM opportunity_leads WHERE email = ?').get(p1('grow'));
+    check('phase1: duplicate submission updates in place (one row, ?updated=1)',
+      res.status === 302 && res.headers.get('location') === '/grow/thank-you?updated=1' &&
+      p1DupeCount === 1 && p1LeadAfter.about_you === 'P1 about UPDATED',
+      `status=${res.status} count=${p1DupeCount}`);
+    check('phase1: resubmission logged, no extra status-history row',
+      db.prepare("SELECT COUNT(*) n FROM lead_communications WHERE lead_id = ? AND subject = 'Application resubmitted'").get(p1Lead.id).n === 1 &&
+      db.prepare('SELECT COUNT(*) n FROM lead_status_history WHERE lead_id = ?').get(p1Lead.id).n === 1,
+      'resubmission logging wrong');
+    res = await req(`${BASE}/grow/thank-you?updated=1`, {});
+    check('phase1: thank-you notes the record was updated',
+      res.status === 200 && (await res.text()).includes('we updated your record'),
+      `status=${res.status}`);
+
+    // --- Save & Continue Later (drafts) ---
+    res = await req(`${BASE}/grow/apply/draft`, { method: 'POST', form: { first_name: 'P1Draft', email: p1('draft'), step: '4', city: 'Milwaukee' } });
+    const p1DraftBody = await res.text();
+    const p1DraftJson = JSON.parse(p1DraftBody);
+    check('phase1: POST /grow/apply/draft returns token + resumeUrl',
+      res.status === 200 && p1DraftJson.ok === true && /^[a-f0-9]{48}$/.test(p1DraftJson.token) &&
+      p1DraftJson.resumeUrl === `/grow/apply/resume/${p1DraftJson.token}`,
+      `status=${res.status} body=${p1DraftBody.slice(0, 80)}`);
+    const p1DraftRow = db.prepare('SELECT * FROM opportunity_lead_drafts WHERE token = ?').get(p1DraftJson.token);
+    check('phase1: draft row stored server-side',
+      !!p1DraftRow && p1DraftRow.step === 4 && p1DraftRow.email === p1('draft'),
+      p1DraftRow ? `step=${p1DraftRow.step}` : 'no row');
+    res = await req(`${BASE}${p1DraftJson.resumeUrl}`, {});
+    const p1ResumeHtml = await res.text();
+    check('phase1: resume link restores draft (prefill + step 4)',
+      res.status === 200 && p1ResumeHtml.includes('P1Draft') && p1ResumeHtml.includes('var current = 4;'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/grow/apply/resume/deadbeef`, {});
+    check('phase1: bogus resume token -> 404', res.status === 404, `status=${res.status}`);
+    // Submitting with the draft token deletes the draft.
+    res = await req(`${BASE}/grow/apply`, { method: 'POST', form: [...p1GrowForm.map(([k, v]) => (k === 'email' ? [k, p1('growdraft')] : [k, v])), ['draft_token', p1DraftJson.token]] });
+    check('phase1: submitting with a draft token consumes the draft',
+      res.status === 302 && !db.prepare('SELECT 1 FROM opportunity_lead_drafts WHERE token = ?').get(p1DraftJson.token),
+      `status=${res.status}`);
+
+    // --- Business funnel ---
+    res = await req(`${BASE}/business`, { method: 'POST', form: { company_name: '', email: 'x' } });
+    check('phase1: POST /business invalid -> 400', res.status === 400, `status=${res.status}`);
+    res = await req(`${BASE}/business`, { method: 'POST', form: {
+      company_name: 'P1BizCo', first_name: 'P1Biz', email: p1('biz'), phone: '414-555-0202',
+      service_needed: 'Daily pharmacy deliveries', delivery_volume: '30 stops/day', frequency: 'daily',
+    } });
+    const p1Biz = db.prepare('SELECT * FROM opportunity_leads WHERE email = ?').get(p1('biz'));
+    check('phase1: POST /business valid -> 302, type BUSINESS, status NEW, tagged BUSINESS OWNER',
+      res.status === 302 && res.headers.get('location') === '/business/thank-you' &&
+      !!p1Biz && p1Biz.lead_type === 'BUSINESS' && p1Biz.status === 'NEW' &&
+      !!db.prepare("SELECT 1 FROM opportunity_lead_tags WHERE lead_id = ? AND tag = 'BUSINESS OWNER'").get(p1Biz.id),
+      `status=${res.status}`);
+    res = await req(`${BASE}/business/thank-you`, {});
+    check('phase1: GET /business/thank-you 200', res.status === 200 && (await res.text()).includes('WE RECEIVED YOUR INQUIRY'), `status=${res.status}`);
+
+    // --- RSP funnel ---
+    res = await req(`${BASE}/rsp`, { method: 'POST', form: {
+      first_name: 'P1Rsp', email: p1('rsp'), phone: '414-555-0303', city: 'Milwaukee', state: 'WI',
+      num_drivers: '4', why_interested: 'P1 wants to build',
+    } });
+    const p1Rsp = db.prepare('SELECT * FROM opportunity_leads WHERE email = ?').get(p1('rsp'));
+    check('phase1: POST /rsp valid -> 302, type RSP, default status RSP INTEREST, tagged RSP',
+      res.status === 302 && res.headers.get('location') === '/rsp/thank-you' &&
+      !!p1Rsp && p1Rsp.lead_type === 'RSP' && p1Rsp.status === 'RSP INTEREST' &&
+      !!db.prepare("SELECT 1 FROM opportunity_lead_tags WHERE lead_id = ? AND tag = 'RSP'").get(p1Rsp.id),
+      `status=${res.status} type=${p1Rsp && p1Rsp.lead_type} status=${p1Rsp && p1Rsp.status}`);
+
+    // --- Dispatch funnel ---
+    res = await req(`${BASE}/dispatch`, { method: 'POST', form: {
+      first_name: 'P1Disp', email: p1('dispatch'), phone: '414-555-0404',
+      vehicle_type: 'box-truck', about_you: 'P1 box truck owner',
+    } });
+    const p1Disp = db.prepare('SELECT * FROM opportunity_leads WHERE email = ?').get(p1('dispatch'));
+    check('phase1: POST /dispatch valid -> 302, tagged DISPATCH, no-guarantee copy stored',
+      res.status === 302 && res.headers.get('location') === '/dispatch/thank-you' &&
+      !!p1Disp && p1Disp.vehicle_type === 'box-truck' &&
+      !!db.prepare("SELECT 1 FROM opportunity_lead_tags WHERE lead_id = ? AND tag = 'DISPATCH'").get(p1Disp.id),
+      `status=${res.status}`);
+
+    // --- CRM: pipeline, profile, mutations ---
+    res = await req(`${BASE}/admin/crm`, {});
+    check('phase1: /admin/crm requires token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm?token=${ADMIN_TOKEN}`, {});
+    const p1CrmHtml = await res.text();
+    check('phase1: /admin/crm renders pipeline with the 14 grow statuses',
+      res.status === 200 && p1CrmHtml.includes('Opportunity Pipeline') &&
+      ['NEW', 'REVIEWING', 'CONTACTED', 'QUALIFYING', 'DOCUMENTS NEEDED', 'DRIVER READY',
+       'BUSINESS OPPORTUNITY', 'DISPATCH OPPORTUNITY', 'RSP INTEREST', 'PARTNERSHIP',
+       'WAITLIST', 'ACTIVE', 'NOT A FIT CURRENTLY', 'CLOSED'].every((s) => p1CrmHtml.includes(s)) &&
+      p1CrmHtml.includes('P1First'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p1Lead.id}`, {});
+    check('phase1: lead profile requires token (403 without)', res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p1Lead.id}?token=${ADMIN_TOKEN}`, {});
+    const p1ProfileHtml = await res.text();
+    check('phase1: lead profile shows all spec-8 sections + tags + history',
+      res.status === 200 && p1ProfileHtml.includes('P1First P1Last') &&
+      p1ProfileHtml.includes('Status history') && p1ProfileHtml.includes('Internal tags') &&
+      p1ProfileHtml.includes('Follow-up') && p1ProfileHtml.includes('Communications') &&
+      p1ProfileHtml.includes('P1CODE') && p1ProfileHtml.includes('DRIVER'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/999999?token=${ADMIN_TOKEN}`, {});
+    check('phase1: unknown lead profile -> 404', res.status === 404, `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/crm/leads/${p1Lead.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { status: 'CONTACTED', note: 'P1 called' } });
+    let p1After = db.prepare('SELECT status FROM opportunity_leads WHERE id = ?').get(p1Lead.id).status;
+    let p1HistAfter = db.prepare('SELECT from_status, to_status, changed_by FROM lead_status_history WHERE lead_id = ? ORDER BY id').all(p1Lead.id);
+    check('phase1: status change NEW->CONTACTED appends history (append-only)',
+      res.status === 302 && p1After === 'CONTACTED' && p1HistAfter.length === 2 &&
+      p1HistAfter[1].from_status === 'NEW' && p1HistAfter[1].to_status === 'CONTACTED' && p1HistAfter[1].changed_by === 'admin',
+      `status=${res.status} hist=${JSON.stringify(p1HistAfter)}`);
+    res = await req(`${BASE}/admin/crm/leads/${p1Lead.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { status: 'BOGUS' } });
+    check('phase1: invalid status rejected with error redirect, no change',
+      res.status === 302 && (res.headers.get('location') || '').includes('error=') &&
+      db.prepare('SELECT status FROM opportunity_leads WHERE id = ?').get(p1Lead.id).status === 'CONTACTED' &&
+      db.prepare('SELECT COUNT(*) n FROM lead_status_history WHERE lead_id = ?').get(p1Lead.id).n === 2,
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p1Biz.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { status: 'DISCOVERY' } });
+    check('phase1: business lead accepts business-pipeline status DISCOVERY',
+      res.status === 302 && db.prepare('SELECT status FROM opportunity_leads WHERE id = ?').get(p1Biz.id).status === 'DISCOVERY',
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p1Biz.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { status: 'DRIVER READY' } });
+    check('phase1: business lead rejects grow-only status DRIVER READY (pipeline isolation)',
+      res.status === 302 && (res.headers.get('location') || '').includes('error=') &&
+      db.prepare('SELECT status FROM opportunity_leads WHERE id = ?').get(p1Biz.id).status === 'DISCOVERY',
+      `status=${res.status}`);
+
+    res = await req(`${BASE}/admin/crm/leads/${p1Lead.id}/note?token=${ADMIN_TOKEN}`, { method: 'POST', form: { note: 'P1 internal note' } });
+    check('phase1: admin note saved',
+      res.status === 302 && !!db.prepare('SELECT 1 FROM lead_notes WHERE lead_id = ? AND note = ?').get(p1Lead.id, 'P1 internal note'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p1Lead.id}/followup?token=${ADMIN_TOKEN}`, { method: 'POST', form: { follow_up_date: '2026-10-01', assigned_to: 'P1Staff' } });
+    const p1Fu = db.prepare('SELECT follow_up_date, assigned_to FROM opportunity_leads WHERE id = ?').get(p1Lead.id);
+    check('phase1: follow-up date + assignee saved',
+      res.status === 302 && p1Fu.follow_up_date === '2026-10-01' && p1Fu.assigned_to === 'P1Staff',
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p1Lead.id}/tags?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['tags', 'FLEET'], ['tags', 'PARTNERSHIP']] });
+    const p1TagsAfter = db.prepare('SELECT tag FROM opportunity_lead_tags WHERE lead_id = ? ORDER BY tag').all(p1Lead.id).map((r) => r.tag);
+    check('phase1: admin tags replaced (not duplicated)',
+      res.status === 302 && p1TagsAfter.join(',') === 'FLEET,PARTNERSHIP',
+      `status=${res.status} tags=${p1TagsAfter.join(',')}`);
+
+    // --- Rate limiting on public POSTs ---
+    let p1Limited = 0;
+    for (let i = 0; i < 70; i++) {
+      const rr = await req(`${BASE}/grow/apply/draft`, { method: 'POST', form: { email: p1('rl'), step: '1' } });
+      await rr.text();
+      if (rr.status === 429) p1Limited++;
+    }
+    check('phase1: public POST rate limiter kicks in (429s after burst)',
+      p1Limited > 0, `429s=${p1Limited}`);
+
+    // --- Cleanup: remove all Phase 1 test data ---
+    const p1LeadIds = db.prepare("SELECT id FROM opportunity_leads WHERE email LIKE 'p1-%'").all().map((r) => r.id);
+    for (const id of p1LeadIds) {
+      for (const t of ['opportunity_lead_tags', 'lead_vehicles', 'lead_business_info', 'lead_goals', 'lead_sources', 'lead_status_history', 'lead_notes', 'lead_communications']) {
+        db.prepare(`DELETE FROM "${t}" WHERE lead_id = ?`).run(id);
+      }
+      db.prepare('DELETE FROM events WHERE meta LIKE ?').run(`%"opportunity_lead_id":${id}%`);
+    }
+    db.prepare("DELETE FROM opportunity_leads WHERE email LIKE 'p1-%'").run();
+    db.prepare("DELETE FROM opportunity_lead_drafts WHERE email LIKE 'p1-%'").run();
+    const p1Qids = db.prepare("SELECT id FROM email_queue WHERE sequence = 'grow' AND (email LIKE 'p1-%' OR subject LIKE '%P1%')").all().map((r) => r.id);
+    for (const qid of p1Qids) {
+      for (const f of fs.readdirSync(OUTBOX)) {
+        if (f.startsWith(`${qid}-`) && f.endsWith('.html')) {
+          try { fs.unlinkSync(path.join(OUTBOX, f)); } catch {}
+        }
+      }
+      db.prepare('DELETE FROM events WHERE meta LIKE ?').run(`%"queue_id":${qid}%`);
+    }
+    db.prepare("DELETE FROM email_queue WHERE sequence = 'grow' AND (email LIKE 'p1-%' OR subject LIKE '%P1%')").run();
+    check('phase1: test data cleaned up',
+      db.prepare("SELECT COUNT(*) n FROM opportunity_leads WHERE email LIKE 'p1-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM email_queue WHERE sequence = 'grow' AND (email LIKE 'p1-%' OR subject LIKE '%P1%')").get().n === 0,
+      'leftover rows');
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);
