@@ -42,6 +42,11 @@ const driverAdminViews = require('./views/driver-admin');
 // (additive; existing routes untouched).
 const grow = require('./lib/grow');
 const growViews = require('./views/grow');
+// Phase 2: extended driver onboarding, opportunity database, matching
+// (additive; existing routes untouched).
+const opps = require('./lib/opportunities');
+const oppViews = require('./views/opportunities');
+const driverExtViews = require('./views/driver-extended');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1602,11 +1607,19 @@ app.get('/admin/crm', adminAuth, ah(async (req, res) => {
 app.get('/admin/crm/leads/:id', adminAuth, ah(async (req, res) => {
   const profile = await grow.getLeadProfile(req.params.id);
   if (!profile) return res.status(404).type('text').send('Lead not found');
+  // Phase 2 (additive): driver-application linkage + potential matches.
+  const [driverLink, matches, opportunities] = await Promise.all([
+    opps.getDriverLinkForLead(profile.lead.id),
+    opps.listMatchesForPerson('lead', profile.lead.id),
+    opps.listOpportunities({}),
+  ]);
   res.send(adminViews.adminLayout(`Lead #${profile.lead.id}`,
     growViews.crmLeadProfileHtml(profile, {
       pipelines: { GROW: grow.GROW_STATUSES, BUSINESS: grow.BUSINESS_STATUSES, RSP: grow.GROW_STATUSES },
       internalTags: grow.INTERNAL_TAGS,
       error: req.query.error || '',
+      driverLink, matches, opportunities,
+      linkedJustNow: req.query.linked === '1',
     })));
 }));
 
@@ -2024,6 +2037,276 @@ app.get('/admin/audit', adminAuth, ah(async (req, res) => {
     drivers.getRecentPlanChanges(50),
   ]);
   res.send(adminViews.adminLayout('Audit trail', driverAdminViews.auditHtml({ statusChanges, custodyEvents, planChanges })));
+}));
+
+// --- Phase 2: extended driver onboarding, opportunity database, matching -----
+// Additive — existing routes untouched. Admin routes use the explicit
+// adminAuth pattern (registered before app.use('/admin', adminAuth)).
+
+// Extended driver application: token-scoped, shared by operations with a
+// specific candidate once an opportunity/dispatch relationship is relevant.
+// NOT in the public nav — not a second public free-for-all.
+app.get('/drivers/apply/:token', ah(async (req, res) => {
+  const driver = await drivers.getDriverByToken(req.params.token);
+  if (!driver) {
+    return res.status(404).type('text')
+      .send('This application link was not found. Ask TransitNow operations for a new link.');
+  }
+  const site = config.getSite();
+  page(res, 'Driver Application', driverViews.driverApplyPage({ site, driver }), site);
+}));
+
+app.post('/drivers/apply/:token', growLimiter, ah(async (req, res) => {
+  const driver = await drivers.getDriverByToken(req.params.token);
+  if (!driver) {
+    return res.status(404).type('text').send('This application link was not found.');
+  }
+  const site = config.getSite();
+  const { ok, errors, clean } = drivers.validateExtendedApplication(req.body || {});
+  if (!ok) {
+    res.status(400);
+    return page(
+      res, 'Driver Application',
+      driverViews.driverApplyPage({ site, driver, errors, prefill: req.body || {} }), site
+    );
+  }
+  const updated = await drivers.submitExtendedApplication(driver.id, clean, { by: 'driver' });
+  const dashUrl = drivers.driverDashUrl(updated.access_token);
+  // Notifications via the existing outbox queue (verified in outbox only —
+  // delivery beyond the queue is never claimed).
+  await drivers.queueDriverEmail({
+    to: updated.email,
+    subject: 'TransitNow — we received your driver application',
+    html: drivers.extendedApplicationDriverEmail(updated, dashUrl),
+    sequence: 'driver-ops',
+    step: 'extended-application-confirmation',
+  });
+  await drivers.notifyOps(
+    `New extended driver application: ${updated.full_name}`,
+    drivers.extendedApplicationOpsEmail(updated, `${drivers.baseUrl()}/admin/drivers/${updated.id}/profile`),
+    'extended-application-new'
+  );
+  await db.recordEvent({
+    visitor_id: req.vid || null,
+    lead_id: req.leadId || null,
+    type: 'driver_application_submitted',
+    product_id: null,
+    meta: { driver_id: updated.id },
+  });
+  page(res, 'Application received', driverViews.driverApplyDonePage({ site, driver: updated, dashUrl }), site);
+}));
+
+// --- Phase 2: opportunity database (admin) --------------------------------------
+app.get('/admin/opportunities', adminAuth, ah(async (req, res) => {
+  const status = opps.OPPORTUNITY_STATUSES.includes(req.query.status) ? req.query.status : null;
+  const [list, counts] = await Promise.all([
+    opps.listOpportunities({ status }),
+    opps.countOpportunitiesByStatus(),
+  ]);
+  res.send(adminViews.adminLayout('Opportunities',
+    oppViews.opportunityListHtml({ list, counts, statusFilter: status })));
+}));
+
+app.get('/admin/opportunities/new', adminAuth, ah(async (req, res) => {
+  res.send(adminViews.adminLayout('New opportunity', oppViews.opportunityFormHtml({})));
+}));
+
+app.post('/admin/opportunities', adminAuth, ah(async (req, res) => {
+  const { ok, errors, clean } = opps.validateOpportunity(req.body || {});
+  if (!ok) {
+    return res.send(adminViews.adminLayout('New opportunity',
+      oppViews.opportunityFormHtml({ opportunity: req.body || {}, errors })));
+  }
+  const created = await opps.createOpportunity(clean, { by: 'admin' });
+  res.redirect(`/admin/opportunities/${created.id}`);
+}));
+
+async function renderOpportunityDetail(req, res) {
+  const o = await opps.getOpportunity(req.params.id);
+  if (!o) return res.status(404).type('text').send('Opportunity not found');
+  const matches = await opps.listMatchesForOpportunity(o.id);
+  const people = {};
+  for (const m of matches) {
+    const s = await opps.personSummary(m.person_type, m.person_id);
+    if (s) people[`${m.person_type}:${m.person_id}`] = s;
+  }
+  const [leads, driversList] = await Promise.all([
+    db.all('SELECT id, first_name, last_name, email, lead_type, status FROM opportunity_leads ORDER BY created_at DESC LIMIT 200'),
+    drivers.listDrivers({ limit: 500 }),
+  ]);
+  let compare = null;
+  let compareLabel = '';
+  if (req.query.compare_lead) {
+    const lead = await db.get('SELECT * FROM opportunity_leads WHERE id = ?', [req.query.compare_lead]);
+    if (lead) {
+      compare = {
+        rows: await opps.compareCandidate(o, { lead }),
+        personType: 'lead',
+        personId: lead.id,
+      };
+      compareLabel = `${lead.first_name || ''} ${lead.last_name || ''}`.trim() || lead.email;
+    }
+  } else if (req.query.compare_driver) {
+    const driver = await drivers.getDriverById(req.query.compare_driver);
+    if (driver) {
+      compare = {
+        rows: await opps.compareCandidate(o, { driver }),
+        personType: 'driver',
+        personId: driver.id,
+      };
+      compareLabel = driver.full_name;
+    }
+  }
+  res.send(adminViews.adminLayout(`Opportunity — ${o.name}`,
+    oppViews.opportunityDetailHtml({
+      opportunity: o, matches, people, leads, driversList, compare, compareLabel,
+      error: req.query.error || '',
+    })));
+}
+
+app.get('/admin/opportunities/:id', adminAuth, ah(renderOpportunityDetail));
+
+app.get('/admin/opportunities/:id/edit', adminAuth, ah(async (req, res) => {
+  const o = await opps.getOpportunity(req.params.id);
+  if (!o) return res.status(404).type('text').send('Opportunity not found');
+  res.send(adminViews.adminLayout(`Edit — ${o.name}`, oppViews.opportunityFormHtml({ opportunity: o })));
+}));
+
+app.post('/admin/opportunities/:id', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  const { ok, errors, clean } = opps.validateOpportunity(req.body || {});
+  if (!ok) {
+    return res.send(adminViews.adminLayout('Edit opportunity',
+      oppViews.opportunityFormHtml({ opportunity: { ...(req.body || {}), id }, errors })));
+  }
+  try {
+    await opps.updateOpportunity(id, clean);
+  } catch (err) {
+    return res.redirect(`/admin/opportunities/${encodeURIComponent(id)}/edit?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/opportunities/${id}`);
+}));
+
+app.post('/admin/opportunities/:id/status', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await opps.setOpportunityStatus(id, req.body.status, { by: 'admin' });
+  } catch (err) {
+    return res.redirect(`/admin/opportunities/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/opportunities/${id}`);
+}));
+
+// Record a Potential Match from the opportunity page. The copy everywhere
+// calls it a "Potential Match" — never hired, never promised.
+app.post('/admin/opportunities/:id/match', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await opps.recordMatch({
+      opportunityId: id,
+      personType: req.body.person_type,
+      personId: Number(req.body.person_id),
+      note: req.body.note || '',
+      by: 'admin',
+    });
+  } catch (err) {
+    return res.redirect(`/admin/opportunities/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/opportunities/${id}`);
+}));
+
+// --- Phase 2: extended driver profile (admin) --------------------------------------
+app.get('/admin/drivers/:id/profile', adminAuth, ah(async (req, res) => {
+  const driver = await drivers.getDriverById(req.params.id);
+  if (!driver) return res.status(404).type('text').send('Driver not found');
+  const [qualChecks, onboardHistory, routes, packages, exceptions, tickets, planHistory, matches, leadLink, opportunities] =
+    await Promise.all([
+      drivers.getQualChecks(driver.id),
+      drivers.getOnboardHistory(driver.id),
+      drivers.listRoutes({ driverId: driver.id }),
+      drivers.listPackages({ driverId: driver.id }),
+      drivers.listExceptions({ driverId: driver.id }),
+      drivers.listTickets({ driverId: driver.id }),
+      drivers.listPlanChanges(driver.id),
+      opps.listMatchesForPerson('driver', driver.id),
+      opps.getLeadLinkForDriver(driver.id),
+      opps.listOpportunities({}),
+    ]);
+  res.send(adminViews.adminLayout(`Driver profile — ${driver.full_name}`,
+    driverExtViews.driverExtendedProfileHtml({
+      driver, qualChecks, onboardHistory, routes, packages, exceptions,
+      tickets, planHistory, matches, leadLink, opportunities,
+      error: req.query.error || '',
+    })));
+}));
+
+app.post('/admin/drivers/:id/extended-status', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await drivers.setExtendedStatus(id, String(req.body.extended_status || ''), {
+      by: 'admin',
+      note: req.body.note || '',
+      notify: req.body.notify === '1',
+    });
+  } catch (err) {
+    return res.redirect(`/admin/drivers/${encodeURIComponent(id)}/profile?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/drivers/${id}/profile`);
+}));
+
+app.post('/admin/drivers/:id/qual-checks', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  const checked = Array.isArray(req.body.checks) ? req.body.checks : (req.body.checks ? [req.body.checks] : []);
+  await drivers.syncQualChecks(id, checked, { by: 'admin' });
+  res.redirect(`/admin/drivers/${id}/profile`);
+}));
+
+// Record a Potential Match from the driver profile.
+app.post('/admin/drivers/:id/match', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await opps.recordMatch({
+      opportunityId: Number(req.body.opportunity_id),
+      personType: 'driver',
+      personId: Number(id),
+      note: req.body.note || '',
+      by: 'admin',
+    });
+  } catch (err) {
+    return res.redirect(`/admin/drivers/${encodeURIComponent(id)}/profile?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/drivers/${id}/profile`);
+}));
+
+// --- Phase 2: CRM lead -> driver application ---------------------------------------
+// "Start driver application": links the existing opportunity_leads row to a
+// driver record (reusing the driver when the email is already known — never
+// a duplicate record) and stores the linkage in lead_driver_links.
+app.post('/admin/crm/leads/:id/start-driver-application', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await opps.startDriverApplication(id, { by: 'admin', baseUrl: drivers.baseUrl() });
+  } catch (err) {
+    return res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}?linked=1`);
+}));
+
+// Record a Potential Match from the CRM lead profile.
+app.post('/admin/crm/leads/:id/match', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await opps.recordMatch({
+      opportunityId: Number(req.body.opportunity_id),
+      personType: 'lead',
+      personId: Number(id),
+      note: req.body.note || '',
+      by: 'admin',
+    });
+  } catch (err) {
+    return res.redirect(`/admin/crm/leads/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/crm/leads/${id}`);
 }));
 
 // --- Phase E: phone-camera scanning (manual fallback always available) --------

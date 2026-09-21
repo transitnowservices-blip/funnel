@@ -644,4 +644,75 @@ function planPage({ driver, plans, settings, currentPlanId, pendingRequest, hist
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, planPage, selectField, textField, checkboxGroup };
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, planPage, selectField, textField, checkboxGroup, driverApplyPage, driverApplyDonePage };
+
+// --- Phase 2: extended driver application (/drivers/apply/:token) -----------------
+// Token-scoped: operations shares this link with a specific candidate once an
+// actual opportunity/dispatch relationship is relevant. It is NOT in the
+// public nav — not a second public free-for-all. Mobile-first.
+function driverApplyPage({ site, driver, errors = [], prefill = {} }) {
+  const p = prefill;
+  const errHtml = errors.length
+    ? `<div class="form-error" role="alert"><strong>Please fix the following:</strong><ul>${errors.map((e) => `<li>${esc(e)}</li>`).join('')}</ul></div>`
+    : '';
+  return `
+<section>
+  <h1>Driver Application</h1>
+  <p class="subhead">Hi ${esc(driver.full_name)} — TransitNow operations shared this application with you. It covers the license, insurance, and agreement details we need before any route or dispatch relationship.</p>
+  <div class="card highlight-card">
+    <p><strong>Plainly:</strong> ${esc(drivers.NO_GUARANTEE_APPLICATION)}</p>
+  </div>
+  ${errHtml}
+  <form method="POST" action="/drivers/apply/${esc(driver.access_token)}" class="form">
+    <div class="card">
+      <h2>Driver's license</h2>
+      ${textField('license_number', "License number", p.license_number, { required: true, hint: 'Used only for the required background / MVR check.' })}
+      ${textField('license_state', 'License state', p.license_state, { required: true, placeholder: 'WI' })}
+      ${textField('license_class', 'License class', p.license_class, { required: true, placeholder: 'D' })}
+      ${textField('license_expiry', 'License expiration', p.license_expiry, { type: 'date', required: true })}
+    </div>
+
+    <div class="card">
+      <h2>Insurance</h2>
+      ${textField('insurance_carrier', 'Insurance carrier', p.insurance_carrier, { required: true, placeholder: 'e.g. Progressive Commercial' })}
+      ${textField('insurance_policy', 'Policy number', p.insurance_policy, { required: true, hint: 'Used only to verify your coverage.' })}
+      ${textField('insurance_expiry', 'Policy expiration', p.insurance_expiry, { type: 'date', required: true })}
+    </div>
+
+    <div class="card">
+      <h2>Consents &amp; agreement</h2>
+      <label class="checkbox"><input type="checkbox" name="consent_background" value="1"${p.consent_background ? ' checked' : ''} required>
+        I consent to a background check and motor vehicle record (MVR) check as part of this application. *</label>
+      <label class="checkbox"><input type="checkbox" name="consent_insurance_check" value="1"${p.consent_insurance_check ? ' checked' : ''} required>
+        I consent to verification of my insurance coverage. *</label>
+      <label class="checkbox"><input type="checkbox" name="agreement_accepted" value="1"${p.agreement_accepted ? ' checked' : ''} required>
+        I have read and accept the TransitNow driver agreement and understand this application guarantees nothing. *</label>
+    </div>
+
+    <button type="submit" class="btn btn-large big-btn">SUBMIT APPLICATION &rarr;</button>
+    <p class="microcopy">We only ask for what's needed to qualify you for opportunities. We never ask for Social Security numbers, bank account numbers, or passwords on this form.</p>
+  </form>
+  <p class="contact-line">Questions? Call ${esc(site.phone || '')} or email ${esc(site.email || '')}.</p>
+</section>`;
+}
+
+function driverApplyDonePage({ site, driver, dashUrl }) {
+  return `
+<section>
+  <h1>Application received, ${esc(driver.full_name)}.</h1>
+  <p class="subhead">We've received your driver application and our team will review it against current and future opportunity requirements.</p>
+  <div class="card highlight-card">
+    <p><strong>What this means — plainly:</strong> ${esc(drivers.NO_GUARANTEE_APPLICATION)}</p>
+  </div>
+  <div class="card">
+    <h2>What happens next</h2>
+    <ol>
+      <li><strong>Review.</strong> We verify your license, insurance, and documents.</li>
+      <li><strong>Qualification.</strong> You move through screening, orientation, and training as applicable.</li>
+      <li><strong>Ready.</strong> When you're marked Ready for Route, we start matching you with opportunities. Any match is recorded as a <strong>Potential Match</strong> — never a promise of work, routes, loads, or income.</li>
+    </ol>
+  </div>
+  <a class="btn btn-large" href="${esc(dashUrl)}">OPEN MY DASHBOARD &rarr;</a>
+  <p class="contact-line">Questions? Call ${esc(site.phone || '')} or email ${esc(site.email || '')}.</p>
+</section>`;
+}

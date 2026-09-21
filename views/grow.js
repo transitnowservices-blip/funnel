@@ -686,9 +686,55 @@ function plain(v) { return escHtml(v || '—'); }
 function crmLeadProfileHtml(p, opts = {}) {
   const { lead, vehicle, business, goals, sources, history, notes, comms, tags } = p;
   const { pipelines = {}, internalTags = [], error = '' } = opts;
+  // Phase 2 (additive): driver-application linkage + potential matches.
+  const { driverLink = null, matches = [], opportunities = [], linkedJustNow = false } = opts;
   const allowed = pipelines[lead.lead_type] || [];
   const tagNames = tags.map((t) => t.tag);
   const profileLink = `/admin/crm/leads/${lead.id}`;
+
+  const driverAppCard = (() => {
+    const justLinked = linkedJustNow
+      ? '<p><strong>Driver application started.</strong> The lead is now linked to a driver record below — no duplicate record was created.</p>'
+      : '';
+    if (driverLink && driverLink.driver) {
+      const d = driverLink.driver;
+      return `${justLinked}
+      <p>Linked to driver <a href="/admin/drivers/${d.id}/profile"><strong>${escHtml(d.full_name)}</strong></a>
+      (${escHtml(d.email)} · application: ${escHtml(d.extended_status || 'not started')}) —
+      linked ${driverLink.created_at ? new Date(Number(driverLink.created_at)).toLocaleString() : '—'} by ${escHtml(driverLink.created_by || '')}.</p>
+      <p>Extended application link (share with the candidate):<br>
+      <span class="dash-link"><a href="/drivers/apply/${escAttr(d.access_token)}">/drivers/apply/${escAttr(d.access_token)}</a></span></p>
+      <p class="microcopy">Starting another application reuses this same driver record — it never creates a duplicate.</p>`;
+    }
+    return `${justLinked}
+    <form method="POST" action="${profileLink}/start-driver-application" class="filter-form">
+      <button type="submit" class="btn">Start driver application</button>
+    </form>
+    <p class="microcopy">Links this lead to a driver record (reuses the existing driver if the email is already known — never duplicates) so the candidate can complete the extended driver application. Typically used when the lead reaches <strong>DRIVER READY</strong>.</p>`;
+  })();
+
+  const matchSection = (() => {
+    const rows = (matches || []).map((m) => {
+      const o = (opportunities || []).find((x) => x.id === m.opportunity_id);
+      return `<tr><td><span class="admin-status-pill">Potential Match</span></td>
+        <td>${o ? `<a href="/admin/opportunities/${o.id}"><strong>${escHtml(o.name)}</strong></a>` : 'opportunity #' + m.opportunity_id}</td>
+        <td>${escHtml(m.matched_by || '—')}<br><span class="muted">${m.ts ? new Date(Number(m.ts)).toLocaleString() : '—'}</span></td>
+        <td>${escHtml(m.note || '')}</td></tr>`;
+    }).join('');
+    const oppOpts = (opportunities || []).map((o) =>
+      `<option value="${o.id}">${escAttr(o.name)} — ${escAttr(o.status)}</option>`).join('');
+    return `
+    <table class="admin-table"><thead><tr><th>Result</th><th>Opportunity</th><th>Matched by / when</th><th>Note</th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="4">No potential matches recorded for this lead.</td></tr>'}</tbody></table>
+    ${oppOpts ? `
+    <form method="POST" action="${profileLink}/match" class="filter-form">
+      <select name="opportunity_id" aria-label="Opportunity">${oppOpts}</select>
+      <input type="text" name="note" placeholder="Why this looks like a fit (optional)" style="min-height:44px;flex:1;min-width:200px">
+      <button type="submit" class="btn">Record Potential Match</button>
+    </form>
+    <p class="microcopy"><strong>A "Potential Match" is not an offer or promise of employment, routes, loads, contracts, partnership, or income.</strong></p>`
+      : '<p class="muted">Create an opportunity first to record matches.</p>'}`;
+  })();
 
   const statusForm = `
   <form method="POST" action="${profileLink}/status" class="filter-form">
@@ -726,6 +772,11 @@ ${error ? `<div class="grow-errors" role="alert">${escHtml(error)}</div>` : ''}
 
 <h3>Status</h3>
 ${statusForm}
+
+<h3>Driver application</h3>
+<div class="card">
+${driverAppCard}
+</div>
 
 <h3>Contact &amp; location</h3>
 <table class="admin-table"><tbody>
@@ -798,6 +849,9 @@ ${tagForm}
 
 <h3>Follow-up &amp; assignment</h3>
 ${followForm}
+
+<h3>Potential matches</h3>
+${matchSection}
 
 <h3>Notes</h3>
 ${noteForm}

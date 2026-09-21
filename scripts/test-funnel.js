@@ -2286,6 +2286,315 @@ async function main() {
       db.prepare("SELECT COUNT(*) n FROM email_queue WHERE sequence = 'grow' AND (email LIKE 'p1-%' OR subject LIKE '%P1%')").get().n === 0,
       'leftover rows');
 
+    /* ---- Phase 2: extended driver onboarding / opportunity database / matching ----
+       Additive: reuses existing drivers/driver_status_history/custody/support-ticket
+       records; no parallel driver or package records are created.               */
+    const p2ts = Date.now();
+    const p2 = (n) => `p2-${n}-${p2ts}@example.com`;
+    const p2QidsBefore = new Set(db.prepare('SELECT id FROM email_queue').all().map((r) => r.id));
+
+    // --- Admin auth on every new admin route ---
+    res = await req(`${BASE}/admin/opportunities`, {});
+    check('phase2: /admin/opportunities requires admin token (403 without)',
+      res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/opportunities?token=${ADMIN_TOKEN}`, {});
+    const p2OppListHtml = await res.text();
+    check('phase2: /admin/opportunities 200 with token, shows all 6 exact statuses',
+      res.status === 200 && p2OppListHtml.includes('Opportunities') &&
+      ['DRAFT', 'OPEN', 'QUALIFYING', 'FILLED', 'PAUSED', 'CLOSED'].every((s) => p2OppListHtml.includes(`>${s} (`)),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/drivers/1/profile`, {});
+    check('phase2: extended driver profile requires admin token (403 without)',
+      res.status === 403, `status=${res.status}`);
+
+    // --- Create opportunity (all spec-9 fields) ---
+    res = await req(`${BASE}/admin/opportunities?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['name', 'P2 Milwaukee AM Route'], ['client_contract', 'P2 Client Co'],
+      ['location', 'Milwaukee, WI'], ['territory', 'Milwaukee metro'],
+      ['opportunity_type', 'Dedicated route'],
+      ['vehicle_requirements', 'Cargo van or larger'],
+      ['driver_requirements', '2+ years delivery experience'],
+      ['insurance_requirements', 'Commercial auto, $1M liability'],
+      ['availability_requirements', 'Mon-Fri mornings'],
+      ['service_area', 'Milwaukee metro'],
+      ['start_date', '2026-10-01'], ['end_date', '2026-12-31'],
+      ['drivers_needed', '3'], ['vehicles_needed', '3'],
+      ['notes', 'P2 internal note'], ['documents', 'P2 doc ref'],
+      ['contact_info', 'P2 ops contact'],
+    ]});
+    const p2Opp = db.prepare("SELECT * FROM opportunities WHERE name = 'P2 Milwaukee AM Route'").get();
+    check('phase2: opportunity created with ALL spec fields, status defaults to DRAFT',
+      res.status === 302 && !!p2Opp && p2Opp.status === 'DRAFT' &&
+      p2Opp.client_contract === 'P2 Client Co' && p2Opp.location === 'Milwaukee, WI' &&
+      p2Opp.territory === 'Milwaukee metro' && p2Opp.opportunity_type === 'Dedicated route' &&
+      p2Opp.vehicle_requirements === 'Cargo van or larger' &&
+      p2Opp.driver_requirements === '2+ years delivery experience' &&
+      p2Opp.insurance_requirements === 'Commercial auto, $1M liability' &&
+      p2Opp.availability_requirements === 'Mon-Fri mornings' &&
+      p2Opp.service_area === 'Milwaukee metro' &&
+      p2Opp.start_date === '2026-10-01' && p2Opp.end_date === '2026-12-31' &&
+      p2Opp.drivers_needed === 3 && p2Opp.vehicles_needed === 3 &&
+      p2Opp.notes === 'P2 internal note' && p2Opp.documents === 'P2 doc ref' &&
+      p2Opp.contact_info === 'P2 ops contact',
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/opportunities?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['name', '']] });
+    check('phase2: opportunity without a name is rejected (no row created)',
+      res.status === 200 && db.prepare("SELECT COUNT(*) n FROM opportunities WHERE name = ''").get().n === 0,
+      `status=${res.status}`);
+
+    // --- Exact status transitions DRAFT -> OPEN -> QUALIFYING -> FILLED ---
+    for (const s of ['OPEN', 'QUALIFYING', 'FILLED']) {
+      res = await req(`${BASE}/admin/opportunities/${p2Opp.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { status: s } });
+    }
+    check('phase2: opportunity status transitions DRAFT -> OPEN -> QUALIFYING -> FILLED',
+      db.prepare('SELECT status FROM opportunities WHERE id = ?').get(p2Opp.id).status === 'FILLED');
+    res = await req(`${BASE}/admin/opportunities/${p2Opp.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { status: 'BOGUS' } });
+    check('phase2: invalid opportunity status rejected, row unchanged',
+      res.status === 302 && db.prepare('SELECT status FROM opportunities WHERE id = ?').get(p2Opp.id).status === 'FILLED',
+      `status=${res.status}`);
+
+    // --- CRM lead -> driver application linkage ---
+    res = await req(`${BASE}/grow/apply`, { method: 'POST', form: [
+      ['first_name', 'P2'], ['last_name', 'Lead'], ['email', p2('lead')],
+      ['phone', '4145550200'], ['city', 'Milwaukee'], ['state', 'WI'],
+      ['vehicle_type', 'cargo-van'], ['vehicle_year', '2021'],
+      ['vehicle_make', 'Ford'], ['vehicle_model', 'Transit'],
+    ]});
+    const p2Lead = db.prepare('SELECT * FROM opportunity_leads WHERE email = ?').get(p2('lead'));
+    check('phase2: grow lead created for linkage test', !!p2Lead && p2Lead.status === 'NEW');
+    res = await req(`${BASE}/admin/crm/leads/${p2Lead.id}/status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { status: 'DRIVER READY' } });
+    check('phase2: lead moved to DRIVER READY',
+      db.prepare('SELECT status FROM opportunity_leads WHERE id = ?').get(p2Lead.id).status === 'DRIVER READY');
+
+    res = await req(`${BASE}/admin/crm/leads/${p2Lead.id}/start-driver-application?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    const p2Drv = db.prepare('SELECT * FROM drivers WHERE email = ?').get(p2('lead'));
+    const p2Link = db.prepare('SELECT * FROM lead_driver_links WHERE lead_id = ?').get(p2Lead.id);
+    const p2LinkComm = db.prepare("SELECT COUNT(*) n FROM lead_communications WHERE lead_id = ? AND subject = 'Driver application started'").get(p2Lead.id).n;
+    check('phase2: start-driver-application creates driver row + stores linkage in lead_driver_links',
+      res.status === 302 && !!p2Drv && p2Drv.status === 'new' && !!p2Drv.access_token &&
+      !!p2Link && p2Link.driver_id === p2Drv.id && p2LinkComm === 1 &&
+      p2Drv.full_name === 'P2 Lead' && p2Drv.phone === '4145550200' &&
+      p2Drv.vehicle_type === 'cargo-van' && p2Drv.vehicle_year === '2021' &&
+      p2Drv.vehicle_make_model === 'Ford Transit',
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p2Lead.id}/start-driver-application?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    check('phase2: starting the application twice does not duplicate driver or link',
+      res.status === 302 &&
+      db.prepare('SELECT COUNT(*) n FROM drivers WHERE email = ?').get(p2('lead')).n === 1 &&
+      db.prepare('SELECT COUNT(*) n FROM lead_driver_links WHERE lead_id = ?').get(p2Lead.id).n === 1,
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/crm/leads/${p2Lead.id}?token=${ADMIN_TOKEN}`, {});
+    const p2LeadHtml = await res.text();
+    check('phase2: lead profile shows linked driver + extended application link + potential-matches section',
+      res.status === 200 && p2LeadHtml.includes('Driver application') &&
+      p2LeadHtml.includes(`/drivers/apply/${p2Drv.access_token}`) && p2LeadHtml.includes('Potential matches'),
+      `status=${res.status}`);
+
+    // --- Extended application: token-scoped page ---
+    res = await req(`${BASE}/drivers/apply/not-a-real-token`, {});
+    check('phase2: /drivers/apply with bad token 404s', res.status === 404, `status=${res.status}`);
+    res = await req(`${BASE}/drivers/apply/${p2Drv.access_token}`, {});
+    const p2ApplyHtml = await res.text();
+    check('phase2: /drivers/apply/:token 200, mobile-first, honest no-guarantee copy',
+      res.status === 200 && p2ApplyHtml.includes('Driver Application') &&
+      p2ApplyHtml.includes('name="license_number"') && p2ApplyHtml.includes('name="insurance_policy"') &&
+      p2ApplyHtml.includes('name="consent_background"') && p2ApplyHtml.includes('name="agreement_accepted"') &&
+      p2ApplyHtml.includes('does not guarantee approval') && p2ApplyHtml.includes('name="viewport"'),
+      `status=${res.status}`);
+    check('phase2: extended application collects no SSN/bank/password fields',
+      !/name="(ssn|social|bank|account_number|password)"/i.test(p2ApplyHtml));
+
+    // Validation failure.
+    res = await req(`${BASE}/drivers/apply/${p2Drv.access_token}`, { method: 'POST', form: { license_number: 'X' } });
+    const p2ApplyBad = await res.text();
+    check('phase2: incomplete application rejected with 400 + error list',
+      res.status === 400 && p2ApplyBad.includes('Please fix the following'),
+      `status=${res.status}`);
+
+    // Submit the extended application.
+    const p2ApplyForm = () => [
+      ['license_number', 'P2D1234567'], ['license_state', 'WI'], ['license_class', 'D'],
+      ['license_expiry', '2028-05-01'], ['insurance_carrier', 'P2 Carrier'],
+      ['insurance_policy', 'P2POL999'], ['insurance_expiry', '2027-05-01'],
+      ['consent_background', '1'], ['consent_insurance_check', '1'], ['agreement_accepted', '1'],
+    ];
+    res = await req(`${BASE}/drivers/apply/${p2Drv.access_token}`, { method: 'POST', form: p2ApplyForm() });
+    const p2ApplyDone = await res.text();
+    const p2DrvAfter = db.prepare('SELECT * FROM drivers WHERE email = ?').get(p2('lead'));
+    check('phase2: application submitted -> confirmation page + extended_status APPLIED on same driver row',
+      res.status === 200 && p2ApplyDone.includes('Application received') &&
+      p2DrvAfter.extended_status === 'APPLIED' && p2DrvAfter.id === p2Drv.id,
+      `status=${res.status} ext=${p2DrvAfter && p2DrvAfter.extended_status}`);
+    check('phase2: license/insurance/consent fields stored on the SAME driver row (no duplicate)',
+      p2DrvAfter.license_number === 'P2D1234567' && p2DrvAfter.license_state === 'WI' &&
+      p2DrvAfter.insurance_carrier === 'P2 Carrier' && p2DrvAfter.insurance_policy === 'P2POL999' &&
+      p2DrvAfter.consent_background === 1 && p2DrvAfter.consent_insurance_check === 1 &&
+      p2DrvAfter.agreement_accepted === 1 && !!p2DrvAfter.agreement_accepted_at &&
+      db.prepare('SELECT COUNT(*) n FROM drivers WHERE email = ?').get(p2('lead')).n === 1);
+    const p2Hist = db.prepare('SELECT from_status, to_status FROM driver_onboard_history WHERE driver_id = ? ORDER BY ts ASC, id ASC').all(p2DrvAfter.id);
+    check('phase2: onboard history append-only (null -> APPLIED)',
+      p2Hist.length === 1 && p2Hist[0].from_status === null && p2Hist[0].to_status === 'APPLIED',
+      JSON.stringify(p2Hist));
+    const p2QDriver = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email = ? AND step = 'extended-application-confirmation'").get(p2('lead')).n;
+    const p2QOps = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step = 'extended-application-new'").get().n;
+    check('phase2: application queues driver confirmation + ops notification (outbox queue, never claimed as delivered)',
+      p2QDriver === 1 && p2QOps >= 1, `driver=${p2QDriver} ops=${p2QOps}`);
+    check('phase2: confirmation copy says "Potential Match" language review, not hired',
+      p2ApplyDone.includes('Potential Match') && !/you are hired/i.test(p2ApplyDone));
+
+    // Re-submit: updates fields, does not regress status or duplicate history.
+    const p2ApplyForm2 = p2ApplyForm().map(([k, v]) => (k === 'insurance_carrier' ? [k, 'P2 Carrier Updated'] : [k, v]));
+    res = await req(`${BASE}/drivers/apply/${p2Drv.access_token}`, { method: 'POST', form: p2ApplyForm2 });
+    const p2DrvRe = db.prepare('SELECT extended_status, insurance_carrier FROM drivers WHERE email = ?').get(p2('lead'));
+    const p2HistRe = db.prepare('SELECT COUNT(*) n FROM driver_onboard_history WHERE driver_id = ?').get(p2DrvAfter.id).n;
+    check('phase2: re-submitting updates fields without regressing status or duplicating history',
+      res.status === 200 && p2DrvRe.extended_status === 'APPLIED' &&
+      p2DrvRe.insurance_carrier === 'P2 Carrier Updated' && p2HistRe === 1);
+
+    // --- Extended status transitions (admin) ---
+    res = await req(`${BASE}/admin/drivers/${p2DrvAfter.id}/extended-status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { extended_status: 'SCREENING', note: 'P2 screening' } });
+    const p2ExtAfter = db.prepare('SELECT extended_status, status FROM drivers WHERE id = ?').get(p2DrvAfter.id);
+    const p2Hist2 = db.prepare('SELECT from_status, to_status, changed_by FROM driver_onboard_history WHERE driver_id = ? ORDER BY ts ASC, id ASC').all(p2DrvAfter.id);
+    check('phase2: admin extended-status APPLIED -> SCREENING; history append-only; pipeline status untouched',
+      res.status === 302 && p2ExtAfter.extended_status === 'SCREENING' && p2ExtAfter.status === 'new' &&
+      p2Hist2.length === 2 && p2Hist2[1].from_status === 'APPLIED' && p2Hist2[1].to_status === 'SCREENING' &&
+      p2Hist2[1].changed_by === 'admin',
+      `status=${res.status} ext=${p2ExtAfter.extended_status} pipeline=${p2ExtAfter.status}`);
+    res = await req(`${BASE}/admin/drivers/${p2DrvAfter.id}/extended-status?token=${ADMIN_TOKEN}`, { method: 'POST', form: { extended_status: 'NOPE' } });
+    check('phase2: invalid extended status rejected, row unchanged',
+      res.status === 302 &&
+      db.prepare('SELECT extended_status FROM drivers WHERE id = ?').get(p2DrvAfter.id).extended_status === 'SCREENING');
+
+    // --- Qualification checklist (11 exact labels) ---
+    const p2Checks = ['identity', 'license', 'insurance', 'vehicle', 'background_mvr', 'documents', 'agreement', 'orientation', 'training'];
+    res = await req(`${BASE}/admin/drivers/${p2DrvAfter.id}/qual-checks?token=${ADMIN_TOKEN}`, { method: 'POST', form: p2Checks.map((c) => ['checks', c]) });
+    const p2CheckRows = db.prepare('SELECT check_key, checked_by, ts FROM driver_qual_checks WHERE driver_id = ?').all(p2DrvAfter.id);
+    check('phase2: 9 qualification checks recorded with timestamps + checked_by',
+      res.status === 302 && p2CheckRows.length === 9 &&
+      p2CheckRows.every((r) => r.ts > 0 && r.checked_by === 'admin'),
+      `status=${res.status} count=${p2CheckRows.length}`);
+    res = await req(`${BASE}/admin/drivers/${p2DrvAfter.id}/qual-checks?token=${ADMIN_TOKEN}`, { method: 'POST', form: p2Checks.filter((c) => c !== 'training').map((c) => ['checks', c]) });
+    check('phase2: unchecking removes only that check record',
+      db.prepare('SELECT COUNT(*) n FROM driver_qual_checks WHERE driver_id = ?').get(p2DrvAfter.id).n === 8 &&
+      db.prepare("SELECT COUNT(*) n FROM driver_qual_checks WHERE driver_id = ? AND check_key = 'training'").get(p2DrvAfter.id).n === 0);
+
+    // --- Extended profile page ---
+    res = await req(`${BASE}/admin/drivers/${p2DrvAfter.id}/profile?token=${ADMIN_TOKEN}`, {});
+    const p2ProfileHtml = await res.text();
+    check('phase2: extended profile 200: all 11 checklist labels, docs note, ops data, status, notes',
+      res.status === 200 && p2ProfileHtml.includes('Qualification checklist') &&
+      ['Identity verified', 'License verified', 'Insurance verified', 'Vehicle verified',
+       'Background/MVR completed where applicable', 'Required documents received',
+       'Agreement completed', 'Orientation completed', 'Training completed',
+       'Approved', 'Ready for route'].every((l) => p2ProfileHtml.includes(l)) &&
+      p2ProfileHtml.includes('full document upload') &&
+      p2ProfileHtml.includes('Routes (') && p2ProfileHtml.includes('Packages (') &&
+      p2ProfileHtml.includes('Exceptions (') && p2ProfileHtml.includes('Support tickets (') &&
+      p2ProfileHtml.includes('Service plan history') && p2ProfileHtml.includes('Application: SCREENING') &&
+      p2ProfileHtml.includes('Potential matches'),
+      `status=${res.status}`);
+    check('phase2: extended profile shows CRM linkage to the lead',
+      p2ProfileHtml.includes('Linked from CRM lead') && p2ProfileHtml.includes(`/admin/crm/leads/${p2Lead.id}`));
+
+    // --- Opportunity matching: Potential Match only, never hired ---
+    res = await req(`${BASE}/admin/opportunities/${p2Opp.id}/match?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['person_type', 'lead'], ['person_id', String(p2Lead.id)], ['note', 'P2 fit: cargo van, Milwaukee'],
+    ]});
+    const p2Match = db.prepare('SELECT * FROM opportunity_matches WHERE opportunity_id = ?').get(p2Opp.id);
+    check('phase2: Potential Match recorded for CRM lead (matched_by + timestamp + note)',
+      res.status === 302 && !!p2Match && p2Match.person_type === 'lead' && p2Match.person_id === p2Lead.id &&
+      p2Match.matched_by === 'admin' && p2Match.ts > 0 && p2Match.note === 'P2 fit: cargo van, Milwaukee',
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/opportunities/${p2Opp.id}/match?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['person_type', 'lead'], ['person_id', String(p2Lead.id)],
+    ]});
+    check('phase2: duplicate match does not create a second row',
+      db.prepare('SELECT COUNT(*) n FROM opportunity_matches WHERE opportunity_id = ?').get(p2Opp.id).n === 1);
+    res = await req(`${BASE}/admin/opportunities/${p2Opp.id}/match?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['person_type', 'driver'], ['person_id', String(p2DrvAfter.id)], ['note', 'P2 driver fit'],
+    ]});
+    check('phase2: Potential Match recorded for driver as well',
+      db.prepare("SELECT COUNT(*) n FROM opportunity_matches WHERE opportunity_id = ? AND person_type = 'driver'").get(p2Opp.id).n === 1);
+    res = await req(`${BASE}/admin/opportunities/${p2Opp.id}/match?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['person_type', 'lead'], ['person_id', '999999'],
+    ]});
+    check('phase2: match against unknown person rejected, no row created',
+      res.status === 302 &&
+      db.prepare('SELECT COUNT(*) n FROM opportunity_matches WHERE opportunity_id = ?').get(p2Opp.id).n === 2,
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/opportunities/${p2Opp.id}?token=${ADMIN_TOKEN}`, {});
+    const p2OppHtml = await res.text();
+    check('phase2: opportunity page shows "Potential Match" and never promises hiring',
+      res.status === 200 && p2OppHtml.includes('Potential Match') &&
+      !/you are hired/i.test(p2OppHtml) && p2OppHtml.includes('never promises employment'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/opportunities/${p2Opp.id}?token=${ADMIN_TOKEN}&compare_lead=${p2Lead.id}`, {});
+    const p2CmpHtml = await res.text();
+    check('phase2: candidate comparison renders requirements vs lead profile + match button',
+      res.status === 200 && p2CmpHtml.includes('Candidate comparison') &&
+      p2CmpHtml.includes('Vehicle requirements') && p2CmpHtml.includes('Record Potential Match'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/drivers/${p2DrvAfter.id}/profile?token=${ADMIN_TOKEN}`, {});
+    const p2ProfileHtml2 = await res.text();
+    check('phase2: driver extended profile lists the Potential Match',
+      p2ProfileHtml2.includes('Potential Match') && p2ProfileHtml2.includes('P2 Milwaukee AM Route'));
+    res = await req(`${BASE}/admin/crm/leads/${p2Lead.id}?token=${ADMIN_TOKEN}`, {});
+    const p2LeadHtml2 = await res.text();
+    check('phase2: lead profile lists the Potential Match',
+      p2LeadHtml2.includes('Potential Match') && p2LeadHtml2.includes('P2 Milwaukee AM Route'));
+
+    // --- Rate limiting on the new public POST ---
+    let p2Limited = 0;
+    for (let i = 0; i < 70; i++) {
+      const rr = await req(`${BASE}/drivers/apply/${p2Drv.access_token}`, { method: 'POST', form: { license_number: 'x' } });
+      await rr.text();
+      if (rr.status === 429) p2Limited++;
+    }
+    check('phase2: public /drivers/apply POST is rate limited (429s after burst)', p2Limited > 0, `429s=${p2Limited}`);
+
+    // --- Cleanup: remove ALL Phase 2 test data ---
+    const p2LeadIds = db.prepare("SELECT id FROM opportunity_leads WHERE email LIKE 'p2-%'").all().map((r) => r.id);
+    const p2DriverIds = db.prepare("SELECT id FROM drivers WHERE email LIKE 'p2-%'").all().map((r) => r.id);
+    const p2OppIds = db.prepare("SELECT id FROM opportunities WHERE name LIKE 'P2 %'").all().map((r) => r.id);
+    for (const id of p2LeadIds) {
+      for (const t of ['opportunity_lead_tags', 'lead_vehicles', 'lead_business_info', 'lead_goals', 'lead_sources', 'lead_status_history', 'lead_notes', 'lead_communications', 'lead_driver_links']) {
+        db.prepare(`DELETE FROM "${t}" WHERE lead_id = ?`).run(id);
+      }
+      db.prepare("DELETE FROM opportunity_matches WHERE person_type = 'lead' AND person_id = ?").run(id);
+    }
+    for (const id of p2DriverIds) {
+      for (const t of ['driver_qual_checks', 'driver_onboard_history', 'driver_status_history', 'lead_driver_links']) {
+        db.prepare(`DELETE FROM "${t}" WHERE driver_id = ?`).run(id);
+      }
+      db.prepare("DELETE FROM opportunity_matches WHERE person_type = 'driver' AND person_id = ?").run(id);
+    }
+    for (const id of p2OppIds) {
+      db.prepare('DELETE FROM opportunity_matches WHERE opportunity_id = ?').run(id);
+    }
+    db.prepare("DELETE FROM opportunity_leads WHERE email LIKE 'p2-%'").run();
+    db.prepare("DELETE FROM drivers WHERE email LIKE 'p2-%'").run();
+    db.prepare("DELETE FROM opportunities WHERE name LIKE 'P2 %'").run();
+    const p2NewQids = db.prepare('SELECT id, email FROM email_queue').all()
+      .filter((r) => !p2QidsBefore.has(r.id)).map((r) => r.id);
+    const p2Outbox = new Set(outboxFiles());
+    for (const qid of p2NewQids) {
+      for (const f of outboxFiles()) {
+        if (f.startsWith(`${qid}-`) && f.endsWith('.html')) fs.unlinkSync(path.join(OUTBOX, f));
+      }
+    }
+    if (p2NewQids.length) db.prepare(`DELETE FROM email_queue WHERE id IN (${p2NewQids.map(() => '?').join(',')})`).run(...p2NewQids);
+    db.prepare("DELETE FROM events WHERE type = 'driver_application_submitted'").run();
+    check('phase2: test data cleaned up',
+      db.prepare("SELECT COUNT(*) n FROM opportunity_leads WHERE email LIKE 'p2-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM drivers WHERE email LIKE 'p2-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM opportunities WHERE name LIKE 'P2 %'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM opportunity_matches WHERE note LIKE 'P2%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM email_queue WHERE email LIKE 'p2-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM email_queue WHERE step LIKE 'extended-application%'").get().n === 0 &&
+      p2NewQids.every((qid) => !outboxFiles().some((f) => f.startsWith(`${qid}-`))) &&
+      outboxFiles().every((f) => p2Outbox.has(f)),
+      'leftover rows');
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

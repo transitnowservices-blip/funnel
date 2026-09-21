@@ -87,6 +87,12 @@ function driverDetailHtml({ driver: d, history }) {
 <p class="muted">Onboarded ${fmtTs(d.submitted_at)} · Source: ${esc(drivers.SOURCE_LABELS[d.source] || d.source)} · <a href="${esc(drivers.driverDashUrl(d.access_token))}">Driver dashboard link</a></p>
 
 <div class="card">
+  <h3>Extended driver profile</h3>
+  <p>Qualification checklist, application status (${esc(d.extended_status || 'not started')}), documents, routes, packages, exceptions, support tickets, training, and opportunity matches.</p>
+  <p><a class="btn" href="/admin/drivers/${d.id}/profile">Open extended profile &rarr;</a></p>
+</div>
+
+<div class="card">
   <h3>Change status</h3>
   <form method="POST" action="/admin/drivers/${d.id}/status" class="form">
     <label>Status
