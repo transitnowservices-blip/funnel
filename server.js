@@ -29,6 +29,7 @@ const crypto = require('crypto');
 const db = require('./lib/db');
 const config = require('./lib/config');
 const tags = require('./lib/tags');
+const subscriptions = require('./lib/subscriptions');
 const tracking = require('./lib/tracking');
 const automation = require('./lib/automation');
 const room = require('./lib/room');
@@ -1610,6 +1611,7 @@ app.get('/support', (req, res) => {
 app.get('/admin/crm', adminAuth, ah(async (req, res) => {
   const type = String(req.query.type || '').toUpperCase();
   const status = String(req.query.status || '').toUpperCase();
+  const paid = String(req.query.paid || 'all');
   const types = grow.LEAD_TYPES;
   const order = type === 'BUSINESS' ? grow.BUSINESS_STATUSES : grow.GROW_STATUSES;
   const allStatuses = [...new Set([...grow.GROW_STATUSES, ...grow.BUSINESS_STATUSES])];
@@ -1617,14 +1619,23 @@ app.get('/admin/crm', adminAuth, ah(async (req, res) => {
   const params = [];
   if (types.includes(type)) { conds.push('lead_type = ?'); params.push(type); }
   if (allStatuses.includes(status)) { conds.push('status = ?'); params.push(status); }
-  const leads = await db.all(
+  let leads = await db.all(
     `SELECT * FROM opportunity_leads ${conds.length ? 'WHERE ' + conds.join(' AND ') : ''} ORDER BY created_at DESC LIMIT 500`,
     params
   );
+  // Paid-client visibility (additive): badge + filter leads by dispatch subscription.
+  const subMap = await subscriptions.mapForEmails(leads.map((l) => l.email));
+  if (paid === 'paid') leads = leads.filter((l) => subMap[String(l.email || '').toLowerCase()]?.status === 'active');
+  else if (paid === 'attention') {
+    leads = leads.filter((l) => {
+      const st = subMap[String(l.email || '').toLowerCase()]?.status;
+      return st === 'past_due' || st === 'canceled';
+    });
+  }
   const grouped = {};
   for (const l of leads) { (grouped[l.status] = grouped[l.status] || []).push(l); }
   res.send(adminViews.adminLayout('Opportunity CRM',
-    growViews.crmPipelineHtml({ grouped, type, status, types, allStatuses: order })));
+    growViews.crmPipelineHtml({ grouped, type, status, paid, types, allStatuses: order, subsByEmail: subMap })));
 }));
 
 app.get('/admin/crm/leads/:id', adminAuth, ah(async (req, res) => {
@@ -1723,19 +1734,34 @@ app.post('/admin/crm/leads/:id/tags', adminAuth, ah(async (req, res) => {
 app.get('/admin/drivers', adminAuth, ah(async (req, res) => {
   const status = drivers.DRIVER_STATUSES.includes(req.query.status) ? req.query.status : null;
   const source = req.query.source ? drivers.normalizeSource(req.query.source) : null;
-  const filters = { status, source: req.query.source ? source : null, search: req.query.q || '' };
+  // Paid-client filter: 'paid' = active dispatch subscribers, 'attention' = past_due.
+  const paid = ['paid', 'attention'].includes(req.query.paid) ? req.query.paid : '';
+  const filters = { status, source: req.query.source ? source : null, search: req.query.q || '', limit: paid ? 500 : 100 };
   const [list, counts] = await Promise.all([
     drivers.listDrivers(filters),
     drivers.countDriversByStatus(),
   ]);
-  res.send(adminViews.adminLayout('Driver Pipeline', driverAdminViews.driverPipelineHtml({ list, counts, status, source: req.query.source || '', q: req.query.q || '' })));
+  const subsByEmail = await subscriptions.mapForEmails(list.map((d) => d.email));
+  const subOf = (d) => subsByEmail[String(d.email || '').toLowerCase()] || null;
+  let shown = list;
+  if (paid === 'paid') shown = list.filter((d) => { const s = subOf(d); return s && s.status === 'active'; });
+  if (paid === 'attention') shown = list.filter((d) => { const s = subOf(d); return s && s.status === 'past_due'; });
+  const [activeSubs, pastDueSubs] = await Promise.all([
+    subscriptions.listByStatus('active'),
+    subscriptions.listByStatus('past_due'),
+  ]);
+  res.send(adminViews.adminLayout('Driver Pipeline', driverAdminViews.driverPipelineHtml({
+    list: shown, counts, status, source: req.query.source || '', q: req.query.q || '',
+    subsByEmail, paid, paidCounts: { active: activeSubs.length, past_due: pastDueSubs.length },
+  })));
 }));
 
 app.get('/admin/drivers/:id', adminAuth, ah(async (req, res) => {
   const driver = await drivers.getDriverById(req.params.id);
   if (!driver) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Driver not found.</p>'));
   const history = await drivers.statusHistory(driver.id);
-  res.send(adminViews.adminLayout('Driver: ' + driver.full_name, driverAdminViews.driverDetailHtml({ driver, history })));
+  const subscription = await subscriptions.getByEmail(driver.email);
+  res.send(adminViews.adminLayout('Driver: ' + driver.full_name, driverAdminViews.driverDetailHtml({ driver, history, subscription })));
 }));
 
 app.post('/admin/drivers/:id/status', adminAuth, ah(async (req, res) => {
@@ -1811,6 +1837,13 @@ app.get('/admin/routes/new', adminAuth, ah(async (req, res) => {
 
 app.post('/admin/routes', adminAuth, ah(async (req, res) => {
   try {
+    // Paid-client enforcement: dispatch work is for active subscribers only.
+    // The driver application itself stays free — this gate is only where
+    // dispatch work begins.
+    const gate = await paidDispatchGate(Number(req.body.driver_id));
+    if (!gate.ok) {
+      return res.status(402).send(adminViews.adminLayout('Payment required', paidGateHtml(gate)));
+    }
     const route = await drivers.createRoute({
       driverId: Number(req.body.driver_id),
       title: req.body.title,
@@ -2192,6 +2225,12 @@ app.post('/admin/plans/:id', adminAuth, ah(async (req, res) => {
 
 app.post('/admin/plans/requests/:driverId/approve', adminAuth, ah(async (req, res) => {
   try {
+    // Paid-client enforcement: a service plan (dispatch service) is approved
+    // only for drivers with an active dispatch subscription.
+    const gate = await paidDispatchGate(req.params.driverId);
+    if (!gate.ok) {
+      return res.status(402).send(adminViews.adminLayout('Payment required', paidGateHtml(gate)));
+    }
     await drivers.decidePlanRequest(req.params.driverId, 'approved', req.body.note || '', 'admin');
   } catch (err) {
     return res.status(400).send(adminViews.adminLayout('Error', `<p>${err.message}</p>`));
@@ -3717,17 +3756,41 @@ async function handleStripeEvent(event) {
     console.log('[webhook:stripe] ignoring event type', event && event.type);
     return false;
   }
+  const obj = (event.data && event.data.object) || {};
+  // --- Dispatch subscription events ($50/$100) --------------------------------
+  // Owned by the dispatch handlers below. Room ($49) events keep flowing to
+  // the existing Room handlers, untouched.
   if (event.type === 'invoice.payment_failed') {
-    return handleFailedRoomPayment(event.data && event.data.object);
+    if (subscriptions.isDispatchCents(Number(obj.amount_due))) {
+      return handleDispatchPaymentFailed(event, obj);
+    }
+    return handleFailedRoomPayment(obj);
+  }
+  if (event.type === 'invoice.payment_succeeded') {
+    if (subscriptions.isDispatchCents(Number(obj.amount_paid))) {
+      return handleDispatchRenewal(event, obj);
+    }
+    console.log('[webhook:stripe] ignoring event type', event.type);
+    return false;
   }
   if (event.type === 'customer.subscription.deleted') {
-    return handleRoomSubscriptionEnded(event.data && event.data.object);
+    if (subscriptions.planFromSubscriptionObject(obj)) {
+      return handleDispatchCanceled(event, obj);
+    }
+    return handleRoomSubscriptionEnded(obj);
+  }
+  if (event.type === 'customer.subscription.updated') {
+    if (subscriptions.planFromSubscriptionObject(obj)) {
+      return handleDispatchUpdated(event, obj);
+    }
+    console.log('[webhook:stripe] ignoring event type', event.type);
+    return false;
   }
   if (event.type !== 'checkout.session.completed') {
     console.log('[webhook:stripe] ignoring event type', event.type);
     return false;
   }
-  const session = (event.data && event.data.object) || {};
+  const session = obj;
   const email = ((session.customer_details && session.customer_details.email) || '').trim().toLowerCase();
   const amountCents = Number(session.amount_total);
   if (!email || !Number.isFinite(amountCents)) {
@@ -3748,6 +3811,12 @@ async function handleStripeEvent(event) {
       sessionId: session.id || null,
     });
   }
+  // Dispatch subscription checkout (subscription mode): record the
+  // subscription by email even when no lead row exists, then keep the
+  // existing purchase bookkeeping for known leads (additive).
+  if (session.mode === 'subscription' && subscriptions.isDispatchCents(amountCents)) {
+    return handleDispatchCheckout(event, session, product);
+  }
   const lead = await db.get('SELECT * FROM leads WHERE email = ?', [email]);
   if (!lead) {
     console.warn('[webhook:stripe] purchase from unknown lead email — ignored', email);
@@ -3756,6 +3825,159 @@ async function handleStripeEvent(event) {
   await recordPurchase(lead.id, product.id, 'stripe', { amountCents });
   console.log('[webhook:stripe] recorded purchase', { email, productId: product.id, amountCents });
   return true;
+}
+
+/**
+ * Dispatch subscription webhook handlers (paid-client enforcement).
+ * These own ONLY TransitNow dispatch amounts ($50/$100). Each is idempotent
+ * on the Stripe event id via stripe_processed_events.
+ */
+function dispatchEmailFromInvoice(inv) {
+  const v = inv || {};
+  return (
+    (v.customer_email ||
+      (v.customer_details && v.customer_details.email) ||
+      '') + ''
+  )
+    .trim()
+    .toLowerCase();
+}
+
+function invoicePeriodEndMs(inv) {
+  try {
+    const line = inv && inv.lines && inv.lines.data && inv.lines.data[0];
+    const end = line && line.period && line.period.end;
+    return end ? Number(end) * 1000 : null;
+  } catch {
+    return null;
+  }
+}
+
+async function handleDispatchCheckout(event, session, product) {
+  const s = session || {};
+  const email = ((s.customer_details && s.customer_details.email) || '').trim().toLowerCase();
+  const amountCents = Number(s.amount_total);
+  const plan = subscriptions.planFromCents(amountCents);
+  if (!email || !plan) return false;
+  if (await subscriptions.alreadyProcessed(event.id)) {
+    console.log('[webhook:stripe] duplicate dispatch checkout event ignored', { eventId: event.id });
+    return true;
+  }
+  await subscriptions.upsertActive({
+    email,
+    plan,
+    stripeCustomerId: s.customer || null,
+    stripeSubscriptionId: s.subscription || null,
+    currentPeriodEnd: null,
+  });
+  await subscriptions.markProcessed(event.id, event.type);
+  // Keep existing purchase bookkeeping for known leads (additive).
+  const lead = await db.get('SELECT * FROM leads WHERE email = ?', [email]);
+  if (lead && product) {
+    await recordPurchase(lead.id, product.id, 'stripe', { amountCents });
+  }
+  console.log('[webhook:stripe] dispatch subscription started', { email, plan });
+  return true;
+}
+
+async function handleDispatchRenewal(event, inv) {
+  const v = inv || {};
+  const plan = subscriptions.planFromCents(Number(v.amount_paid));
+  if (!plan) return false;
+  if (await subscriptions.alreadyProcessed(event.id)) {
+    console.log('[webhook:stripe] duplicate dispatch renewal event ignored', { eventId: event.id });
+    return true;
+  }
+  await subscriptions.markRenewed({
+    stripeCustomerId: v.customer || null,
+    stripeSubscriptionId: v.subscription || null,
+    email: dispatchEmailFromInvoice(v),
+    plan,
+    currentPeriodEnd: invoicePeriodEndMs(v),
+  });
+  await subscriptions.markProcessed(event.id, event.type);
+  return true;
+}
+
+async function handleDispatchPaymentFailed(event, inv) {
+  const v = inv || {};
+  const plan = subscriptions.planFromCents(Number(v.amount_due));
+  if (!plan) return false;
+  if (await subscriptions.alreadyProcessed(event.id)) {
+    console.log('[webhook:stripe] duplicate dispatch payment-failed event ignored', { eventId: event.id });
+    return true;
+  }
+  await subscriptions.markPastDue({
+    stripeCustomerId: v.customer || null,
+    stripeSubscriptionId: v.subscription || null,
+    email: dispatchEmailFromInvoice(v),
+    invoiceId: v.id || null,
+    plan,
+  });
+  await subscriptions.markProcessed(event.id, event.type);
+  return true;
+}
+
+async function handleDispatchCanceled(event, sub) {
+  const s = sub || {};
+  if (!subscriptions.planFromSubscriptionObject(s)) return false;
+  if (await subscriptions.alreadyProcessed(event.id)) {
+    console.log('[webhook:stripe] duplicate dispatch cancel event ignored', { eventId: event.id });
+    return true;
+  }
+  await subscriptions.markCanceled({
+    stripeCustomerId: s.customer || null,
+    stripeSubscriptionId: s.id || null,
+    email: ((s.customer_details && s.customer_details.email) || s.customer_email || ''),
+  });
+  await subscriptions.markProcessed(event.id, event.type);
+  return true;
+}
+
+async function handleDispatchUpdated(event, sub) {
+  const s = sub || {};
+  if (!subscriptions.planFromSubscriptionObject(s)) return false;
+  if (await subscriptions.alreadyProcessed(event.id)) {
+    console.log('[webhook:stripe] duplicate dispatch update event ignored', { eventId: event.id });
+    return true;
+  }
+  await subscriptions.syncFromSubscriptionObject(s);
+  await subscriptions.markProcessed(event.id, event.type);
+  return true;
+}
+
+// --- Paid-client gate ---------------------------------------------------------
+// The driver application stays FREE. Dispatch work (routes, service-plan
+// activation) requires an ACTIVE TransitNow dispatch subscription
+// (Basic $50/month or Complete $100/month), tracked in
+// dispatch_subscriptions from Stripe webhook events.
+async function paidDispatchGate(driverId) {
+  const driver = await drivers.getDriverById(Number(driverId));
+  if (!driver) return { ok: false, driver: null, sub: null, reason: 'not-found' };
+  const sub = await subscriptions.getByEmail(driver.email);
+  if (sub && sub.status === 'active') return { ok: true, driver, sub, reason: null };
+  return { ok: false, driver, sub: sub || null, reason: sub ? sub.status : 'no-subscription' };
+}
+
+function paidGateHtml(gate) {
+  const d = gate.driver;
+  const name = d ? `${d.full_name} (${d.email})` : 'This driver';
+  const statusLine = !d
+    ? 'Driver not found.'
+    : gate.reason === 'no-subscription'
+      ? 'has no TransitNow dispatch subscription on file.'
+      : `has a dispatch subscription with status "${gate.sub.status}" (not active).`;
+  const planLine = gate.sub && gate.sub.plan
+    ? `<p>Last known plan: <strong>${gate.sub.plan === 'basic' ? 'Basic $50/month' : 'Complete $100/month'}</strong> — status: <strong>${gate.sub.status}</strong>.</p>`
+    : '';
+  return `
+<h2>Paid subscribers only</h2>
+<p><strong>${name}</strong> ${statusLine}</p>
+${planLine}
+<p>Dispatch work — routes and service-plan activation — is available to drivers with an <strong>active</strong> TransitNow dispatch subscription (Basic $50/month or Complete $100/month).</p>
+<p>No action was taken. Once the driver's subscription is active (Stripe notifies us automatically, including renewals), this action will go through.</p>
+<p><a href="/admin/drivers">&larr; Back to driver pipeline</a></p>
+<p style="color:#888;font-size:12px">Subscriptions are month-to-month. No guaranteed loads, routes, revenue, or earnings.</p>`;
 }
 
 app.post('/webhooks/stripe', ah(async (req, res) => {

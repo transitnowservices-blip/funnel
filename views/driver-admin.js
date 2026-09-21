@@ -17,13 +17,36 @@ function statusBadge(status) {
   return `<span class="status-badge status-${esc(status)}">${esc(label)}</span>`;
 }
 
+// Paid-client enforcement: subscription badge for driver/lead rows.
+// Green = active subscriber (dispatch work allowed); amber = payment failed;
+// gray = canceled; muted dash = no subscription on file.
+function subscriptionBadge(sub) {
+  if (!sub) return '<span class="muted">—</span>';
+  if (sub.status === 'active') {
+    const plan = sub.plan === 'basic' ? 'Basic $50/mo' : sub.plan === 'complete' ? 'Complete $100/mo' : sub.plan;
+    return `<span class="status-badge" style="background:#1c7a3d;color:#fff">PAID · ${esc(plan)}</span>`;
+  }
+  if (sub.status === 'past_due') {
+    return `<span class="status-badge" style="background:#b97b0e;color:#fff">PAYMENT FAILED</span>`;
+  }
+  if (sub.status === 'canceled') {
+    return `<span class="status-badge" style="background:#777;color:#fff">Canceled</span>`;
+  }
+  return `<span class="status-badge" style="background:#999;color:#fff">${esc(sub.status)}</span>`;
+}
+
+function subForEmail(subsByEmail, email) {
+  if (!subsByEmail) return null;
+  return subsByEmail[String(email || '').toLowerCase()] || null;
+}
+
 function kv(label, value) {
   if (value == null || value === '') return '';
   return `<div><strong>${esc(label)}:</strong> ${esc(value)}</div>`;
 }
 
 // --- Pipeline list ------------------------------------------------------------
-function driverPipelineHtml({ list, counts, status, source, q }) {
+function driverPipelineHtml({ list, counts, status, source, q, subsByEmail, paid, paidCounts }) {
   const tabs = drivers.DRIVER_STATUSES.map((s) => {
     const active = status === s ? ' class="active"' : '';
     const href = `/admin/drivers?status=${s}${source ? `&source=${encodeURIComponent(source)}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`;
@@ -34,6 +57,9 @@ function driverPipelineHtml({ list, counts, status, source, q }) {
   const srcOpts = drivers.SOURCES.map(
     (s) => `<option value="${s}"${source === s ? ' selected' : ''}>${esc(drivers.SOURCE_LABELS[s])}</option>`
   ).join('');
+  const pc = paidCounts || {};
+  const paidTab = `<a${paid === 'paid' ? ' class="active"' : ''} href="/admin/drivers?paid=paid">Paid clients (${pc.active || 0})</a>`;
+  const attentionTab = `<a${paid === 'attention' ? ' class="active"' : ''} href="/admin/drivers?paid=attention">Needs attention (${pc.past_due || 0})</a>`;
 
   const rows = list.map((d) => {
     const work = (d.work_prefs || []).map((w) => drivers.WORK_PREF_LABELS[w] || w).join(', ');
@@ -46,6 +72,7 @@ function driverPipelineHtml({ list, counts, status, source, q }) {
       <td>${esc(work || '—')}</td>
       <td>${esc(drivers.SOURCE_LABELS[d.source] || d.source || '—')}</td>
       <td>${statusBadge(d.status)}</td>
+      <td>${subscriptionBadge(subForEmail(subsByEmail, d.email))}</td>
       <td>${fmtTs(d.submitted_at)}</td>
       <td>${fmtTs(d.last_contact)}</td>
     </tr>`;
@@ -53,25 +80,46 @@ function driverPipelineHtml({ list, counts, status, source, q }) {
 
   return `
 <h2>Driver Pipeline</h2>
-<div class="pipeline-nav"><a${allActive} href="/admin/drivers">All (${total})</a>${tabs}</div>
+<div class="pipeline-nav"><a${allActive} href="/admin/drivers">All (${total})</a>${tabs} | ${paidTab} ${attentionTab}</div>
 <form method="GET" action="/admin/drivers" class="filter-form">
   ${status ? `<input type="hidden" name="status" value="${esc(status)}">` : ''}
+  ${paid ? `<input type="hidden" name="paid" value="${esc(paid)}">` : ''}
   <select name="source"><option value="">All sources</option>${srcOpts}</select>
   <input type="text" name="q" placeholder="Search name, email, phone" value="${esc(q || '')}">
   <button type="submit" class="btn">Filter</button>
 </form>
 <p>${list.length} driver(s) shown</p>
 <table class="admin-table">
-<thead><tr><th>Driver</th><th>Business</th><th>Vehicle</th><th>Location</th><th>Availability</th><th>Work requested</th><th>Source</th><th>Status</th><th>Submitted</th><th>Last contact</th></tr></thead>
-<tbody>${rows || '<tr><td colspan="10">No drivers match.</td></tr>'}</tbody>
+<thead><tr><th>Driver</th><th>Business</th><th>Vehicle</th><th>Location</th><th>Availability</th><th>Work requested</th><th>Source</th><th>Status</th><th>Subscription</th><th>Submitted</th><th>Last contact</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="11">No drivers match.</td></tr>'}</tbody>
 </table>`;
 }
 
 // --- Driver detail --------------------------------------------------------------
-function driverDetailHtml({ driver: d, history }) {
+function driverDetailHtml({ driver: d, history, subscription }) {
   const statusOpts = drivers.DRIVER_STATUSES.map(
     (s) => `<option value="${s}"${d.status === s ? ' selected' : ''}>${esc(drivers.STATUS_LABELS[s])}</option>`
   ).join('');
+  const subCard = (() => {
+    if (!subscription) {
+      return `<div class="card">
+  <h3>Dispatch subscription</h3>
+  <p>No dispatch subscription on file for ${esc(d.email)}. Dispatch work (routes, service-plan activation) requires an active Basic $50/month or Complete $100/month subscription.</p>
+</div>`;
+    }
+    const plan = subscription.plan === 'basic' ? 'Basic $50/month' : subscription.plan === 'complete' ? 'Complete $100/month' : subscription.plan;
+    const period = subscription.current_period_end ? fmtTs(subscription.current_period_end) : '—';
+    const note = subscription.status === 'active'
+      ? 'Dispatch work is allowed for this driver.'
+      : 'Dispatch work is blocked until the subscription is active again.';
+    return `<div class="card">
+  <h3>Dispatch subscription ${subscriptionBadge(subscription)}</h3>
+  <div><strong>Plan:</strong> ${esc(plan)}</div>
+  <div><strong>Status:</strong> ${esc(subscription.status)}</div>
+  <div><strong>Current period ends:</strong> ${esc(period)}</div>
+  <p class="muted">${esc(note)}</p>
+</div>`;
+  })();
   const work = (d.work_prefs || []).map((w) => drivers.WORK_PREF_LABELS[w] || w).join(', ');
   const looking = (d.looking_for || []).map((w) => drivers.LOOKING_FOR_LABELS[w] || w).join(', ');
   const histRows = (history || [])
@@ -85,6 +133,8 @@ function driverDetailHtml({ driver: d, history }) {
 <p><a href="/admin/drivers">&larr; Back to pipeline</a></p>
 <h2>${esc(d.full_name)} ${statusBadge(d.status)}</h2>
 <p class="muted">Onboarded ${fmtTs(d.submitted_at)} · Source: ${esc(drivers.SOURCE_LABELS[d.source] || d.source)} · <a href="${esc(drivers.driverDashUrl(d.access_token))}">Driver dashboard link</a></p>
+
+${subCard}
 
 <div class="card">
   <h3>Extended driver profile</h3>
@@ -278,6 +328,7 @@ module.exports = {
   driverPipelineHtml,
   driverDetailHtml,
   statusBadge,
+  subscriptionBadge,
   routeListHtml,
   routeNewHtml,
   routeDetailHtml,

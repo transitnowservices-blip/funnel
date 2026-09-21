@@ -71,6 +71,24 @@ function failFast(msg) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Paid-client enforcement test helper                                 */
+/* ------------------------------------------------------------------ */
+// Davena's rule: dispatch work (route creation, plan approval) requires an
+// ACTIVE dispatch subscription. Existing tests that exercise those endpoints
+// must first give their driver a subscription row, exactly as the Stripe
+// webhook would.
+function makePaid(dbHandle, email, plan = 'complete') {
+  const now = Date.now();
+  const rnd = Math.floor(Math.random() * 1e9);
+  dbHandle.prepare(
+    `INSERT INTO dispatch_subscriptions
+       (stripe_customer_id, stripe_subscription_id, email, plan, status, current_period_end, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'active', ?, ?, ?)`
+  ).run(`cus_test_${now}_${rnd}`, `sub_test_${now}_${rnd}`,
+    String(email).toLowerCase(), plan, now + 30 * 864e5, now, now);
+}
+
+/* ------------------------------------------------------------------ */
 /* HTTP + cookie jar                                                   */
 /* ------------------------------------------------------------------ */
 class Jar {
@@ -655,6 +673,253 @@ async function main() {
         `purchases=${purchaseRows().length}`);
     } finally {
       await stopServer(child2);
+    }
+
+    /* ---- 10e. Dispatch subscriptions: paid-client enforcement -------- */
+    // Davena's rule: the application stays FREE, but dispatch work (routes,
+    // service-plan activation) is gated to active $50/$100 subscribers.
+    // Signed Stripe fixtures exercise the full lifecycle end to end.
+    const D_PORT = 3114;
+    const D_BASE = `http://127.0.0.1:${D_PORT}`;
+    const D_SECRET = `whsec_dispatch_${ts}`;
+    const childD = spawn('node', ['server.js'], {
+      cwd: APP_ROOT,
+      env: { ...process.env, ADMIN_TOKEN, PORT: String(D_PORT), EMAIL_PROVIDER: 'local', STRIPE_WEBHOOK_SECRET: D_SECRET },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    childD.stdout.on('data', d => process.stdout.write(`[serverD] ${d}`));
+    childD.stderr.on('data', d => process.stderr.write(`[serverD:err] ${d}`));
+    try {
+      const t1 = Date.now();
+      for (;;) {
+        try {
+          const hr = await req(`${D_BASE}/healthz`, {});
+          if (hr.status === 200 && (await hr.text()).trim() === 'ok') break;
+        } catch { /* not up yet */ }
+        if (Date.now() - t1 > SERVER_START_TIMEOUT_MS) failFast('dispatch webhook test server did not boot in time');
+        await new Promise(r => setTimeout(r, 300));
+      }
+      check('dispatch test server boots with STRIPE_WEBHOOK_SECRET set', true);
+
+      const dSign = (payload) => {
+        const t = Math.floor(Date.now() / 1000);
+        const raw = JSON.stringify(payload);
+        const v1 = crypto.createHmac('sha256', D_SECRET).update(`${t}.${raw}`, 'utf8').digest('hex');
+        return { raw, header: `t=${t},v1=${v1}` };
+      };
+      const dPost = async (payload) => {
+        const s = dSign(payload);
+        const ctl = new AbortController();
+        const to = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
+        try {
+          return await fetch(`${D_BASE}/webhooks/stripe`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', 'stripe-signature': s.header },
+            body: s.raw, redirect: 'manual', signal: ctl.signal,
+          });
+        } finally { clearTimeout(to); }
+      };
+      const dEmail = (n) => `e2e-dispatch-${n}-${ts}@example.com`;
+      const subRow = (email) => db.prepare('SELECT * FROM dispatch_subscriptions WHERE email = ?').get(email);
+      const subCount = () => db.prepare('SELECT COUNT(*) AS n FROM dispatch_subscriptions').get().n;
+
+      // 10e-1. New $100 subscription checkout -> active Complete row.
+      const emailC = dEmail('complete');
+      let evt = {
+        id: `evt_d1_${ts}`, type: 'checkout.session.completed', mode: 'subscription',
+        data: { object: { id: `cs_d1_${ts}`, mode: 'subscription', customer: `cus_d1_${ts}`, subscription: `sub_d1_${ts}`,
+          customer_details: { email: emailC }, amount_total: 10000 } },
+      };
+      let r = await dPost(evt);
+      let row = subRow(emailC);
+      check('signed dispatch checkout ($100) creates active Complete subscription (200)',
+        r.status === 200 && row && row.plan === 'complete' && row.status === 'active' && row.stripe_customer_id === `cus_d1_${ts}`,
+        `status=${r.status} row=${JSON.stringify(row)}`);
+
+      // 10e-2. Duplicate event id -> idempotent, still one row.
+      const before = subCount();
+      r = await dPost(evt);
+      check('duplicate dispatch checkout event is idempotent (still one row)',
+        r.status === 200 && subCount() === before, `status=${r.status} count=${subCount()}`);
+
+      // 10e-3. Renewal (invoice.payment_succeeded) -> stays active, period end set.
+      evt = { id: `evt_d2_${ts}`, type: 'invoice.payment_succeeded',
+        data: { object: { id: `in_d2_${ts}`, customer: `cus_d1_${ts}`, subscription: `sub_d1_${ts}`,
+          customer_email: emailC, amount_paid: 10000,
+          lines: { data: [{ period: { end: 1893456000 } }] } } } };
+      r = await dPost(evt);
+      row = subRow(emailC);
+      check('renewal keeps subscription active and records period end',
+        r.status === 200 && row.status === 'active' && Number(row.current_period_end) === 1893456000000,
+        `status=${r.status} row=${JSON.stringify(row)}`);
+
+      // 10e-4. Failed payment ($50 Basic) -> past_due + dunning email queued.
+      const emailB = dEmail('basic');
+      evt = { id: `evt_d3_${ts}`, type: 'checkout.session.completed',
+        data: { object: { id: `cs_d3_${ts}`, mode: 'subscription', customer: `cus_d3_${ts}`, subscription: `sub_d3_${ts}`,
+          customer_details: { email: emailB }, amount_total: 5000 } } };
+      r = await dPost(evt);
+      check('signed dispatch checkout ($50) creates active Basic subscription',
+        r.status === 200 && subRow(emailB) && subRow(emailB).plan === 'basic' && subRow(emailB).status === 'active',
+        `status=${r.status}`);
+      evt = { id: `evt_d4_${ts}`, type: 'invoice.payment_failed',
+        data: { object: { id: `in_d4_${ts}`, customer: `cus_d3_${ts}`, subscription: `sub_d3_${ts}`,
+          customer_email: emailB, amount_due: 5000 } } };
+      r = await dPost(evt);
+      row = subRow(emailB);
+      const dunning = db.prepare(
+        `SELECT id FROM email_queue WHERE email = ? AND sequence = 'dispatch-dunning' AND status = 'queued'`
+      ).get(emailB);
+      check('failed payment marks past_due and queues dunning email (no fabricated links)',
+        r.status === 200 && row.status === 'past_due' && !!dunning &&
+        !/https?:\/\/(?!funnel-qdx9)/i.test(db.prepare(`SELECT body_html AS b FROM email_queue WHERE id = ?`).get(dunning.id).b),
+        `status=${r.status} row=${JSON.stringify(row)} dunning=${!!dunning}`);
+
+      // 10e-5. Cancellation -> status canceled.
+      evt = { id: `evt_d5_${ts}`, type: 'customer.subscription.deleted',
+        data: { object: { id: `sub_d1_${ts}`, customer: `cus_d1_${ts}`,
+          items: { data: [{ price: { unit_amount: 10000 } }] } } } };
+      r = await dPost(evt);
+      check('subscription deleted -> status canceled',
+        r.status === 200 && subRow(emailC).status === 'canceled', `status=${r.status}`);
+
+      // 10e-6. Subscription updated -> status/plan synced.
+      evt = { id: `evt_d6_${ts}`, type: 'customer.subscription.updated',
+        data: { object: { id: `sub_d3_${ts}`, customer: `cus_d3_${ts}`, status: 'active',
+          current_period_end: 1893456000,
+          items: { data: [{ price: { unit_amount: 5000 } }] } } } };
+      r = await dPost(evt);
+      row = subRow(emailB);
+      check('subscription updated syncs status back to active with period end',
+        r.status === 200 && row.status === 'active' && Number(row.current_period_end) === 1893456000000,
+        `status=${r.status} row=${JSON.stringify(row)}`);
+
+      // 10e-7. Room $49 checkout still provisions Room, creates NO dispatch row.
+      const emailR = dEmail('room');
+      evt = { id: `evt_d7_${ts}`, type: 'checkout.session.completed',
+        data: { object: { id: `cs_d7_${ts}`, mode: 'subscription', customer: `cus_d7_${ts}`, subscription: `sub_d7_${ts}`,
+          customer_details: { email: emailR }, amount_total: 4900 } } };
+      r = await dPost(evt);
+      const roomMember = db.prepare('SELECT email FROM room_members WHERE email = ?').get(emailR);
+      check('Room $49 checkout still provisions Room member and no dispatch row',
+        r.status === 200 && !!roomMember && !subRow(emailR),
+        `status=${r.status} member=${!!roomMember}`);
+
+      // 10e-8. Gate: route creation for unpaid driver -> 402; after payment -> 302.
+      const gateEmail = dEmail('gate');
+      db.prepare(`INSERT INTO drivers (full_name, email, status, submitted_at) VALUES (?, ?, 'new', ?)`).run(
+        'Gate Test Driver', gateEmail, Date.now());
+      const gateDriver = db.prepare('SELECT id FROM drivers WHERE email = ?').get(gateEmail);
+      r = await req(`${D_BASE}/admin/routes?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { driver_id: String(gateDriver.id), title: 'Gate test route' } });
+      const gateBody = await r.text();
+      check('route creation for unpaid driver rejected (402, paid-subscribers-only message)',
+        r.status === 402 && /Paid subscribers only/i.test(gateBody), `status=${r.status}`);
+      // Now the driver subscribes ($100) -> gate opens.
+      evt = { id: `evt_d8_${ts}`, type: 'checkout.session.completed',
+        data: { object: { id: `cs_d8_${ts}`, mode: 'subscription', customer: `cus_d8_${ts}`, subscription: `sub_d8_${ts}`,
+          customer_details: { email: gateEmail }, amount_total: 10000 } } };
+      r = await dPost(evt);
+      check('gate driver subscription recorded active', r.status === 200 && subRow(gateEmail).status === 'active',
+        `status=${r.status}`);
+      r = await req(`${D_BASE}/admin/routes?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { driver_id: String(gateDriver.id), title: 'Gate test route' } });
+      check('route creation for paid driver succeeds (302)',
+        r.status === 302, `status=${r.status}`);
+      const createdRoute = db.prepare('SELECT id FROM routes WHERE driver_id = ? AND title = ?').get(gateDriver.id, 'Gate test route');
+      check('route row created for paid driver', !!createdRoute);
+
+      // 10e-9. Admin pipeline shows PAID badge + filters.
+      r = await req(`${D_BASE}/admin/drivers?token=${ADMIN_TOKEN}`, {});
+      const pipeHtml = await r.text();
+      check('driver pipeline shows PAID badge for active subscriber',
+        r.status === 200 && /PAID · Complete \$100\/mo/.test(pipeHtml), `status=${r.status}`);
+      r = await req(`${D_BASE}/admin/drivers?token=${ADMIN_TOKEN}&paid=paid`, {});
+      const paidHtml = await r.text();
+      check('paid filter lists the subscribed driver',
+        r.status === 200 && paidHtml.includes('Gate Test Driver'), `status=${r.status}`);
+      // Flip the gate driver to past_due, then the needs-attention filter must surface them.
+      evt = { id: `evt_d9_${ts}`, type: 'invoice.payment_failed',
+        data: { object: { id: `in_d9_${ts}`, customer: `cus_d8_${ts}`, subscription: `sub_d8_${ts}`,
+          customer_email: gateEmail, amount_due: 10000 } } };
+      r = await dPost(evt);
+      check('failed payment flips the paid driver to past_due',
+        r.status === 200 && subRow(gateEmail).status === 'past_due', `status=${r.status}`);
+      r = await req(`${D_BASE}/admin/drivers?token=${ADMIN_TOKEN}&paid=attention`, {});
+      const attHtml = await r.text();
+      check('needs-attention filter lists the past_due driver',
+        r.status === 200 && attHtml.includes('Gate Test Driver'), `status=${r.status}`);
+      r = await req(`${D_BASE}/admin/drivers/${gateDriver.id}?token=${ADMIN_TOKEN}`, {});
+      const detailHtml = await r.text();
+      check('driver detail page shows subscription section',
+        r.status === 200 && /Dispatch subscription/i.test(detailHtml), `status=${r.status}`);
+
+      // 10e-11. Opportunity CRM: subscription badges + paid/needs-attention filters.
+      const crmActiveEmail = dEmail('crm-active');
+      const crmAttentionEmail = dEmail('crm-attention');
+      db.prepare(`INSERT INTO opportunity_leads (first_name, last_name, email, status, created_at)
+                  VALUES ('Crm Active', 'Lead', ?, 'NEW', ?)`).run(crmActiveEmail, Date.now());
+      db.prepare(`INSERT INTO opportunity_leads (first_name, last_name, email, status, created_at)
+                  VALUES ('Crm Attention', 'Lead', ?, 'NEW', ?)`).run(crmAttentionEmail, Date.now());
+      makePaid(db, crmActiveEmail, 'basic');
+      db.prepare(`INSERT INTO dispatch_subscriptions
+                    (stripe_customer_id, stripe_subscription_id, email, plan, status, current_period_end, created_at, updated_at)
+                  VALUES (?, ?, ?, 'complete', 'past_due', ?, ?, ?)`)
+        .run(`cus_crm_${ts}`, `sub_crm_${ts}`, crmAttentionEmail, Date.now() + 864e5, Date.now(), Date.now());
+      r = await req(`${D_BASE}/admin/crm?token=${ADMIN_TOKEN}`, {});
+      const crmHtml = await r.text();
+      check('CRM lead rows show subscription badges',
+        r.status === 200 && /PAID · Basic \$50\/mo/.test(crmHtml) && /PAYMENT FAILED/.test(crmHtml),
+        `status=${r.status}`);
+      r = await req(`${D_BASE}/admin/crm?token=${ADMIN_TOKEN}&paid=paid`, {});
+      const crmPaid = await r.text();
+      check('CRM paid filter shows the active subscriber and hides past_due',
+        r.status === 200 && crmPaid.includes('Crm Active') && !crmPaid.includes('Crm Attention'),
+        `status=${r.status}`);
+      r = await req(`${D_BASE}/admin/crm?token=${ADMIN_TOKEN}&paid=attention`, {});
+      const crmAtt = await r.text();
+      check('CRM needs-attention filter shows the past_due subscriber and hides the active one',
+        r.status === 200 && crmAtt.includes('Crm Attention') && !crmAtt.includes('Crm Active'),
+        `status=${r.status}`);
+
+      // 10e-12. Past-due for an unseen subscription stores the exact webhook-mapped
+      // plan (never defaults to Complete) and drops the DISPATCH_SUBSCRIBER tag;
+      // a later renewal restores it.
+      const tagEmail = dEmail('tagflow');
+      db.prepare(`INSERT INTO leads (email, first_name, status) VALUES (?, 'Tag Flow', 'lead')`).run(tagEmail);
+      const tagLeadId = db.prepare('SELECT id FROM leads WHERE email = ?').get(tagEmail).id;
+      evt = { id: `evt_d10_${ts}`, type: 'invoice.payment_failed',
+        data: { object: { id: `in_d10_${ts}`, customer: `cus_d10_${ts}`, subscription: `sub_d10_${ts}`,
+          customer_email: tagEmail, amount_due: 5000 } } };
+      r = await dPost(evt);
+      row = subRow(tagEmail);
+      const hasSubTagAfterFail = db.prepare('SELECT 1 FROM tags WHERE lead_id = ? AND tag = ?').get(tagLeadId, 'DISPATCH_SUBSCRIBER');
+      check('past_due for unseen subscription keeps the mapped Basic plan (not Complete)',
+        r.status === 200 && row && row.plan === 'basic' && row.status === 'past_due',
+        `status=${r.status} row=${JSON.stringify(row)}`);
+      check('past_due drops the DISPATCH_SUBSCRIBER lead tag', !hasSubTagAfterFail);
+      evt = { id: `evt_d11_${ts}`, type: 'invoice.payment_succeeded',
+        data: { object: { id: `in_d11_${ts}`, customer: `cus_d10_${ts}`, subscription: `sub_d10_${ts}`,
+          customer_email: tagEmail, amount_paid: 5000,
+          lines: { data: [{ period: { end: 1893456000 } }] } } } };
+      r = await dPost(evt);
+      const hasSubTagAfterRenew = db.prepare('SELECT 1 FROM tags WHERE lead_id = ? AND tag = ?').get(tagLeadId, 'DISPATCH_SUBSCRIBER');
+      const hasPlanTagAfterRenew = db.prepare('SELECT 1 FROM tags WHERE lead_id = ? AND tag = ?').get(tagLeadId, 'DISPATCH_BASIC');
+      check('renewal restores active status and the DISPATCH_SUBSCRIBER + plan tags',
+        r.status === 200 && subRow(tagEmail).status === 'active' && !!hasSubTagAfterRenew && !!hasPlanTagAfterRenew,
+        `status=${r.status}`);
+
+      // 10e-10. Plan approval gate: unpaid driver -> 402.
+      const planEmail = dEmail('plan');
+      db.prepare(`INSERT INTO drivers (full_name, email, status, submitted_at) VALUES (?, ?, 'new', ?)`).run(
+        'Plan Gate Driver', planEmail, Date.now());
+      const planDriver = db.prepare('SELECT id FROM drivers WHERE email = ?').get(planEmail);
+      r = await req(`${D_BASE}/admin/plans/requests/${planDriver.id}/approve?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { note: 'test' } });
+      check('plan approval for unpaid driver rejected (402)',
+        r.status === 402 && /Paid subscribers only/i.test(await r.text()), `status=${r.status}`);
+    } finally {
+      await stopServer(childD);
     }
 
     /* ---- 11. Wealth Builder's Room --------------------------------- */
@@ -1458,6 +1723,8 @@ async function main() {
       ['full_name', 'Route Driver'], ['email', pdEmail], ['phone', '4145550103'], ['source', 'direct'],
     ]});
     const pdDrv = db.prepare('SELECT id, access_token FROM drivers WHERE email = ?').get(pdEmail);
+    // Paid-client enforcement: route/plan endpoints require an active subscription.
+    makePaid(db, pdEmail);
 
     res = await req(`${BASE}/admin/routes`, {});
     check('admin routes require token (403 without)', res.status === 403, `status=${res.status}`);
@@ -2765,6 +3032,7 @@ async function main() {
     const p3DrvEmail = 'p3-drv-' + ts + '@example.com';
     db.prepare("INSERT INTO drivers (full_name, email, home_city, home_state, vehicle_type, status, source, submitted_at, updated_at) VALUES (?, ?, 'Milwaukee', 'WI', 'cargo_van', 'active', 'direct', ?, ?)").run('P3 Driver ' + ts, p3DrvEmail, ts, ts);
     const p3Drv = db.prepare('SELECT * FROM drivers WHERE email = ?').get(p3DrvEmail);
+    makePaid(db, p3DrvEmail); // paid-client enforcement: route creation needs an active subscription
     res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [
       ['status', 'ACTIVE'],
     ]});
@@ -3900,6 +4168,7 @@ async function main() {
 
     // --- exception photo download: byte-identical round trip (driver + admin) ---
     await p7Onboard('P7 Photo Driver', p7('photo'));
+    makePaid(db, p7('photo')); // paid-client enforcement: route creation needs an active subscription
     const p7photo = db.prepare('SELECT id, access_token FROM drivers WHERE email = ?').get(p7('photo'));
     res = await req(`${BASE}/admin/routes?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
       ['driver_id', String(p7photo.id)], ['title', 'P7 Photo Route'], ['scheduled_date', '2026-09-21'],

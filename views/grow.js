@@ -7,6 +7,8 @@ const { esc } = require('./layout');
 // Phase 6: follow-up section rendered by the shared Phase-6 views module
 // (extends the CRM lead profile — the profile itself is not duplicated).
 const phase6Views = require('./phase6');
+// Paid-client enforcement: dispatch-subscription badges on CRM lead rows.
+const { subscriptionBadge } = require('./driver-admin');
 
 function escHtml(s) {
   return String(s == null ? '' : s)
@@ -641,26 +643,30 @@ module.exports.supportPage = supportPage;
 
 // --- Admin CRM views (spec sections 7-8) ---
 function crmPipelineHtml(opts = {}) {
-  const { grouped = {}, counts = {}, type = '', status = '', types = [], allStatuses = [] } = opts;
+  const { grouped = {}, counts = {}, type = '', status = '', paid = 'all', types = [], allStatuses = [], subsByEmail = {} } = opts;
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const statusOrder = allStatuses.length ? allStatuses : Object.keys(grouped);
   const groups = statusOrder.map((s) => `
     <div class="crm-group">
       <h3><span class="admin-status-pill">${escHtml(s)}</span> <span class="muted">(${(grouped[s] || []).length})</span></h3>
-      ${(grouped[s] || []).length ? `<table class="admin-table"><thead><tr><th>Name</th><th>Type</th><th>Contact</th><th>Location</th><th>Received</th><th>Assigned</th></tr></thead><tbody>` +
-        grouped[s].map((l) => `<tr>
+      ${(grouped[s] || []).length ? `<table class="admin-table"><thead><tr><th>Name</th><th>Type</th><th>Contact</th><th>Location</th><th>Received</th><th>Subscription</th><th>Assigned</th></tr></thead><tbody>` +
+        grouped[s].map((l) => {
+          const sub = subsByEmail[String(l.email || '').toLowerCase()] || null;
+          return `<tr>
           <td><a href="/admin/crm/leads/${l.id}">${escHtml(l.first_name)} ${escHtml(l.last_name)}</a></td>
           <td>${escHtml(l.lead_type)}</td>
           <td>${escHtml(l.email)}<br>${escHtml(l.phone)}</td>
           <td>${escHtml(l.city)}, ${escHtml(l.state)}</td>
           <td>${l.created_at ? new Date(Number(l.created_at)).toLocaleDateString() : ''}</td>
+          <td>${subscriptionBadge(sub)}</td>
           <td>${escHtml(l.assigned_to || '—')}</td>
-        </tr>`).join('') + '</tbody></table>'
+        </tr>`;
+        }).join('') + '</tbody></table>'
         : '<p class="muted">No leads in this stage.</p>'}
     </div>`).join('\n');
   return `
 <h2>Opportunity Pipeline</h2>
-<p class="muted">${total} total lead${total === 1 ? '' : 's'}${type ? ` · type ${escHtml(type)}` : ''}${status ? ` · status ${escHtml(status)}` : ''}</p>
+<p class="muted">${total} total lead${total === 1 ? '' : 's'}${type ? ` · type ${escHtml(type)}` : ''}${status ? ` · status ${escHtml(status)}` : ''}${paid && paid !== 'all' ? ` · subscription ${escHtml(paid)}` : ''}</p>
 <form class="filter-form" method="GET" action="/admin/crm">
   <select name="type" aria-label="Lead type">
     <option value="">All types</option>
@@ -669,6 +675,11 @@ function crmPipelineHtml(opts = {}) {
   <select name="status" aria-label="Status">
     <option value="">All statuses</option>
     ${allStatuses.map((s) => `<option value="${escAttr(s)}"${status === s ? ' selected' : ''}>${escHtml(s)}</option>`).join('')}
+  </select>
+  <select name="paid" aria-label="Dispatch subscription">
+    <option value="all"${paid === 'all' ? ' selected' : ''}>All subscriptions</option>
+    <option value="paid"${paid === 'paid' ? ' selected' : ''}>Paid clients</option>
+    <option value="attention"${paid === 'attention' ? ' selected' : ''}>Needs attention</option>
   </select>
   <button type="submit" class="btn">Filter</button>
 </form>
