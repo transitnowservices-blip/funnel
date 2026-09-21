@@ -47,6 +47,14 @@ const growViews = require('./views/grow');
 const opps = require('./lib/opportunities');
 const oppViews = require('./views/opportunities');
 const driverExtViews = require('./views/driver-extended');
+// Phase 3: contract hub, territories, operations command center
+// (additive; existing routes untouched).
+const contracts = require('./lib/contracts');
+const contractViews = require('./views/contracts');
+const territories = require('./lib/territories');
+const territoryViews = require('./views/territories');
+const commandLib = require('./lib/command');
+const commandViews = require('./views/command');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -2006,13 +2014,21 @@ app.post('/admin/plans/requests/:driverId/reject', adminAuth, ah(async (req, res
 }));
 
 // --- Phase L: operations dashboard, package investigation, reports, audit --------
+// Phase 3 (additive): the operations COMMAND CENTER (spec section 21) renders
+// at the top of this same page — TODAY metrics computed live from the real
+// tables, with territory/date/contract/driver/route/status filters. The
+// Phase-L dashboard below is untouched.
 app.get('/admin/operations', adminAuth, ah(async (req, res) => {
-  const [overview, recentEvents, recentStatusChanges] = await Promise.all([
+  const [overview, recentEvents, recentStatusChanges, commandMetrics, filterOptions] = await Promise.all([
     drivers.getOpsOverview(),
     drivers.getRecentCustodyEvents(25),
     drivers.getRecentDriverStatusChanges(25),
+    commandLib.getCommandMetrics(req.query || {}),
+    commandLib.listFilterOptions(),
   ]);
-  res.send(adminViews.adminLayout('Operations dashboard', driverAdminViews.opsDashboardHtml({ overview, recentEvents, recentStatusChanges })));
+  res.send(adminViews.adminLayout('Operations — Command Center',
+    commandViews.commandCenterHtml({ metrics: commandMetrics, options: filterOptions }) +
+    driverAdminViews.opsDashboardHtml({ overview, recentEvents, recentStatusChanges })));
 }));
 
 app.get('/admin/operations/investigate', adminAuth, ah(async (req, res) => {
@@ -2213,6 +2229,198 @@ app.post('/admin/opportunities/:id/match', adminAuth, ah(async (req, res) => {
     return res.redirect(`/admin/opportunities/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
   }
   res.redirect(`/admin/opportunities/${id}`);
+}));
+
+// --- Phase 3: contract hub, territories, operations command center -------------
+// Additive — existing routes untouched. Admin routes use the explicit
+// adminAuth pattern (registered before app.use('/admin', adminAuth)).
+
+app.get('/admin/contracts', adminAuth, ah(async (req, res) => {
+  const status = contracts.CONTRACT_STATUSES.includes(String(req.query.status || '').toUpperCase())
+    ? String(req.query.status).toUpperCase() : null;
+  const [list, counts] = await Promise.all([
+    contracts.listContracts({ status }),
+    contracts.countContractsByStatus(),
+  ]);
+  res.send(adminViews.adminLayout('Contract hub',
+    contractViews.contractListHtml({ list, counts, statusFilter: status })));
+}));
+
+app.get('/admin/contracts/new', adminAuth, ah(async (req, res) => {
+  res.send(adminViews.adminLayout('New contract', contractViews.contractFormHtml({})));
+}));
+
+app.post('/admin/contracts', adminAuth, ah(async (req, res) => {
+  const { ok, errors, clean } = contracts.validateContract(req.body || {});
+  if (!ok) {
+    return res.send(adminViews.adminLayout('New contract',
+      contractViews.contractFormHtml({ contract: req.body || {}, errors })));
+  }
+  const created = await contracts.createContract(clean, { by: 'admin' });
+  res.redirect(`/admin/contracts/${created.id}`);
+}));
+
+async function renderContractDetail(req, res) {
+  const c = await contracts.getContract(req.params.id);
+  if (!c) return res.status(404).type('text').send('Contract not found');
+  const [history, documents, opportunity, relatedOpps, linkedRoutes, allOpportunities] = await Promise.all([
+    contracts.listContractHistory(c.id),
+    contracts.listDocuments(c.id),
+    contracts.getLinkedOpportunity(c.id),
+    contracts.relatedOpportunities(c),
+    contracts.listRoutesForContract(c.contract_number),
+    opps.listOpportunities({}),
+  ]);
+  res.send(adminViews.adminLayout(`Contract — ${c.contract_name}`,
+    contractViews.contractDetailHtml({
+      contract: c, history, documents, opportunity, relatedOpps, linkedRoutes,
+      allOpportunities, error: req.query.error || '',
+    })));
+}
+
+app.get('/admin/contracts/:id', adminAuth, ah(renderContractDetail));
+
+app.get('/admin/contracts/:id/edit', adminAuth, ah(async (req, res) => {
+  const c = await contracts.getContract(req.params.id);
+  if (!c) return res.status(404).type('text').send('Contract not found');
+  res.send(adminViews.adminLayout(`Edit — ${c.contract_name}`,
+    contractViews.contractFormHtml({ contract: c, isNew: false })));
+}));
+
+app.post('/admin/contracts/:id', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  const { ok, errors, clean } = contracts.validateContract(req.body || {});
+  if (!ok) {
+    return res.send(adminViews.adminLayout('Edit contract',
+      contractViews.contractFormHtml({ contract: { ...(req.body || {}), id }, errors, isNew: false })));
+  }
+  try {
+    await contracts.updateContract(id, clean);
+  } catch (err) {
+    return res.redirect(`/admin/contracts/${encodeURIComponent(id)}/edit?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/contracts/${id}`);
+}));
+
+app.post('/admin/contracts/:id/status', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await contracts.setContractStatus(id, req.body.status, { by: 'admin', note: req.body.note || '' });
+  } catch (err) {
+    return res.redirect(`/admin/contracts/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/contracts/${id}`);
+}));
+
+app.post('/admin/contracts/:id/opportunity', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await contracts.linkOpportunity(id, req.body.opportunity_id);
+  } catch (err) {
+    return res.redirect(`/admin/contracts/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/contracts/${id}`);
+}));
+
+app.post('/admin/contracts/:id/route', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await contracts.attachRoute(id, req.body.route_code || '');
+  } catch (err) {
+    return res.redirect(`/admin/contracts/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/contracts/${id}`);
+}));
+
+// Document REFERENCES only — full upload/storage deferred to Phase 6.
+app.post('/admin/contracts/:id/document', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  try {
+    await contracts.addDocumentRef(id, {
+      doc_type: req.body.doc_type || '',
+      file_name: req.body.file_name || '',
+      notes: req.body.notes || '',
+      by: 'admin',
+    });
+  } catch (err) {
+    return res.redirect(`/admin/contracts/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect(`/admin/contracts/${id}`);
+}));
+
+// --- Phase 3: territories --------------------------------------------------------
+app.get('/admin/territories', adminAuth, ah(async (req, res) => {
+  // Support ?name= deep links (e.g. from the contract page): jump straight
+  // to the matching territory instead of showing the list.
+  if (req.query.name) {
+    const t = await territories.getTerritoryByName(String(req.query.name));
+    if (t) return res.redirect(`/admin/territories/${t.id}`);
+  }
+  const list = await territories.listTerritories();
+  const statsById = {};
+  for (const t of list) statsById[t.id] = await territories.territoryStats(t);
+  res.send(adminViews.adminLayout('Territories',
+    territoryViews.territoryListHtml({ list, statsById })));
+}));
+
+app.get('/admin/territories/new', adminAuth, ah(async (req, res) => {
+  res.send(adminViews.adminLayout('New territory', territoryViews.territoryFormHtml({})));
+}));
+
+app.post('/admin/territories', adminAuth, ah(async (req, res) => {
+  const { ok, errors, clean } = territories.validateTerritory(req.body || {});
+  if (!ok) {
+    return res.send(adminViews.adminLayout('New territory',
+      territoryViews.territoryFormHtml({ territory: req.body || {}, errors })));
+  }
+  try {
+    const created = await territories.createTerritory(clean, { by: 'admin' });
+    return res.redirect(`/admin/territories/${created.id}`);
+  } catch (err) {
+    return res.send(adminViews.adminLayout('New territory',
+      territoryViews.territoryFormHtml({ territory: req.body || {}, errors: [err.message] })));
+  }
+}));
+
+app.get('/admin/territories/:id', adminAuth, ah(async (req, res) => {
+  const t = await territories.getTerritory(req.params.id);
+  if (!t) return res.status(404).type('text').send('Territory not found');
+  const [stats, tContracts, tOpps, tDrivers] = await Promise.all([
+    territories.territoryStats(t),
+    territories.territoryContracts(t.name),
+    territories.territoryOpportunities(t),
+    territories.territoryDrivers(t),
+  ]);
+  res.send(adminViews.adminLayout(`Territory — ${t.name}`,
+    territoryViews.territoryDetailHtml({
+      territory: t, stats, contracts: tContracts, opportunities: tOpps,
+      drivers: tDrivers, error: req.query.error || '',
+    })));
+}));
+
+app.get('/admin/territories/:id/edit', adminAuth, ah(async (req, res) => {
+  const t = await territories.getTerritory(req.params.id);
+  if (!t) return res.status(404).type('text').send('Territory not found');
+  res.send(adminViews.adminLayout(`Edit — ${t.name}`,
+    territoryViews.territoryFormHtml({ territory: t, isNew: false })));
+}));
+
+app.post('/admin/territories/:id', adminAuth, ah(async (req, res) => {
+  const id = req.params.id;
+  const existing = await territories.getTerritory(id);
+  if (!existing) return res.status(404).type('text').send('Territory not found');
+  const { ok, errors, clean } = territories.validateTerritory(req.body || {}, { existing });
+  if (!ok) {
+    return res.send(adminViews.adminLayout('Edit territory',
+      territoryViews.territoryFormHtml({ territory: { ...(req.body || {}), id }, errors, isNew: false })));
+  }
+  try {
+    await territories.updateTerritory(id, clean);
+  } catch (err) {
+    return res.send(adminViews.adminLayout('Edit territory',
+      territoryViews.territoryFormHtml({ territory: { ...(req.body || {}), id }, errors: [err.message], isNew: false })));
+  }
+  res.redirect(`/admin/territories/${id}`);
 }));
 
 // --- Phase 2: extended driver profile (admin) --------------------------------------

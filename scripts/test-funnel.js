@@ -2595,6 +2595,339 @@ async function main() {
       outboxFiles().every((f) => p2Outbox.has(f)),
       'leftover rows');
 
+    /* ---- Phase 3: contract hub, territories, command center ------------- */
+    function p3Metric(html, key) {
+      const m = html.match(new RegExp('data-metric="' + key + '"[^>]*>[\\s\\S]*?class="num">(\\d+)<'));
+      return m ? Number(m[1]) : null;
+    }
+    const p3StartOfDay = (() => { const x = new Date(); x.setHours(0, 0, 0, 0); return x.getTime(); })();
+    const p3TerrName = 'P3Territory' + ts;
+
+    // --- Contract hub ---
+    res = await req(BASE + '/admin/contracts', {});
+    check('phase3: /admin/contracts requires token (403 without)', res.status === 403, 'status=' + res.status);
+    res = await req(BASE + '/admin/territories', {});
+    check('phase3: /admin/territories requires token (403 without)', res.status === 403, 'status=' + res.status);
+    res = await req(BASE + '/admin/operations', {});
+    check('phase3: /admin/operations requires token (403 without)', res.status === 403, 'status=' + res.status);
+
+    res = await req(BASE + '/admin/contracts?token=' + ADMIN_TOKEN, {});
+    const p3ContractsHtml = await res.text();
+    check('phase3: contract hub list renders with nav links',
+      res.status === 200 && p3ContractsHtml.includes('Contract hub') && p3ContractsHtml.includes('/admin/contracts') &&
+      p3ContractsHtml.includes('/admin/territories'), 'status=' + res.status);
+
+    res = await req(BASE + '/admin/contracts?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['client', 'P3 Client ' + ts], ['contract_name', 'P3 Contract ' + ts],
+      ['contract_type', 'Dedicated routes'], ['territory', p3TerrName],
+      ['service_area', 'Milwaukee metro'], ['start_date', '2026-09-20'], ['end_date', '2027-09-20'],
+      ['route_requirements', 'Daily AM route'], ['package_requirements', 'Up to 150 stops'],
+      ['vehicle_requirements', 'Cargo van or larger'], ['driver_requirements', '2 yrs experience'],
+      ['insurance_requirements', 'Commercial auto $1M'], ['performance_requirements', '98% on-time'],
+      ['payment_terms', 'Net 30'], ['documents', 'MSA draft'], ['notes', 'P3 test contract'],
+    ]});
+    const p3Loc = res.headers.get('location') || '';
+    const p3Contract = db.prepare('SELECT * FROM contracts WHERE contract_name = ?').get('P3 Contract ' + ts);
+    check('phase3: POST /admin/contracts creates contract, redirects to detail',
+      res.status === 302 && p3Loc.includes('/admin/contracts/' + p3Contract.id) &&
+      /^TNC-\d{4}-\d{4}$/.test(p3Contract.contract_number) && p3Contract.status === 'LEAD',
+      'status=' + res.status + ' loc=' + p3Loc + ' num=' + (p3Contract && p3Contract.contract_number));
+    const p3Hist0 = db.prepare('SELECT * FROM contract_status_history WHERE contract_id = ?').all(p3Contract.id);
+    check('phase3: contract creation records append-only history (null -> LEAD)',
+      p3Hist0.length === 1 && p3Hist0[0].from_status === null && p3Hist0[0].to_status === 'LEAD' &&
+      p3Hist0[0].changed_by === 'admin', 'rows=' + p3Hist0.length);
+
+    res = await req(BASE + '/admin/contracts?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['contract_name', 'P3 NoClient ' + ts],
+    ]});
+    const p3BadHtml = await res.text();
+    const p3NoClient = db.prepare('SELECT COUNT(*) n FROM contracts WHERE contract_name = ?').get('P3 NoClient ' + ts).n;
+    check('phase3: contract validation rejects missing client (no row)',
+      res.status === 200 && p3BadHtml.includes('Client is required') && p3NoClient === 0,
+      'status=' + res.status + ' rows=' + p3NoClient);
+
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '?token=' + ADMIN_TOKEN, {});
+    const p3DetailHtml = await res.text();
+    check('phase3: contract detail shows all spec-19 fields',
+      res.status === 200 && p3DetailHtml.includes('P3 Client') && p3DetailHtml.includes('Daily AM route') &&
+      p3DetailHtml.includes('Up to 150 stops') && p3DetailHtml.includes('Cargo van or larger') &&
+      p3DetailHtml.includes('2 yrs experience') && p3DetailHtml.includes('Commercial auto $1M') &&
+      p3DetailHtml.includes('98% on-time') && p3DetailHtml.includes('Net 30') &&
+      p3DetailHtml.includes('MSA draft') && p3DetailHtml.includes('Phase 6'),
+      'status=' + res.status);
+
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['status', 'QUALIFYING'], ['note', 'P3 vetting'],
+    ]});
+    const p3AfterStatus = db.prepare('SELECT status FROM contracts WHERE id = ?').get(p3Contract.id);
+    const p3Hist = db.prepare('SELECT from_status, to_status, note FROM contract_status_history WHERE contract_id = ? ORDER BY ts, id').all(p3Contract.id);
+    check('phase3: contract status transition updates status + appends history',
+      res.status === 302 && p3AfterStatus.status === 'QUALIFYING' && p3Hist.length === 2 &&
+      p3Hist[1].from_status === 'LEAD' && p3Hist[1].to_status === 'QUALIFYING' && p3Hist[1].note === 'P3 vetting',
+      'status=' + res.status + ' rows=' + p3Hist.length);
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['status', 'BOGUS'],
+    ]});
+    const p3BadStatus = db.prepare('SELECT status FROM contracts WHERE id = ?').get(p3Contract.id);
+    const p3HistAfterBad = db.prepare('SELECT COUNT(*) n FROM contract_status_history WHERE contract_id = ?').get(p3Contract.id).n;
+    check('phase3: invalid contract status rejected (DB unchanged, no history row)',
+      p3BadStatus.status === 'QUALIFYING' && p3HistAfterBad === 2, 'status=' + p3BadStatus.status + ' rows=' + p3HistAfterBad);
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['status', 'QUALIFYING'],
+    ]});
+    const p3HistAfterSame = db.prepare('SELECT COUNT(*) n FROM contract_status_history WHERE contract_id = ?').get(p3Contract.id).n;
+    check('phase3: same-status transition adds no history row', p3HistAfterSame === 2, 'rows=' + p3HistAfterSame);
+
+    // Link to a Phase 2 opportunity.
+    res = await req(BASE + '/admin/opportunities?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['name', 'P3 Opp ' + ts], ['territory', p3TerrName],
+      ['client_contract', 'ref ' + p3Contract.contract_number],
+    ]});
+    const p3Opp = db.prepare('SELECT * FROM opportunities WHERE name = ?').get('P3 Opp ' + ts);
+    check('phase3: opportunity created for contract linkage', res.status === 302 && !!p3Opp, 'status=' + res.status);
+    const p3LinkRes = await req(BASE + '/admin/contracts/' + p3Contract.id + '/opportunity?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['opportunity_id', String(p3Opp.id)],
+    ]});
+    const p3Linked = db.prepare('SELECT opportunity_id FROM contracts WHERE id = ?').get(p3Contract.id);
+    // A second opportunity that references the contract by text but is NOT
+    // explicitly linked — it should surface under "related by reference".
+    await req(BASE + '/admin/opportunities?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['name', 'P3 Opp Ref ' + ts],
+      ['client_contract', 'see contract ' + p3Contract.contract_number],
+    ]});
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '?token=' + ADMIN_TOKEN, {});
+    const p3LinkedHtml = await res.text();
+    check('phase3: contract links to opportunity; detail shows it + related-by-reference',
+      p3LinkRes.status === 302 && p3Linked.opportunity_id === p3Opp.id &&
+      p3LinkedHtml.includes('P3 Opp ' + ts) && p3LinkedHtml.includes('Opportunities referencing this contract') &&
+      p3LinkedHtml.includes('P3 Opp Ref ' + ts),
+      'link-status=' + p3LinkRes.status + ' linked=' + p3Linked.opportunity_id);
+    res = await req(BASE + '/admin/opportunities/' + p3Opp.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['status', 'OPEN'],
+    ]});
+    check('phase3: opportunity set OPEN for command-center metric', res.status === 302, 'status=' + res.status);
+
+    // Document reference placeholder.
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/document?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['doc_type', 'Master services agreement'], ['file_name', 'MSA-2026-signed.pdf'], ['notes', 'P3 doc'],
+    ]});
+    const p3Doc = db.prepare('SELECT * FROM contract_documents WHERE contract_id = ?').get(p3Contract.id);
+    check('phase3: contract document reference recorded (Phase 6 upload deferred)',
+      res.status === 302 && !!p3Doc && p3Doc.file_name === 'MSA-2026-signed.pdf', 'status=' + res.status);
+
+    // Contract edit (status untouched by edit form). The real UI posts the
+    // full form, so the test mirrors that: every field is sent.
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['client', 'P3 Client ' + ts], ['contract_name', 'P3 Contract ' + ts],
+      ['contract_type', 'Dedicated routes'], ['territory', p3TerrName],
+      ['service_area', 'Milwaukee metro'], ['start_date', '2026-09-20'], ['end_date', '2027-09-20'],
+      ['route_requirements', 'Daily AM route'], ['package_requirements', 'Up to 150 stops'],
+      ['vehicle_requirements', 'Cargo van or larger'], ['driver_requirements', '2 yrs experience'],
+      ['insurance_requirements', 'Commercial auto $1M'], ['performance_requirements', '98% on-time'],
+      ['payment_terms', 'Net 15'], ['documents', 'MSA draft'], ['notes', 'P3 test contract'],
+    ]});
+    const p3Edited = db.prepare('SELECT payment_terms, status, territory FROM contracts WHERE id = ?').get(p3Contract.id);
+    check('phase3: contract edit updates fields (status untouched, territory kept)',
+      res.status === 302 && p3Edited.payment_terms === 'Net 15' && p3Edited.status === 'QUALIFYING' &&
+      p3Edited.territory === p3TerrName,
+      'status=' + res.status);
+
+    // --- Territories ---
+    res = await req(BASE + '/admin/territories?token=' + ADMIN_TOKEN, {});
+    check('phase3: territory list renders', res.status === 200 && (await res.text()).includes('Territories'), 'status=' + res.status);
+    res = await req(BASE + '/admin/territories?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['name', p3TerrName], ['city', 'Milwaukee'], ['state', 'WI'],
+      ['zip_codes', '53202, 53203'], ['service_radius', '25 miles'],
+      ['capacity', '8 routes/day'], ['notes', 'P3 territory'],
+    ]});
+    const p3Terr = db.prepare('SELECT * FROM territories WHERE name = ?').get(p3TerrName);
+    check('phase3: POST /admin/territories creates territory',
+      res.status === 302 && !!p3Terr && p3Terr.city === 'Milwaukee' && p3Terr.state === 'WI',
+      'status=' + res.status);
+    res = await req(BASE + '/admin/territories?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['name', p3TerrName], ['city', 'Milwaukee'], ['state', 'WI'],
+    ]});
+    const p3DupHtml = await res.text();
+    const p3DupCount = db.prepare('SELECT COUNT(*) n FROM territories WHERE name = ?').get(p3TerrName).n;
+    check('phase3: duplicate territory name rejected', p3DupHtml.includes('already exists') && p3DupCount === 1,
+      'count=' + p3DupCount);
+
+    // Seed a driver + active contract for computed territory stats.
+    const p3DrvEmail = 'p3-drv-' + ts + '@example.com';
+    db.prepare("INSERT INTO drivers (full_name, email, home_city, home_state, vehicle_type, status, source, submitted_at, updated_at) VALUES (?, ?, 'Milwaukee', 'WI', 'cargo_van', 'active', 'direct', ?, ?)").run('P3 Driver ' + ts, p3DrvEmail, ts, ts);
+    const p3Drv = db.prepare('SELECT * FROM drivers WHERE email = ?').get(p3DrvEmail);
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['status', 'ACTIVE'],
+    ]});
+    check('phase3: contract set ACTIVE for territory stats', res.status === 302, 'status=' + res.status);
+
+    const p3ExpActiveContracts = db.prepare("SELECT COUNT(*) n FROM contracts WHERE status = 'ACTIVE' AND territory = ?").get(p3TerrName).n;
+    const p3ExpOpenOpps = db.prepare("SELECT COUNT(*) n FROM opportunities WHERE status = 'OPEN' AND (territory = ? OR location LIKE ? OR location LIKE ?)").get(p3TerrName, '%Milwaukee%', '%WI%').n;
+    const p3ExpAvailDrivers = db.prepare("SELECT COUNT(*) n FROM drivers WHERE status IN ('ready','placement','active') AND (home_city = ? OR home_state = ?)").get('Milwaukee', 'WI').n;
+    const p3ExpAvailVehicles = db.prepare("SELECT COUNT(*) n FROM drivers WHERE status IN ('ready','placement','active') AND vehicle_type IS NOT NULL AND vehicle_type != '' AND (home_city = ? OR home_state = ?)").get('Milwaukee', 'WI').n;
+    res = await req(BASE + '/admin/territories/' + p3Terr.id + '?token=' + ADMIN_TOKEN, {});
+    const p3TerrHtml = await res.text();
+    check('phase3: territory computed fields match live DB counts',
+      res.status === 200 &&
+      p3Metric(p3TerrHtml, 'active_contracts') === p3ExpActiveContracts &&
+      p3Metric(p3TerrHtml, 'open_opportunities') === p3ExpOpenOpps &&
+      p3Metric(p3TerrHtml, 'available_drivers') === p3ExpAvailDrivers &&
+      p3Metric(p3TerrHtml, 'available_vehicles') === p3ExpAvailVehicles &&
+      p3ExpActiveContracts >= 1 && p3ExpAvailDrivers >= 1 && p3ExpAvailVehicles >= 1,
+      'status=' + res.status + ' contracts=' + p3Metric(p3TerrHtml, 'active_contracts') + '/' + p3ExpActiveContracts +
+      ' drivers=' + p3Metric(p3TerrHtml, 'available_drivers') + '/' + p3ExpAvailDrivers +
+      ' vehicles=' + p3Metric(p3TerrHtml, 'available_vehicles') + '/' + p3ExpAvailVehicles);
+    check('phase3: territory detail lists the contract, opportunity and driver',
+      p3TerrHtml.includes('P3 Contract ' + ts) && p3TerrHtml.includes('P3 Opp ' + ts) && p3TerrHtml.includes('P3 Driver ' + ts));
+
+    res = await req(BASE + '/admin/territories/' + p3Terr.id + '?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['name', p3TerrName], ['city', 'Milwaukee'], ['state', 'WI'], ['capacity', '12 routes/day'],
+    ]});
+    const p3TerrEdited = db.prepare('SELECT capacity FROM territories WHERE id = ?').get(p3Terr.id);
+    check('phase3: territory edit updates capacity',
+      res.status === 302 && p3TerrEdited.capacity === '12 routes/day', 'status=' + res.status);
+
+    // --- Operations command center ---
+    res = await req(BASE + '/admin/routes?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['driver_id', String(p3Drv.id)], ['title', 'P3 Route ' + ts], ['scheduled_date', '2026-09-21'],
+    ]});
+    const p3Route = db.prepare('SELECT * FROM routes WHERE title = ?').get('P3 Route ' + ts);
+    check('phase3: route created for command-center seeds', res.status === 302 && !!p3Route, 'status=' + res.status);
+    await req(BASE + '/admin/routes/' + p3Route.id + '/status?token=' + ADMIN_TOKEN, { method: 'POST', form: [['status', 'active']] });
+    res = await req(BASE + '/admin/contracts/' + p3Contract.id + '/route?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+      ['route_code', p3Route.route_code],
+    ]});
+    const p3RouteLinked = db.prepare('SELECT contract_number FROM routes WHERE id = ?').get(p3Route.id);
+    check('phase3: contract claims the A-L route by contract number',
+      p3RouteLinked.contract_number === p3Contract.contract_number,
+      'route.contract_number=' + p3RouteLinked.contract_number);
+    const p3PkgNames = ['P3 Grow', 'P3 Biz', 'P3 Rsp'];
+    for (const who of p3PkgNames) {
+      await req(BASE + '/admin/routes/' + p3Route.id + '/packages?token=' + ADMIN_TOKEN, { method: 'POST', form: [
+        ['recipient_name', who + ' ' + ts], ['address', '1 Test Way'], ['city', 'Milwaukee'], ['state', 'WI'], ['zip', '53202'],
+      ]});
+    }
+    const p3Pkgs = db.prepare('SELECT * FROM packages WHERE route_id = ? ORDER BY package_id').all(p3Route.id);
+    db.prepare("UPDATE packages SET status = 'in_transit', updated_at = ? WHERE package_id = ?").run(ts, p3Pkgs[0].package_id);
+    db.prepare("UPDATE packages SET status = 'delivered', updated_at = ? WHERE package_id = ?").run(ts, p3Pkgs[1].package_id);
+    db.prepare("INSERT INTO package_exceptions (package_id, route_id, driver_id, exception_type, description, status, created_by, created_at) VALUES (?, ?, ?, 'damaged_package', 'P3 exception', 'open', 'driver', ?)").run(p3Pkgs[0].package_id, p3Route.id, p3Drv.id, ts);
+    db.prepare("INSERT INTO support_tickets (ticket_id, driver_id, category, priority, subject, message, status, created_by, created_at, updated_at) VALUES (?, ?, 'route', 'urgent', ?, 'P3 urgent', 'open', 'driver', ?, ?)").run('P3T-' + ts, p3Drv.id, 'P3 urgent ' + ts, ts, ts);
+    for (const lt of ['GROW', 'BUSINESS', 'RSP']) {
+      db.prepare("INSERT INTO opportunity_leads (lead_type, status, first_name, last_name, email, phone, city, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, '4145550100', 'Milwaukee', 'WI', ?, ?)")
+        .run(lt, lt === 'RSP' ? 'RSP INTEREST' : 'NEW', 'P3' + lt, '' + ts, 'p3-lead-' + lt.toLowerCase() + '-' + ts + '@example.com', ts, ts);
+    }
+
+    const P3_IN_TR = ['picked_up', 'in_transit', 'at_stop', 'out_for_delivery'];
+    const P3_DONE = ['delivered', 'returned', 'lost_investigation'];
+    const p3q = (sql, ...p) => db.prepare(sql).get(...p).n;
+    const p3Now = Date.now();
+    const exp = {
+      active_routes: p3q("SELECT COUNT(*) n FROM routes WHERE status = 'active'"),
+      drivers_active: p3q("SELECT COUNT(*) n FROM drivers WHERE status = 'active'"),
+      packages_in_transit: p3q("SELECT COUNT(*) n FROM packages WHERE status IN ('picked_up','in_transit','at_stop','out_for_delivery')"),
+      packages_delivered: p3q("SELECT COUNT(*) n FROM packages WHERE status = 'delivered' AND updated_at >= ? AND updated_at <= ?", p3StartOfDay, p3Now),
+      packages_remaining: p3q("SELECT COUNT(*) n FROM packages WHERE status NOT IN ('delivered','returned','lost_investigation')"),
+      open_exceptions: p3q("SELECT COUNT(*) n FROM package_exceptions WHERE status = 'open'"),
+      urgent_support: p3q("SELECT COUNT(*) n FROM support_tickets WHERE priority = 'urgent' AND status IN ('open','in_progress')"),
+      live_video: 0,
+      new_applicants: p3q("SELECT COUNT(*) n FROM opportunity_leads WHERE lead_type = 'GROW' AND created_at >= ? AND created_at <= ?", p3StartOfDay, p3Now),
+      new_business: p3q("SELECT COUNT(*) n FROM opportunity_leads WHERE lead_type = 'BUSINESS' AND created_at >= ? AND created_at <= ?", p3StartOfDay, p3Now),
+      rsp_leads: p3q("SELECT COUNT(*) n FROM opportunity_leads WHERE lead_type = 'RSP' AND created_at >= ? AND created_at <= ?", p3StartOfDay, p3Now),
+      open_opportunities: p3q("SELECT COUNT(*) n FROM opportunities WHERE status = 'OPEN'"),
+    };
+    res = await req(BASE + '/admin/operations?token=' + ADMIN_TOKEN, {});
+    const p3OpsHtml = await res.text();
+    const p3MetricKeys = ['active_routes', 'drivers_active', 'packages_in_transit', 'packages_delivered',
+      'packages_remaining', 'open_exceptions', 'urgent_support', 'live_video',
+      'new_applicants', 'new_business', 'rsp_leads', 'open_opportunities'];
+    const p3Mismatches = p3MetricKeys.filter((k) => p3Metric(p3OpsHtml, k) !== exp[k]);
+    check('phase3: command-center metrics match live DB counts (all 12)',
+      res.status === 200 && p3Mismatches.length === 0 &&
+      exp.active_routes >= 1 && exp.packages_in_transit >= 1 && exp.open_exceptions >= 1 &&
+      exp.urgent_support >= 1 && exp.new_applicants >= 1 && exp.open_opportunities >= 1,
+      'status=' + res.status + ' mismatches=[' + p3Mismatches.map((k) => k + ':page=' + p3Metric(p3OpsHtml, k) + ' db=' + exp[k]).join(', ') + ']');
+    const p3OpsNoNote = p3OpsHtml.replace(/never estimated or faked/g, '');
+    check('phase3: live video honestly labeled coming in Phase 5 (value 0, never faked)',
+      p3Metric(p3OpsHtml, 'live_video') === 0 && p3OpsHtml.includes('Coming in Phase 5') &&
+      !/live video[^<]{0,120}(fake|faked|estimated)/i.test(p3OpsNoNote));
+    check('phase3: command center deep-links into A-L dashboards',
+      p3OpsHtml.includes('href="/admin/routes"') && p3OpsHtml.includes('href="/admin/exceptions?status=open"') &&
+      p3OpsHtml.includes('href="/admin/tickets"') && p3OpsHtml.includes('href="/admin/crm?type=GROW"') &&
+      p3OpsHtml.includes('href="/admin/crm?type=BUSINESS"') && p3OpsHtml.includes('href="/admin/crm?type=RSP"') &&
+      p3OpsHtml.includes('href="/admin/opportunities?status=OPEN"') && p3OpsHtml.includes('href="/admin/drivers?status=active"'));
+
+    // Filters.
+    res = await req(BASE + '/admin/operations?token=' + ADMIN_TOKEN + '&driver=' + p3Drv.id, {});
+    const p3FiltDrvHtml = await res.text();
+    const p3ExpDrvRoutes = p3q("SELECT COUNT(*) n FROM routes WHERE status = 'active' AND driver_id = ?", p3Drv.id);
+    check('phase3: driver filter narrows metrics',
+      p3Metric(p3FiltDrvHtml, 'drivers_active') === 1 &&
+      p3Metric(p3FiltDrvHtml, 'active_routes') === p3ExpDrvRoutes &&
+      p3FiltDrvHtml.includes('Filters active'),
+      'drivers_active=' + p3Metric(p3FiltDrvHtml, 'drivers_active') + ' routes=' + p3Metric(p3FiltDrvHtml, 'active_routes') + '/' + p3ExpDrvRoutes);
+    res = await req(BASE + '/admin/operations?token=' + ADMIN_TOKEN + '&contract=' + encodeURIComponent(p3Contract.contract_number), {});
+    const p3FiltConHtml = await res.text();
+    check('phase3: contract filter shows the linked route',
+      p3Metric(p3FiltConHtml, 'active_routes') === 1, 'routes=' + p3Metric(p3FiltConHtml, 'active_routes'));
+    res = await req(BASE + '/admin/operations?token=' + ADMIN_TOKEN + '&status=delivered', {});
+    const p3FiltStHtml = await res.text();
+    const p3ExpDelivered = p3q("SELECT COUNT(*) n FROM packages WHERE status = 'delivered'");
+    check('phase3: status filter applies per table',
+      p3Metric(p3FiltStHtml, 'packages_in_transit') === p3ExpDelivered,
+      'in_transit-card=' + p3Metric(p3FiltStHtml, 'packages_in_transit') + ' delivered=' + p3ExpDelivered);
+    res = await req(BASE + '/admin/operations?token=' + ADMIN_TOKEN + '&territory=' + encodeURIComponent(p3TerrName), {});
+    const p3FiltTerrHtml = await res.text();
+    const p3ExpTerrDrivers = p3q("SELECT COUNT(*) n FROM drivers WHERE status = 'active' AND (home_city = ? OR home_state = ?)", 'Milwaukee', 'WI');
+    check('phase3: territory filter narrows drivers metric',
+      p3Metric(p3FiltTerrHtml, 'drivers_active') === p3ExpTerrDrivers,
+      'drivers=' + p3Metric(p3FiltTerrHtml, 'drivers_active') + '/' + p3ExpTerrDrivers);
+    const p3Yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    res = await req(BASE + '/admin/operations?token=' + ADMIN_TOKEN + '&date=' + p3Yesterday, {});
+    const p3FiltDateHtml = await res.text();
+    const p3ExpYest = p3q("SELECT COUNT(*) n FROM opportunity_leads WHERE lead_type = 'GROW' AND created_at >= ? AND created_at <= ?",
+      new Date(p3Yesterday + 'T00:00:00').getTime(), new Date(p3Yesterday + 'T23:59:59').getTime());
+    check('phase3: date filter changes the windowed metrics',
+      p3Metric(p3FiltDateHtml, 'new_applicants') === p3ExpYest && p3FiltDateHtml.includes('Filters active'),
+      'new_applicants=' + p3Metric(p3FiltDateHtml, 'new_applicants') + '/' + p3ExpYest);
+
+    // --- Cleanup: remove ALL Phase 3 test data ---
+    const p3ContractIds = db.prepare("SELECT id FROM contracts WHERE contract_name LIKE 'P3 Contract %'").all().map((r) => r.id);
+    for (const id of p3ContractIds) {
+      db.prepare('DELETE FROM contract_status_history WHERE contract_id = ?').run(id);
+      db.prepare('DELETE FROM contract_documents WHERE contract_id = ?').run(id);
+    }
+    db.prepare("DELETE FROM contracts WHERE contract_name LIKE 'P3 Contract %'").run();
+    db.prepare("DELETE FROM territories WHERE name LIKE 'P3Territory%'").run();
+    const p3RouteIds = db.prepare("SELECT id FROM routes WHERE title LIKE 'P3 Route %'").all().map((r) => r.id);
+    const p3PkgIds = p3RouteIds.length
+      ? db.prepare("SELECT package_id FROM packages WHERE route_id IN (" + p3RouteIds.map(() => '?').join(',') + ")").all(...p3RouteIds).map((r) => r.package_id)
+      : [];
+    for (const pid of p3PkgIds) db.prepare('DELETE FROM custody_events WHERE package_id = ?').run(pid);
+    if (p3PkgIds.length) db.prepare("DELETE FROM package_exceptions WHERE package_id IN (" + p3PkgIds.map(() => '?').join(',') + ")").run(...p3PkgIds);
+    if (p3RouteIds.length) db.prepare("DELETE FROM packages WHERE route_id IN (" + p3RouteIds.map(() => '?').join(',') + ")").run(...p3RouteIds);
+    if (p3RouteIds.length) db.prepare("DELETE FROM routes WHERE id IN (" + p3RouteIds.map(() => '?').join(',') + ")").run(...p3RouteIds);
+    const p3LeadIds = db.prepare("SELECT id FROM opportunity_leads WHERE email LIKE 'p3-lead-%'").all().map((r) => r.id);
+    for (const id of p3LeadIds) {
+      for (const t of ['opportunity_lead_tags', 'lead_vehicles', 'lead_business_info', 'lead_goals', 'lead_sources', 'lead_status_history', 'lead_notes', 'lead_communications']) {
+        db.prepare('DELETE FROM "' + t + '" WHERE lead_id = ?').run(id);
+      }
+    }
+    db.prepare("DELETE FROM opportunity_leads WHERE email LIKE 'p3-lead-%'").run();
+    db.prepare("DELETE FROM opportunities WHERE name LIKE 'P3 Opp %'").run();
+    const p3TicketIds = db.prepare("SELECT ticket_id FROM support_tickets WHERE ticket_id LIKE 'P3T-%'").all().map((r) => r.ticket_id);
+    if (p3TicketIds.length) db.prepare("DELETE FROM ticket_replies WHERE ticket_id IN (" + p3TicketIds.map(() => '?').join(',') + ")").run(...p3TicketIds);
+    db.prepare("DELETE FROM support_tickets WHERE ticket_id LIKE 'P3T-%'").run();
+    db.prepare("DELETE FROM drivers WHERE email LIKE 'p3-drv-%'").run();
+    check('phase3: test data cleaned up',
+      db.prepare("SELECT COUNT(*) n FROM contracts WHERE contract_name LIKE 'P3 Contract %'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM territories WHERE name LIKE 'P3Territory%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM routes WHERE title LIKE 'P3 Route %'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM drivers WHERE email LIKE 'p3-drv-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM opportunity_leads WHERE email LIKE 'p3-lead-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM opportunities WHERE name LIKE 'P3 Opp %'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM support_tickets WHERE ticket_id LIKE 'P3T-%'").get().n === 0,
+      'leftover rows');
+
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);
