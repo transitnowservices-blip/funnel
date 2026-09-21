@@ -1856,7 +1856,14 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
     const ai = require('./lib/ai_assistant');
     const isComplete = await ai.isCompleteActive(driver);
     if (isComplete) {
-      assistantInfo = { isComplete: true, questions: await ai.listForDriver(driver.id, 20) };
+      const caps = require('./lib/ai_capabilities');
+      const wk = require('./lib/route_matching').chicagoWeekKey();
+      assistantInfo = {
+        isComplete: true,
+        questions: await ai.listForDriver(driver.id, 20),
+        capCount: caps.DRIVER_CAPABILITIES.length,
+        spotlight: caps.weeklySpotlight(caps.DRIVER_CAPABILITIES, wk),
+      };
     }
   } catch (err) {
     console.error('[dashboard] assistant info failed:', err.message);
@@ -3334,7 +3341,11 @@ app.post('/d/:token/assistant', requireDriver, ah(async (req, res) => {
     res.redirect(`/d/${driver.access_token}`);
   } catch (err) {
     res.status(400);
-    const assistantInfo = { isComplete: true, questions: await ai.listForDriver(driver.id, 20) };
+    const caps400 = require('./lib/ai_capabilities');
+    const wk400 = require('./lib/route_matching').chicagoWeekKey();
+    const assistantInfo = { isComplete: true, questions: await ai.listForDriver(driver.id, 20),
+      capCount: caps400.DRIVER_CAPABILITIES.length,
+      spotlight: caps400.weeklySpotlight(caps400.DRIVER_CAPABILITIES, wk400) };
     const rm = require('./lib/route_matching');
     let matchInfo = null;
     try {

@@ -1257,6 +1257,137 @@ async function main() {
       }
     }
 
+    /* ---- 10h. Assistant capabilities + Monday spotlight emails ---------- */
+    // Covers: catalog counts render dynamically; weekly rotation changes
+    // week to week and is deterministic for the same week; Monday driver
+    // email only queues for ACTIVE Complete subscribers; Monday Room email
+    // only queues for active claimed members (never canceled/inactive/
+    // suppressed); no vendor/model name in any user-facing string.
+    const capsLib = require(path.join(APP_ROOT, 'lib', 'ai_capabilities'));
+    const autoLib = require(path.join(APP_ROOT, 'lib', 'automation'));
+    const rmWeekLib = require(path.join(APP_ROOT, 'lib', 'route_matching'));
+    {
+      const htag = 'e2e-capab';
+      const hEmail = (n) => `${htag}-${n}@example.com`.toLowerCase();
+      const nowT3 = Date.now();
+      db.prepare(`DELETE FROM dispatch_subscriptions WHERE email LIKE ?`).run(`${htag}%`);
+      db.prepare(`DELETE FROM drivers WHERE email LIKE ?`).run(`${htag}%`);
+      db.prepare(`DELETE FROM room_members WHERE email LIKE ?`).run(`${htag}%`);
+      db.prepare(`DELETE FROM suppressions WHERE email LIKE ?`).run(`${htag}%`);
+      db.prepare(`DELETE FROM email_queue WHERE email LIKE ? AND sequence IN ('assistant-weekly','room-assistant-weekly')`).run(`${htag}%`);
+
+      const forbiddenH = /muse|mena|anthropic|openai|gpt|llama|gemini|claude/i;
+      const catalogText = JSON.stringify(capsLib.DRIVER_CAPABILITIES) + JSON.stringify(capsLib.ROOM_CAPABILITIES);
+
+      // 10h-1. Catalogs have real counts and no earnings promises / vendor names.
+      check('driver capabilities catalog has 12 items', capsLib.DRIVER_CAPABILITIES.length === 12,
+        `n=${capsLib.DRIVER_CAPABILITIES.length}`);
+      check('room capabilities catalog has 10 items', capsLib.ROOM_CAPABILITIES.length === 10,
+        `n=${capsLib.ROOM_CAPABILITIES.length}`);
+      check('no vendor/model name in capability catalogs', !forbiddenH.test(catalogText));
+      check('no earnings promises in capability catalogs',
+        !/guarantee[ds]? (you|your)? ?\$|earn \$|make \$|income of \$/i.test(catalogText));
+
+      // 10h-2. Weekly rotation: different weeks -> different spotlight; same week -> identical.
+      const spot39 = capsLib.weeklySpotlight(capsLib.DRIVER_CAPABILITIES, '2026-W39');
+      const spot39b = capsLib.weeklySpotlight(capsLib.DRIVER_CAPABILITIES, '2026-W39');
+      const spot40 = capsLib.weeklySpotlight(capsLib.DRIVER_CAPABILITIES, '2026-W40');
+      check('weekly spotlight returns 3 items',
+        spot39.length === 3 && spot40.length === 3, JSON.stringify(spot39.map((c) => c.id)));
+      check('spotlight is deterministic for the same week',
+        JSON.stringify(spot39) === JSON.stringify(spot39b));
+      check('spotlight changes between weeks',
+        JSON.stringify(spot39.map((c) => c.id)) !== JSON.stringify(spot40.map((c) => c.id)),
+        `${spot39[0].id} vs ${spot40[0].id}`);
+
+      // 10h-3. Monday driver email: only ACTIVE Complete subscribers queued.
+      const mkHDriver = (n) => {
+        const email = hEmail(n);
+        db.prepare(`INSERT INTO drivers (full_name, email, phone, home_city, home_state, status, submitted_at, access_token)
+                    VALUES (?, ?, ?, 'Milwaukee', 'WI', 'new', ?, ?)`)
+          .run(`Capab Driver ${n}`, email, '4145550177', nowT3, `${htag}-tok-${n}-` + 'c'.repeat(40));
+        return db.prepare('SELECT * FROM drivers WHERE email = ?').get(email);
+      };
+      const hComplete = mkHDriver('complete');
+      const hBasic = mkHDriver('basic');
+      const hPastDue = mkHDriver('pastdue');
+      const hCanceled = mkHDriver('canceled');
+      makePaid(db, hComplete.email, 'complete');
+      makePaid(db, hBasic.email, 'basic');
+      makePaid(db, hPastDue.email, 'complete');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'past_due' WHERE email = ?`).run(hPastDue.email);
+      makePaid(db, hCanceled.email, 'complete');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'canceled' WHERE email = ?`).run(hCanceled.email);
+      // A known Chicago Monday: 2026-09-21 12:00 UTC = 07:00 CDT.
+      const mondayNoon = Date.UTC(2026, 8, 21, 12, 0, 0);
+      check('test Monday is a Chicago Monday', rmWeekLib.isMondayChicago(mondayNoon));
+      const weekKey = rmWeekLib.chicagoWeekKey(mondayNoon);
+      const qRes = await autoLib.queueMondayAssistantEmails(mondayNoon);
+      const gotEmail = (em) => db.prepare(
+        `SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'assistant-weekly' AND step = ?`).get(em, weekKey).n;
+      check('Monday assistant email queues only for the ACTIVE Complete driver',
+        qRes.ran && gotEmail(hComplete.email) === 1 && gotEmail(hBasic.email) === 0 &&
+          gotEmail(hPastDue.email) === 0 && gotEmail(hCanceled.email) === 0,
+        JSON.stringify(qRes));
+      const queuedBody = db.prepare(
+        `SELECT body_html FROM email_queue WHERE email = ? AND sequence = 'assistant-weekly' AND step = ?`).get(hComplete.email, weekKey).body_html;
+      check('driver weekly email lists 3 spotlight capabilities with example asks',
+        /This week with your private assistant/i.test(queuedBody) &&
+          (queuedBody.match(/Try asking:/g) || []).length === 3,
+        queuedBody.slice(0, 120));
+      check('no vendor/model name in driver weekly email', !forbiddenH.test(queuedBody));
+      // Idempotent: second call same week queues nothing new.
+      const qRes2 = await autoLib.queueMondayAssistantEmails(mondayNoon);
+      check('Monday assistant email is idempotent per week',
+        qRes2.ran === false || gotEmail(hComplete.email) === 1,
+        JSON.stringify(qRes2));
+      // Non-Monday: no-op.
+      const tuesday = mondayNoon + 86400000;
+      const qTue = await autoLib.queueMondayAssistantEmails(tuesday);
+      check('assistant email queue is a no-op on non-Mondays', qTue.ran === false, JSON.stringify(qTue));
+
+      // 10h-4. Monday Room email: only active claimed members, never canceled/inactive/suppressed.
+      db.prepare(`INSERT INTO room_members (email, name, password_hash, joined_at, status)
+                  VALUES (?, 'Active Member', 'hash-x', ?, 'active')`).run(hEmail('room-active'), nowT3);
+      db.prepare(`INSERT INTO room_members (email, name, password_hash, joined_at, status)
+                  VALUES (?, 'Canceled Member', 'hash-x', ?, 'canceled')`).run(hEmail('room-canceled'), nowT3);
+      db.prepare(`INSERT INTO room_members (email, name, password_hash, joined_at, status)
+                  VALUES (?, 'Inactive Member', 'hash-x', ?, 'inactive')`).run(hEmail('room-inactive'), nowT3);
+      db.prepare(`INSERT INTO room_members (email, name, joined_at, status)
+                  VALUES (?, 'Unclaimed Member', ?, 'active')`).run(hEmail('room-unclaimed'), nowT3);
+      db.prepare(`INSERT INTO suppressions (email, reason, ts) VALUES (?, 'test', ?)`).run(hEmail('room-suppressed'), nowT3);
+      db.prepare(`INSERT INTO room_members (email, name, password_hash, joined_at, status)
+                  VALUES (?, 'Suppressed Member', 'hash-x', ?, 'active')`).run(hEmail('room-suppressed'), nowT3);
+      const rqRes = await autoLib.queueMondayRoomAssistantEmails(mondayNoon);
+      const gotRoom = (em) => db.prepare(
+        `SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-assistant-weekly' AND step = ?`).get(em, weekKey).n;
+      check('Monday Room email queues only for the active claimed member',
+        rqRes.ran && gotRoom(hEmail('room-active')) === 1 && gotRoom(hEmail('room-canceled')) === 0 &&
+          gotRoom(hEmail('room-inactive')) === 0 && gotRoom(hEmail('room-unclaimed')) === 0 &&
+          gotRoom(hEmail('room-suppressed')) === 0,
+        JSON.stringify(rqRes));
+      const roomBody = db.prepare(
+        `SELECT subject, body_html FROM email_queue WHERE email = ? AND sequence = 'room-assistant-weekly' AND step = ?`)
+        .get(hEmail('room-active'), weekKey);
+      check('Room weekly email lists 3 rotating room capabilities',
+        /This week in the Room/i.test(roomBody.body_html) &&
+          (roomBody.body_html.match(/Try:/g) || []).length >= 3,
+        roomBody.subject);
+      check('no vendor/model name in Room weekly email',
+        !forbiddenH.test(roomBody.subject + roomBody.body_html));
+
+      // 10h-5. Dashboard panel renders the live count + weekly spotlight.
+      const hDashTok = db.prepare('SELECT access_token FROM drivers WHERE email = ?').get(hComplete.email).access_token;
+      res = await req(`${BASE}/d/${hDashTok}`, {});
+      const hDashHtml = await res.text();
+      check('dashboard panel shows the live capability count',
+        new RegExp(`can do <strong>${capsLib.DRIVER_CAPABILITIES.length} things</strong>`).test(hDashHtml),
+        `status=${res.status}`);
+      check('dashboard panel shows the "This week, try:" spotlight',
+        /This week, try:/i.test(hDashHtml) && !forbiddenH.test(hDashHtml),
+        `status=${res.status}`);
+    }
+
     /* ---- 11. Wealth Builder's Room --------------------------------- */
     // Covers: /checkout/room 302 to the $49/mo Stripe link, webhook room
     // provisioning (unsigned dev shape + signed shape), claim -> password ->

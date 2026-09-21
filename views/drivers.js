@@ -175,7 +175,8 @@ function routeMatchDashCard(matchInfo) {
 // --- Private operations assistant (Complete tier) ---------------------------------
 // Only rendered for ACTIVE Complete subscribers — Basic and unpaid drivers
 // never see it. Public copy never names the AI or any vendor/model.
-// assistantInfo: { isComplete: bool, questions: [] }.
+// assistantInfo: { isComplete: bool, questions: [], capCount: number,
+//                  spotlight: [capabilities] }.
 function assistantDashCard(driver, assistantInfo) {
   if (!assistantInfo || !assistantInfo.isComplete) return '';
   const qs = assistantInfo.questions || [];
@@ -188,14 +189,23 @@ function assistantDashCard(driver, assistantInfo) {
         : `<p class="microcopy"><em>Awaiting reply — your private operations assistant will respond soon.</em></p>`}
     </div>`;
   }).join('');
+  const caps = require('../lib/ai_capabilities');
+  const capCount = Number(assistantInfo.capCount) || caps.DRIVER_CAPABILITIES.length;
+  const capList = caps.DRIVER_CAPABILITIES.map((c) =>
+    `<li><strong>${esc(c.title)}</strong> — ${esc(c.description)}</li>`).join('');
+  const spot = (assistantInfo.spotlight || []).map((c) =>
+    `<li><strong>${esc(c.title)}</strong> — try: <em>“${esc(c.example_ask)}”</em></li>`).join('');
   return `<div class="card highlight-card"><h3>Your Private Operations Assistant</h3>
-    <p>Ask anything about dispatch, routes, brokers, paperwork, or growing your operation. This is your unseen advantage — working behind the scenes as part of your Complete plan.</p>
+    <p>Your private assistant can do <strong>${capCount} things</strong> with you — ask anything about dispatch, routes, brokers, paperwork, or growing your operation. This is your unseen advantage, working behind the scenes as part of your Complete plan.</p>
+    ${spot ? `<h4>This week, try:</h4><ul>${spot}</ul>` : ''}
     <form method="POST" action="/d/${esc(driver.access_token)}/assistant" class="form">
       <label for="assistant-q">Your question</label>
       <textarea id="assistant-q" name="question" rows="3" maxlength="2000" required
         placeholder="e.g. What should I have ready before I call a broker about a lane?"></textarea>
       <button type="submit" class="btn">ASK MY ASSISTANT</button>
     </form>
+    <h4 style="margin-top:16px">Everything your assistant can do (${capCount})</h4>
+    <ul>${capList}</ul>
     <h4 style="margin-top:16px">Your past questions</h4>
     ${items || '<p class="microcopy">No questions yet — ask your first one above.</p>'}
     <p class="microcopy">Guidance only. TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income.</p>
