@@ -24,6 +24,9 @@ function subscriptionBadge(sub) {
   if (!sub) return '<span class="muted">—</span>';
   if (sub.status === 'active') {
     const plan = sub.plan === 'basic' ? 'Basic $50/mo' : sub.plan === 'complete' ? 'Complete $100/mo' : sub.plan;
+    if (sub.is_test) {
+      return `<span class="status-badge" style="background:#6a4fb3;color:#fff">PAID · TEST · ${esc(plan)}</span>`;
+    }
     return `<span class="status-badge" style="background:#1c7a3d;color:#fff">PAID · ${esc(plan)}</span>`;
   }
   if (sub.status === 'past_due') {
@@ -58,7 +61,7 @@ function driverPipelineHtml({ list, counts, status, source, q, subsByEmail, paid
     (s) => `<option value="${s}"${source === s ? ' selected' : ''}>${esc(drivers.SOURCE_LABELS[s])}</option>`
   ).join('');
   const pc = paidCounts || {};
-  const paidTab = `<a${paid === 'paid' ? ' class="active"' : ''} href="/admin/drivers?paid=paid">Paid clients (${pc.active || 0})</a>`;
+  const paidTab = `<a${paid === 'paid' ? ' class="active"' : ''} href="/admin/drivers?paid=paid">Paid clients (${pc.active || 0})</a>${pc.testActive ? ` <span class="muted">+ ${pc.testActive} test</span>` : ''}`;
   const attentionTab = `<a${paid === 'attention' ? ' class="active"' : ''} href="/admin/drivers?paid=attention">Needs attention (${pc.past_due || 0})</a>`;
 
   const rows = list.map((d) => {
@@ -133,16 +136,43 @@ function driverDetailHtml({ driver: d, history, subscription, routeMatches = [],
     (s) => `<option value="${s}"${d.status === s ? ' selected' : ''}>${esc(drivers.STATUS_LABELS[s])}</option>`
   ).join('');
   const subCard = (() => {
+    const testAccessCard = (() => {
+      if (subscription && subscription.status === 'active' && subscription.is_test) {
+        return `<div class="card">
+  <h3>Test access <span class="status-badge" style="background:#6a4fb3;color:#fff">TEST ACTIVE</span></h3>
+  <p class="muted">This driver has test access granted by admin — no Stripe payment was made. They receive the full paid-client experience (broadcasts, route matches). Excluded from revenue.</p>
+  <form method="POST" action="/admin/drivers/${d.id}/test-access/revoke" class="form">
+    <button type="submit" class="btn">Revoke test access</button>
+  </form>
+</div>`;
+      }
+      if (subscription && subscription.status === 'active' && !subscription.is_test) return '';
+      return `<div class="card">
+  <h3>Test access</h3>
+  <p class="muted">Grant this driver the paid-client experience for testing — no Stripe payment. Labeled TEST everywhere in admin and excluded from revenue. They'll get broadcasts and route matches like a real payer.</p>
+  <form method="POST" action="/admin/drivers/${d.id}/test-access" class="form">
+    <label>Plan
+      <select name="plan">
+        <option value="complete">Complete $100/month</option>
+        <option value="basic">Basic $50/month</option>
+      </select>
+    </label>
+    <button type="submit" class="btn">Grant test access</button>
+  </form>
+</div>`;
+    })();
     if (!subscription) {
       return `<div class="card">
   <h3>Dispatch subscription</h3>
   <p>No dispatch subscription on file for ${esc(d.email)}. Dispatch work (routes, service-plan activation) requires an active Basic $50/month or Complete $100/month subscription.</p>
-</div>`;
+</div>` + testAccessCard;
     }
     const plan = subscription.plan === 'basic' ? 'Basic $50/month' : subscription.plan === 'complete' ? 'Complete $100/month' : subscription.plan;
     const period = subscription.current_period_end ? fmtTs(subscription.current_period_end) : '—';
     const note = subscription.status === 'active'
-      ? 'Dispatch work is allowed for this driver.'
+      ? (subscription.is_test
+        ? 'TEST grant — dispatch work is allowed for this driver. No Stripe payment on file.'
+        : 'Dispatch work is allowed for this driver.')
       : 'Dispatch work is blocked until the subscription is active again.';
     return `<div class="card">
   <h3>Dispatch subscription ${subscriptionBadge(subscription)}</h3>
@@ -150,7 +180,7 @@ function driverDetailHtml({ driver: d, history, subscription, routeMatches = [],
   <div><strong>Status:</strong> ${esc(subscription.status)}</div>
   <div><strong>Current period ends:</strong> ${esc(period)}</div>
   <p class="muted">${esc(note)}</p>
-</div>`;
+</div>` + testAccessCard;
   })();
   const work = (d.work_prefs || []).map((w) => drivers.WORK_PREF_LABELS[w] || w).join(', ');
   const looking = (d.looking_for || []).map((w) => drivers.LOOKING_FOR_LABELS[w] || w).join(', ');
@@ -165,6 +195,10 @@ function driverDetailHtml({ driver: d, history, subscription, routeMatches = [],
 <p><a href="/admin/drivers">&larr; Back to pipeline</a></p>
 ${notice ? (String(notice).startsWith('error:')
   ? `<p style="color:#d32f2f"><strong>${esc(notice)}</strong></p>`
+  : String(notice) === 'test-granted'
+  ? `<p style="color:#1b7f3b"><strong>Test access granted — labeled TEST everywhere, no Stripe payment. The driver now gets the paid-client experience.</strong></p>`
+  : String(notice) === 'test-revoked'
+  ? `<p style="color:#1b7f3b"><strong>Test access revoked — paid-client access removed.</strong></p>`
   : `<p style="color:#1b7f3b"><strong>Message queued — the driver gets one email plus one text.</strong></p>`) : ''}
 <h2>${esc(d.full_name)} ${statusBadge(d.status)}</h2>
 <p class="muted">Onboarded ${fmtTs(d.submitted_at)} · Source: ${esc(drivers.SOURCE_LABELS[d.source] || d.source)} · <a href="${esc(drivers.driverDashUrl(d.access_token))}">Driver dashboard link</a></p>

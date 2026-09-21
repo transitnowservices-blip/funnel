@@ -5514,6 +5514,104 @@ async function main() {
       check('member change-password rejects a wrong current password',
         r.status === 200 && /current password is not correct/i.test(await r.text()), `status=${r.status}`);
 
+      // 14. Admin test-access grants: paid-client experience without Stripe.
+      // Test grants flow through broadcasts/matching/PAID badge, are labeled
+      // TEST in admin, never touch Stripe, and can't mix with real payments.
+      const subsLib = require(path.join(APP_ROOT, 'lib', 'subscriptions'));
+      const driversLib = require(path.join(APP_ROOT, 'lib', 'drivers'));
+      const rmLib = require(path.join(APP_ROOT, 'lib', 'route_matching'));
+      const fcLib = require(path.join(APP_ROOT, 'lib', 'field_comms'));
+      const tEmail = (n) => `e2e-testaccess-${n}-${Date.now()}@example.com`;
+      const tFixtures = [];
+
+      // 14-1. grantTestAccess creates an active, flagged test subscription.
+      const t1 = tEmail('grant'); tFixtures.push(t1);
+      await driversLib.createOrUpdateDriver({ email: t1, full_name: 'Test Access Driver', source: 'test' });
+      const g1 = await subsLib.grantTestAccess({ email: t1, plan: 'complete' });
+      check('grantTestAccess creates an active flagged test subscription',
+        g1 && g1.status === 'active' && g1.plan === 'complete' && Number(g1.is_test) === 1 &&
+          !g1.stripe_customer_id && !g1.stripe_subscription_id,
+        `status=${g1 && g1.status} plan=${g1 && g1.plan} is_test=${g1 && g1.is_test}`);
+
+      // 14-2. Test grants flow through the paid-client gates.
+      check('test grant counts as paid-active', (await subsLib.isPaidActive(t1)) === true, 'isPaidActive');
+      const tplan = await rmLib.driverPlan({ email: t1 });
+      check('driverPlan resolves complete for a test grant', tplan === 'complete', `plan=${tplan}`);
+      const audComplete = await fcLib.activeFieldDrivers('complete');
+      check('test grant is included in the complete broadcast audience',
+        audComplete.some((d) => String(d.email).toLowerCase() === t1.toLowerCase()),
+        `audience size=${audComplete.length}`);
+
+      // 14-3. Invalid plan rejected; nothing written.
+      const tBad = tEmail('badplan');
+      let badPlanErr = '';
+      try { await subsLib.grantTestAccess({ email: tBad, plan: 'platinum' }); }
+      catch (e) { badPlanErr = e.message || ''; }
+      check('grantTestAccess rejects an invalid plan',
+        /basic or complete/.test(badPlanErr) && !(await subsLib.getByEmail(tBad)),
+        badPlanErr || 'no error');
+
+      // 14-4. Refuses when a real Stripe subscription record exists.
+      const t2 = tEmail('real'); tFixtures.push(t2);
+      await subsLib.upsertActive({ email: t2, plan: 'basic', stripeCustomerId: 'cus_e2e_real', stripeSubscriptionId: 'sub_e2e_real' });
+      let realErr = '';
+      try { await subsLib.grantTestAccess({ email: t2, plan: 'complete' }); }
+      catch (e) { realErr = e.message || ''; }
+      const stillReal = await subsLib.getByEmail(t2);
+      check('grantTestAccess refuses when a real Stripe subscription exists',
+        /real Stripe/.test(realErr) && stillReal && Number(stillReal.is_test) === 0 &&
+          stillReal.stripe_customer_id === 'cus_e2e_real' && stillReal.plan === 'basic',
+        realErr || 'no error');
+
+      // 14-5. A real Stripe payment converts a test grant (is_test cleared).
+      await subsLib.upsertActive({ email: t1, plan: 'complete', stripeCustomerId: 'cus_e2e_conv', stripeSubscriptionId: 'sub_e2e_conv' });
+      const conv = await subsLib.getByEmail(t1);
+      check('real Stripe payment converts a test grant to a real subscription',
+        conv && Number(conv.is_test) === 0 && conv.stripe_customer_id === 'cus_e2e_conv' && conv.status === 'active',
+        `is_test=${conv && conv.is_test}`);
+
+      // 14-6. Admin HTTP: grant via the driver page, TEST badge shown, pipeline counts honest.
+      const t3 = tEmail('http'); tFixtures.push(t3);
+      const tdrv3 = await driversLib.createOrUpdateDriver({ email: t3, full_name: 'HTTP Test Driver', source: 'test' });
+      r = await req(`${BASE}/admin/drivers/${tdrv3.id}/test-access?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { plan: 'basic' },
+      });
+      const dPage = await (await req(`${BASE}/admin/drivers/${tdrv3.id}?token=${ADMIN_TOKEN}`)).text();
+      check('admin grant route works and the driver page shows the PAID TEST badge',
+        r.status === 302 && /PAID · TEST/.test(dPage), `status=${r.status}`);
+      const pipeHtml = await (await req(`${BASE}/admin/drivers?token=${ADMIN_TOKEN}`)).text();
+      check('pipeline page notes test grants separately from paid clients',
+        /\+ 1 test/.test(pipeHtml), 'test-count marker');
+
+      // 14-7. Revoke removes access; real subscriptions can never be revoked this way.
+      r = await req(`${BASE}/admin/drivers/${tdrv3.id}/test-access/revoke?token=${ADMIN_TOKEN}`, { method: 'POST' });
+      const afterRevoke = await subsLib.getByEmail(t3);
+      check('revoke cancels test access',
+        r.status === 302 && afterRevoke && afterRevoke.status === 'canceled' && Number(afterRevoke.is_test) === 1,
+        `status=${r.status} sub=${afterRevoke && afterRevoke.status}`);
+      check('revoked test grant is no longer paid-active',
+        (await subsLib.isPaidActive(t3)) === false, 'isPaidActive');
+      const audBasic = await fcLib.activeFieldDrivers('basic');
+      check('revoked test grant leaves the broadcast audience',
+        !audBasic.some((d) => String(d.email).toLowerCase() === t3.toLowerCase()),
+        `audience size=${audBasic.length}`);
+      let revokeRealErr = '';
+      try { await subsLib.revokeTestAccess({ email: t2 }); }
+      catch (e) { revokeRealErr = e.message || ''; }
+      check('revokeTestAccess refuses real Stripe subscriptions',
+        /No test access grant/.test(revokeRealErr), revokeRealErr || 'no error');
+
+      // 14-8. Cleanup test-access fixtures.
+      for (const em of tFixtures) {
+        db.prepare('DELETE FROM dispatch_subscriptions WHERE email = ?').run(em);
+        db.prepare('DELETE FROM email_queue WHERE email = ?').run(em);
+        db.prepare(`DELETE FROM events WHERE meta LIKE ?`).run(`%${em}%`);
+      }
+      db.prepare(`DELETE FROM drivers WHERE email LIKE 'e2e-testaccess-%'`).run();
+      check('test-access fixtures cleaned up',
+        db.prepare(`SELECT COUNT(*) n FROM dispatch_subscriptions WHERE email LIKE 'e2e-testaccess-%'`).get().n === 0,
+        'leftovers');
+
       // Cleanup member fixtures.
       db.prepare('DELETE FROM room_sessions WHERE email LIKE ?').run(`${rtag}-%`);
       db.prepare('DELETE FROM room_reset_tokens WHERE email LIKE ?').run(`${rtag}-%`);

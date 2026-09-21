@@ -1847,7 +1847,11 @@ app.get('/admin/drivers', adminAuth, ah(async (req, res) => {
   ]);
   res.send(adminViews.adminLayout('Driver Pipeline', driverAdminViews.driverPipelineHtml({
     list: shown, counts, status, source: req.query.source || '', q: req.query.q || '',
-    subsByEmail, paid, paidCounts: { active: activeSubs.length, past_due: pastDueSubs.length },
+    subsByEmail, paid, paidCounts: {
+      active: activeSubs.filter((s) => !s.is_test).length,
+      past_due: pastDueSubs.length,
+      testActive: activeSubs.filter((s) => s.is_test).length,
+    },
   })));
 }));
 
@@ -1878,6 +1882,33 @@ app.post('/admin/drivers/:id/goal', adminAuth, ah(async (req, res) => {
   const rm = require('./lib/route_matching');
   await rm.setWeeklyGoal(driver.id, Math.round(dollars * 100));
   res.redirect(`/admin/drivers/${driver.id}`);
+}));
+
+// --- Admin: test-access grants (Davena only) ---------------------------------
+// Grants a driver the paid-client experience for testing WITHOUT a Stripe
+// payment. The subscription row is flagged is_test=1 and labeled TEST in
+// admin; test grants never touch Stripe and are excluded from revenue.
+// Only real Stripe webhook events can create or change real subscriptions.
+app.post('/admin/drivers/:id/test-access', adminAuth, ah(async (req, res) => {
+  const driver = await drivers.getDriverById(req.params.id);
+  if (!driver) return res.status(404).type('text').send('Driver not found');
+  try {
+    await subscriptions.grantTestAccess({ email: driver.email, plan: req.body.plan });
+  } catch (err) {
+    return res.redirect(`/admin/drivers/${driver.id}?msg=${encodeURIComponent('error: ' + err.message)}`);
+  }
+  res.redirect(`/admin/drivers/${driver.id}?msg=test-granted`);
+}));
+
+app.post('/admin/drivers/:id/test-access/revoke', adminAuth, ah(async (req, res) => {
+  const driver = await drivers.getDriverById(req.params.id);
+  if (!driver) return res.status(404).type('text').send('Driver not found');
+  try {
+    await subscriptions.revokeTestAccess({ email: driver.email });
+  } catch (err) {
+    return res.redirect(`/admin/drivers/${driver.id}?msg=${encodeURIComponent('error: ' + err.message)}`);
+  }
+  res.redirect(`/admin/drivers/${driver.id}?msg=test-revoked`);
 }));
 
 app.post('/admin/drivers/:id/status', adminAuth, ah(async (req, res) => {
