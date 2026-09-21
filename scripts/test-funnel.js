@@ -922,6 +922,206 @@ async function main() {
       await stopServer(childD);
     }
 
+    /* ---- 10f. Tier-based route matching -------------------------------- */
+    // Covers: day-one tier quotas (Complete 5 / Basic 2), Monday refill,
+    // Complete-first priority, city/state filtering, honest no-match
+    // behavior (never fabricated), paused matching for past-due/canceled/
+    // unpaid drivers, weekly goal math, and the /grow + /dispatch pricing
+    // sections with Davena's exact Stripe links.
+    const rmLib = require(path.join(APP_ROOT, 'lib', 'route_matching'));
+    {
+      // Fixed (ts-independent) identifiers so reruns always clean up prior
+      // runs' rows; cleanup at the top makes the section idempotent.
+      const rtag = 'e2e-routematch';
+      const rmEmail = (n) => `${rtag}-${n}@example.com`.toLowerCase();
+      const nowT = Date.now();
+      // Clean slate for this section (scheduler residue from earlier runs).
+      db.prepare(`DELETE FROM driver_route_matches WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)`).run(`${rtag}%`);
+      db.prepare(`DELETE FROM driver_weekly_goals WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)`).run(`${rtag}%`);
+      db.prepare(`DELETE FROM dispatch_subscriptions WHERE email LIKE ?`).run(`${rtag}%`);
+      db.prepare(`DELETE FROM drivers WHERE email LIKE ?`).run(`${rtag}%`);
+      db.prepare(`DELETE FROM opportunities WHERE name LIKE ?`).run(`${rtag}%`);
+      db.prepare(`DELETE FROM email_queue WHERE email LIKE ? AND sequence LIKE 'route-match%'`).run(`${rtag}%`);
+
+      // Opportunities: 6 OPEN in Milwaukee WI, 3 OPEN in Chicago IL,
+      // 1 DRAFT in Milwaukee (must never match), 1 OPEN with no location.
+      const mkOpp = (name, location, status) => db.prepare(
+        `INSERT INTO opportunities (name, location, status, created_by, created_at, updated_at)
+         VALUES (?, ?, ?, 'test', ?, ?)`
+      ).run(`${rtag}-${name}`, location, status, nowT, nowT).lastInsertRowid;
+      for (let i = 1; i <= 6; i++) mkOpp(`MKE-opp-${i}`, 'Milwaukee, WI', 'OPEN');
+      for (let i = 1; i <= 3; i++) mkOpp(`CHI-opp-${i}`, 'Chicago, IL', 'OPEN');
+      mkOpp('MKE-draft', 'Milwaukee, WI', 'DRAFT');
+      mkOpp('nowhere-opp', null, 'OPEN');
+
+      const mkDriver = (n, city, state) => {
+        const email = rmEmail(n);
+        db.prepare(`INSERT INTO drivers (full_name, email, phone, home_city, home_state, status, submitted_at)
+                    VALUES (?, ?, ?, ?, ?, 'new', ?)`).run(`RM Driver ${n}`, email, '4145550100', city, state, nowT);
+        return db.prepare('SELECT * FROM drivers WHERE email = ?').get(email);
+      };
+      const dComplete = mkDriver('complete', 'Milwaukee', 'WI');
+      const dBasic = mkDriver('basic', 'Milwaukee', 'WI');
+      const dChicago = mkDriver('chicago', 'Chicago', 'IL');
+      const dNoMatch = mkDriver('nomatch', 'Des Moines', 'IA');
+      const dPastDue = mkDriver('pastdue', 'Milwaukee', 'WI');
+      const dCanceled = mkDriver('canceled', 'Milwaukee', 'WI');
+      const dFree = mkDriver('free', 'Milwaukee', 'WI');
+      makePaid(db, dComplete.email, 'complete');
+      makePaid(db, dBasic.email, 'basic');
+      makePaid(db, dChicago.email, 'complete');
+      makePaid(db, dNoMatch.email, 'basic');
+      makePaid(db, dPastDue.email, 'complete');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'past_due' WHERE email = ?`).run(dPastDue.email);
+      makePaid(db, dCanceled.email, 'basic');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'canceled' WHERE email = ?`).run(dCanceled.email);
+
+      const activeCount = (id) => db.prepare(
+        `SELECT COUNT(*) n FROM driver_route_matches WHERE driver_id = ? AND status = 'assigned'`).get(id).n;
+
+      // 10f-1. Day-one: Complete gets 5.
+      let r = await rmLib.runMatchForDriver(dComplete, { kind: 'onboarding' });
+      check('onboarding: Complete driver gets 5 day-one matches',
+        r.ok && r.created === 5 && r.activeTotal === 5 && r.plan === 'complete',
+        JSON.stringify({ created: r.created, total: r.activeTotal }));
+
+      // 10f-2. Day-one: Basic gets 2 (Davena's stronger choice).
+      r = await rmLib.runMatchForDriver(dBasic, { kind: 'onboarding' });
+      check('onboarding: Basic driver gets 2 day-one matches',
+        r.ok && r.created === 2 && r.activeTotal === 2 && r.plan === 'basic',
+        JSON.stringify({ created: r.created, total: r.activeTotal }));
+
+      // 10f-3. City/state filtering: Chicago driver only gets Chicago opps.
+      r = await rmLib.runMatchForDriver(dChicago, { kind: 'onboarding' });
+      const chiLocs = db.prepare(
+        `SELECT DISTINCT o.location FROM driver_route_matches m JOIN opportunities o ON o.id = m.opportunity_id WHERE m.driver_id = ?`).all(dChicago.id);
+      check('city/state filtering: Chicago driver matched only to Chicago opportunities',
+        r.created === 3 && chiLocs.length === 1 && chiLocs[0].location === 'Chicago, IL',
+        JSON.stringify({ created: r.created, locs: chiLocs }));
+
+      // 10f-3b. State-level match: a same-state driver matches via the state word.
+      const dState = mkDriver('state', 'Madison', 'WI');
+      makePaid(db, dState.email, 'basic');
+      r = await rmLib.runMatchForDriver(dState, { kind: 'onboarding' });
+      check('state-level matching: Madison WI driver matches Wisconsin opportunities',
+        r.created === 2 && r.plan === 'basic', JSON.stringify({ created: r.created }));
+
+      // 10f-4. Honest no-match: Madison driver gets zero matches + honest note, never fakes.
+      r = await rmLib.runMatchForDriver(dNoMatch, { kind: 'onboarding' });
+      const noMatchNote = db.prepare(
+        `SELECT body_html FROM email_queue WHERE email = ? AND sequence = 'route-match' ORDER BY id DESC LIMIT 1`).get(dNoMatch.email);
+      check('no opportunities in city: zero matches created (never fabricated)',
+        r.ok && r.created === 0 && activeCount(dNoMatch.id) === 0, JSON.stringify(r));
+      check('no-match driver gets an honest "no current matches" notice',
+        !!noMatchNote && /no current opportunities/i.test(noMatchNote.body_html) &&
+          /rather tell you that honestly than send you matches that aren.t real/i.test(noMatchNote.body_html),
+        noMatchNote ? 'note queued' : 'no note found');
+
+      // 10f-5. Paused matching: past-due, canceled, and unpaid drivers are skipped.
+      for (const [label, drv] of [['past_due', dPastDue], ['canceled', dCanceled], ['free', dFree]]) {
+        const rr = await rmLib.runMatchForDriver(drv, { kind: 'onboarding' });
+        check(`matching paused for ${label} driver (skipped, no matches)`,
+          rr.skipped && rr.reason === 'no-active-subscription' && activeCount(drv.id) === 0,
+          JSON.stringify({ skipped: rr.skipped, reason: rr.reason }));
+      }
+
+      // 10f-6. DRAFT and location-less opportunities never match anyone.
+      const draftHit = db.prepare(
+        `SELECT COUNT(*) n FROM driver_route_matches m JOIN opportunities o ON o.id = m.opportunity_id
+          WHERE o.name LIKE ? AND (m.driver_id IN (SELECT id FROM drivers WHERE email LIKE ?))`)
+        .get(`${rtag}-MKE-draft`, `${rtag}%`).n;
+      const nowhereHit = db.prepare(
+        `SELECT COUNT(*) n FROM driver_route_matches m JOIN opportunities o ON o.id = m.opportunity_id
+          WHERE o.name LIKE ? AND (m.driver_id IN (SELECT id FROM drivers WHERE email LIKE ?))`)
+        .get(`${rtag}-nowhere-opp`, `${rtag}%`).n;
+      check('DRAFT opportunities are never matched', draftHit === 0, `hits=${draftHit}`);
+      check('location-less opportunities are never matched', nowhereHit === 0, `hits=${nowhereHit}`);
+
+      // 10f-7. Monday refill: release 2 of Complete's matches, cycle refills to 5.
+      const toRelease = db.prepare(
+        `SELECT id FROM driver_route_matches WHERE driver_id = ? AND status = 'assigned' ORDER BY id ASC LIMIT 2`).all(dComplete.id);
+      for (const mrow of toRelease) await rmLib.releaseMatch(mrow.id, 'test-release');
+      check('release drops Complete driver to 3 active', activeCount(dComplete.id) === 3);
+      const cyc = await rmLib.runMondayCycle({ force: true });
+      check('Monday cycle refills Complete driver back to 5',
+        cyc.ok && activeCount(dComplete.id) === 5, `active=${activeCount(dComplete.id)}`);
+      check('Monday cycle keeps Basic driver at quota 2 (no overfill)',
+        activeCount(dBasic.id) === 2, `active=${activeCount(dBasic.id)}`);
+
+      // 10f-8. Complete-first priority recorded in cycle log order.
+      const cycRow = db.prepare(`SELECT notes FROM route_match_cycles WHERE cycle_key = ?`).get(cyc.cycleKey);
+      const orderIds = (cycRow.notes.match(/driver ids: ([\d,]+)/) || [])[1];
+      const idxC = orderIds.indexOf(String(dComplete.id));
+      const idxB = orderIds.indexOf(String(dBasic.id));
+      check('Complete-tier drivers are matched before Basic in the cycle order',
+        idxC !== -1 && idxB !== -1 && idxC < idxB, `order=${orderIds}`);
+
+      // 10f-9. Cycle idempotency: same week, no force -> alreadyRan.
+      const cyc2 = await rmLib.runMondayCycle({ force: false });
+      check('Monday cycle is idempotent per week', cyc2.alreadyRan === true);
+
+      // 10f-10. Weekly goal tracker math + no-guarantee copy.
+      await rmLib.setWeeklyGoal(dBasic.id, 75000);
+      const prog = await rmLib.goalProgress(dBasic.id);
+      check('goal tracker: assigned count vs quota vs driver-set goal',
+        prog.assignedCount === 2 && prog.quota === 2 && prog.goalCents === 75000,
+        JSON.stringify({ assigned: prog.assignedCount, quota: prog.quota, goal: prog.goalCents }));
+      check('goal copy carries no-guarantee language and promises nothing',
+        /does not promise or guarantee routes, loads, contracts, work, earnings, or income/i.test(prog.copy) &&
+          !/you will earn|guaranteed income/i.test(prog.copy),
+        prog.copy.slice(0, 120));
+
+      // 10f-11. /grow and /dispatch render both exact Stripe subscribe links.
+      const BASIC_LINK = 'https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n';
+      const COMPLETE_LINK = 'https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o';
+      res = await req(`${BASE}/grow`, {});
+      const growHtml = await res.text();
+      check('GET /grow renders the Basic $50/mo Stripe subscribe link',
+        res.status === 200 && growHtml.includes(BASIC_LINK), `status=${res.status}`);
+      check('GET /grow renders the Complete $100/mo Stripe subscribe link',
+        res.status === 200 && growHtml.includes(COMPLETE_LINK), `status=${res.status}`);
+      check('GET /grow pricing section carries no-guarantee language',
+        /does not promise or guarantee routes, loads, contracts, work, earnings, or income/i.test(growHtml));
+      check('GET /grow frames tiers around growth (Start steady / Grow faster)',
+        /Start steady/i.test(growHtml) && /Grow faster/i.test(growHtml) &&
+          /a full board from the start/i.test(growHtml), `status=${res.status}`);
+      check('GET /grow shows the driver-set weekly goal line',
+        /Drivers set their own weekly goal/i.test(growHtml));
+      res = await req(`${BASE}/dispatch`, {});
+      const dispHtml = await res.text();
+      check('GET /dispatch renders both Stripe subscribe links',
+        res.status === 200 && dispHtml.includes(BASIC_LINK) && dispHtml.includes(COMPLETE_LINK),
+        `status=${res.status}`);
+
+      // 10f-12. Onboarding hook: paid driver completing /drivers/onboard gets day-one matches.
+      const hookEmail = rmEmail('hook');
+      makePaid(db, hookEmail, 'complete');
+      res = await req(`${BASE}/drivers/onboard`, { method: 'POST',
+        form: { full_name: 'Hook Driver', email: hookEmail, phone: '4145550199', home_city: 'Milwaukee', home_state: 'WI' } });
+      const hookDriver = db.prepare('SELECT id FROM drivers WHERE email = ?').get(hookEmail);
+      check('POST /drivers/onboard still completes (200)',
+        res.status === 200 && !!hookDriver, `status=${res.status}`);
+      check('paid driver gets 5 day-one matches via the onboarding hook',
+        activeCount(hookDriver.id) === 5, `active=${activeCount(hookDriver.id)}`);
+
+      // 10f-13. Driver dashboard shows route matches + weekly goal.
+      const dashDrv = mkDriver('dash', 'Milwaukee', 'WI');
+      makePaid(db, dashDrv.email, 'complete');
+      const dashTok = `e2e-routematch-dashtok-${'a'.repeat(40)}`;
+      db.prepare(`UPDATE drivers SET access_token = ? WHERE id = ?`).run(dashTok, dashDrv.id);
+      const dashFull = db.prepare('SELECT * FROM drivers WHERE id = ?').get(dashDrv.id);
+      await rmLib.runMatchForDriver(dashFull, { kind: 'onboarding' });
+      await rmLib.setWeeklyGoal(dashDrv.id, 80000);
+      res = await req(`${BASE}/d/${dashTok}`, {});
+      const dashHtml = await res.text();
+      check('driver dashboard shows route matches, quota, and weekly goal',
+        res.status === 200 && /Route matches — Complete plan/i.test(dashHtml) &&
+          /5 of 5 matches/i.test(dashHtml) && /\$800\.00/.test(dashHtml),
+        `status=${res.status}`);
+      check('driver dashboard match card carries no-guarantee language',
+        /does not promise or guarantee routes, loads, contracts, work, earnings, or income/i.test(dashHtml));
+    }
+
     /* ---- 11. Wealth Builder's Room --------------------------------- */
     // Covers: /checkout/room 302 to the $49/mo Stripe link, webhook room
     // provisioning (unsigned dev shape + signed shape), claim -> password ->

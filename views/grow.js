@@ -153,10 +153,59 @@ function growLandingPage() {
     <a class="btn btn-secondary btn-large" href="/dispatch">SEE HOW TRANSITNOW WORKS</a>
   </p>
   <p class="disclosure">Submitting this form does not guarantee employment, routes, loads, contracts, income, partnership, or acceptance into any TransitNow program. Information is collected so our team can understand your background and contact you regarding opportunities that may be relevant.</p>
-</section>`;
+</section>
+${dispatchPricingSection()}`;
 }
 
 module.exports.growLandingPage = growLandingPage;
+
+// --- Dispatch plan pricing (paid-client tiers) ----------------------------------
+// Two tier cards with subscribe buttons. Stripe URLs are Davena's live links —
+// never change them. Copy keeps no-guarantee language throughout.
+const STRIPE_BASIC_URL = 'https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n';
+const STRIPE_COMPLETE_URL = 'https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o';
+
+function dispatchPricingSection() {
+  return `
+<section id="dispatch-plans">
+  <h2>Start your dispatch plan</h2>
+  <p class="lede">Two ways to grow with TransitNow Dispatch. Both plans are monthly subscriptions — cancel anytime. Dispatch work is performed for paid subscribers only.</p>
+  <div class="card price-box">
+    <h3>Basic — Start steady</h3>
+    <p class="price">$50<span class="billing">/month</span></p>
+    <ul class="bullets" style="text-align:left">
+      <li>Full onboarding: carrier/business and vehicle information review</li>
+      <li><strong>2 fresh route matches every Monday</strong> from opportunities in your city/state</li>
+      <li>Your pipeline builds week by week</li>
+      <li>Weekly goal tracker</li>
+      <li>Matches delivered by email and text</li>
+      <li>Ongoing dispatch support</li>
+    </ul>
+    <p><a class="btn btn-large" href="${STRIPE_BASIC_URL}">SUBSCRIBE — BASIC $50/MO</a></p>
+    <p class="honest-note">Secure checkout via Stripe.</p>
+  </div>
+  <div class="card price-box">
+    <h3>Complete — Grow faster</h3>
+    <p class="price">$100<span class="billing">/month</span></p>
+    <ul class="bullets" style="text-align:left">
+      <li><strong>Everything in Basic</strong>, plus:</li>
+      <li><strong>5 matches on day one</strong> — a full board from the start</li>
+      <li><strong>Refilled back to 5 every Monday</strong></li>
+      <li><strong>Matched first</strong> — ahead of Basic in every cycle</li>
+      <li>Freight and lane preferences applied to your matches</li>
+      <li>Load-search prep</li>
+      <li>Broker verification guidance</li>
+      <li>Paperwork and route planning support</li>
+    </ul>
+    <p><a class="btn btn-large" href="${STRIPE_COMPLETE_URL}">SUBSCRIBE — COMPLETE $100/MO</a></p>
+    <p class="honest-note">Secure checkout via Stripe.</p>
+  </div>
+  <p class="lede">Drivers set their own weekly goal — most aim for $750 to $1,000 — and we track assigned routes against it.</p>
+  <p class="disclosure">Dispatch plans are a support service. Route matches are potential opportunities only — TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income. Actual opportunities depend on territory, client demand, your qualifications, and availability.</p>
+</section>`;
+}
+
+module.exports.dispatchPricingSection = dispatchPricingSection;
 
 // --- /grow/apply — 13-step application (spec section 3) ---
 function growApplyPage(opts = {}) {
@@ -599,7 +648,8 @@ ${errorBox(errors)}
     <p class="disclosure">No guaranteed loads, routes, contracts or earnings.</p>
     <button type="submit" class="btn btn-large">GET DISPATCH INFORMATION</button>
   </form>
-</section>`;
+</section>
+${dispatchPricingSection()}`;
 }
 
 function dispatchThankYouPage() {

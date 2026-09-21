@@ -1361,6 +1361,21 @@ app.post('/drivers/onboard', ah(async (req, res) => {
     meta: { driver_id: driver.id, source: driver.source },
   });
 
+  // Tier-based route matching: paid subscribers (ACTIVE dispatch
+  // subscription) get their day-one matches immediately — 5 for Complete,
+  // 2 for Basic. Free applicants get none; past-due/canceled get none.
+  // Best-effort: onboarding never fails because matching did.
+  try {
+    const rm = require('./lib/route_matching');
+    const sub = await subscriptions.getByEmail(String(driver.email || '').trim().toLowerCase());
+    if (sub && sub.status === 'active') {
+      const r = await rm.runMatchForDriver(driver, { kind: 'onboarding' });
+      console.log(`[onboard] day-one route match: driver=${driver.id} plan=${r.plan} created=${r.created}`);
+    }
+  } catch (err) {
+    console.error('[onboard] day-one route match failed:', err.message);
+  }
+
   page(res, 'Onboarding complete', driverViews.onboardDonePage({ site, driver, dashUrl }), site);
 }));
 
@@ -1761,7 +1776,27 @@ app.get('/admin/drivers/:id', adminAuth, ah(async (req, res) => {
   if (!driver) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Driver not found.</p>'));
   const history = await drivers.statusHistory(driver.id);
   const subscription = await subscriptions.getByEmail(driver.email);
-  res.send(adminViews.adminLayout('Driver: ' + driver.full_name, driverAdminViews.driverDetailHtml({ driver, history, subscription })));
+  const rm = require('./lib/route_matching');
+  const [routeMatches, goalCents] = await Promise.all([
+    rm.matchesForDriver(driver.id, 25),
+    rm.getWeeklyGoal(driver.id),
+  ]);
+  res.send(adminViews.adminLayout('Driver: ' + driver.full_name, driverAdminViews.driverDetailHtml({
+    driver, history, subscription, routeMatches,
+    goal: { goalCents, weekKey: rm.chicagoWeekKey() },
+  })));
+}));
+
+app.post('/admin/drivers/:id/goal', adminAuth, ah(async (req, res) => {
+  const driver = await drivers.getDriverById(req.params.id);
+  if (!driver) return res.status(404).type('text').send('Driver not found');
+  const dollars = Number(req.body.goal_dollars);
+  if (!Number.isFinite(dollars) || dollars < 0) {
+    return res.status(400).type('text').send('Enter a valid weekly goal amount in dollars.');
+  }
+  const rm = require('./lib/route_matching');
+  await rm.setWeeklyGoal(driver.id, Math.round(dollars * 100));
+  res.redirect(`/admin/drivers/${driver.id}`);
 }));
 
 app.post('/admin/drivers/:id/status', adminAuth, ah(async (req, res) => {
@@ -1802,7 +1837,19 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
   const driver = req.driver;
   const dashUrl = drivers.driverDashUrl(driver.access_token);
-  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl }), site);
+  // Tier route matches + weekly goal for the driver's own dashboard.
+  let matchInfo = null;
+  try {
+    const rm = require('./lib/route_matching');
+    const [matches, prog] = await Promise.all([
+      rm.activeMatches(driver.id),
+      rm.goalProgress(driver.id),
+    ]);
+    matchInfo = { matches, prog };
+  } catch (err) {
+    console.error('[dashboard] route match info failed:', err.message);
+  }
+  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, matchInfo }), site);
 }));
 
 // --- Phase D: driver route + packages (scoped to the token's driver) -------------
@@ -2737,6 +2784,62 @@ app.post('/admin/opportunities/:id/match', adminAuth, ah(async (req, res) => {
     return res.redirect(`/admin/opportunities/${encodeURIComponent(id)}?error=${encodeURIComponent(err.message)}`);
   }
   res.redirect(`/admin/opportunities/${id}`);
+}));
+
+// --- Tier-based route matching (dispatch plans, admin) ---------------------------
+// Additive. Matches come only from real OPEN opportunities; only ACTIVE
+// subscribers are matched (Complete first, then Basic).
+const routeMatchViews = require('./views/route_matches');
+const routeMatching = require('./lib/route_matching');
+
+app.get('/admin/route-matches', adminAuth, ah(async (req, res) => {
+  const driverFilter = req.query.driver ? Number(req.query.driver) : null;
+  const [cycles, driversList, opportunities] = await Promise.all([
+    routeMatching.recentCycles(20),
+    drivers.listDrivers({ limit: 500 }),
+    opps.listOpportunities({ status: 'OPEN' }),
+  ]);
+  let matches;
+  if (driverFilter) {
+    matches = await routeMatching.matchesForDriver(driverFilter, 100);
+  } else {
+    matches = await db.all(
+      `SELECT m.*, o.name AS opportunity_name, o.location AS opportunity_location,
+              d.full_name AS driver_name
+         FROM driver_route_matches m
+         LEFT JOIN opportunities o ON o.id = m.opportunity_id
+         LEFT JOIN drivers d ON d.id = m.driver_id
+        ORDER BY m.matched_at DESC, m.id DESC LIMIT 100`
+    );
+  }
+  res.send(adminViews.adminLayout('Route matching', routeMatchViews.adminPageHtml({
+    cycles, matches, driversList, opportunities,
+    driverFilter, error: req.query.error || '',
+  })));
+}));
+
+app.post('/admin/route-matches/run', adminAuth, ah(async (req, res) => {
+  const r = await routeMatching.runMondayCycle({ force: true });
+  res.redirect('/admin/route-matches');
+}));
+
+app.post('/admin/route-matches/assign', adminAuth, ah(async (req, res) => {
+  try {
+    await routeMatching.assignMatch(Number(req.body.driver_id), Number(req.body.opportunity_id), { by: 'admin' });
+  } catch (err) {
+    return res.redirect(`/admin/route-matches?error=${encodeURIComponent(err.message)}`);
+  }
+  res.redirect('/admin/route-matches');
+}));
+
+app.post('/admin/route-matches/:id/release', adminAuth, ah(async (req, res) => {
+  try {
+    await routeMatching.releaseMatch(Number(req.params.id), 'admin-release');
+  } catch (err) {
+    return res.redirect(`/admin/route-matches?error=${encodeURIComponent(err.message)}`);
+  }
+  const back = req.get('referer') || '/admin/route-matches';
+  res.redirect(back);
 }));
 
 // --- Phase 3: contract hub, territories, operations command center -------------

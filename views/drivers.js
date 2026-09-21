@@ -143,7 +143,36 @@ function onboardDonePage({ site, driver, dashUrl }) {
 }
 
 // --- Phase C: private driver dashboard (token link, no login) -------------------
-function dashboardPage({ site, driver, dashUrl }) {
+// --- Tier route matches + weekly goal (driver-facing) ----------------------------
+// matchInfo: { matches: activeMatches[], prog: goalProgress() } or null.
+// A match is a potential opportunity, never promised work — copy says so.
+function routeMatchDashCard(matchInfo) {
+  if (!matchInfo || !matchInfo.prog) return '';
+  const { matches, prog } = matchInfo;
+  if (!prog.plan) {
+    return `<div class="card"><h3>Route matches</h3>
+      <p>Route matching is included with a TransitNow dispatch plan (Basic $50/month or Complete $100/month).</p>
+      <p><a class="btn" href="/dispatch">See dispatch plans</a></p>
+      <p class="microcopy">Matches are potential opportunities only — never promised routes, loads, contracts, or income.</p>
+    </div>`;
+  }
+  const tierName = prog.plan === 'complete' ? 'Complete' : 'Basic';
+  const items = (matches || []).map((m) =>
+    `<li><strong>${esc(m.opportunity_name || 'Route opportunity')}</strong>` +
+    (m.opportunity_location ? ` — ${esc(m.opportunity_location)}` : '') + ` <span class="microcopy">(potential match)</span></li>`
+  ).join('');
+  const goalLine = prog.goalCents > 0
+    ? `<p><strong>Your weekly goal:</strong> $${(prog.goalCents / 100).toFixed(2)} — set by you, tracked toward, never promised.</p>`
+    : '';
+  return `<div class="card"><h3>Route matches — ${esc(tierName)} plan</h3>
+    <p><strong>${prog.assignedCount} of ${prog.quota} matches</strong> this week (${esc(prog.weekKey)}).</p>
+    ${goalLine}
+    <ul>${items || '<li>No active matches right now. New opportunities are added as they come in.</li>'}</ul>
+    <p class="microcopy">Route matches are potential opportunities only. TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income.</p>
+  </div>`;
+}
+
+function dashboardPage({ site, driver, dashUrl, matchInfo = null }) {
   const stage = drivers.STATUS_LABELS[driver.status] || driver.status;
   const nextSteps = {
     new: 'We are reviewing your onboarding information. No action needed right now.',
@@ -181,6 +210,7 @@ function dashboardPage({ site, driver, dashUrl }) {
   <h1>Hi, ${esc(driver.full_name)}.</h1>
   <p class="subhead">Status: ${esc(stage)}</p>
   <div class="card highlight-card"><p><strong>What happens next:</strong> ${esc(step)}</p></div>
+  ${routeMatchDashCard(matchInfo)}
   <h2>Your hub</h2>
   <div class="dash-grid">
     ${cardsHtml}

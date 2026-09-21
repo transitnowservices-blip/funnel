@@ -96,7 +96,39 @@ function driverPipelineHtml({ list, counts, status, source, q, subsByEmail, paid
 }
 
 // --- Driver detail --------------------------------------------------------------
-function driverDetailHtml({ driver: d, history, subscription }) {
+// --- Tier-based route matches (dispatch plans) ---------------------------------
+function routeMatchCardHtml({ driver: d, subscription, routeMatches = [], goal = null }) {
+  const active = (routeMatches || []).filter((m) => m.status === 'assigned');
+  const plan = subscription && subscription.status === 'active' ? subscription.plan : null;
+  const quota = plan === 'complete' ? 5 : plan === 'basic' ? 2 : 0;
+  const goalLine = goal && goal.goalCents > 0
+    ? `<div><strong>Weekly goal (${esc(goal.weekKey)}):</strong> $${(goal.goalCents / 100).toFixed(2)} — driver-set target, tracked toward, never promised.</div>`
+    : `<div class="muted">No weekly goal set for ${esc((goal && goal.weekKey) || 'this week')}.</div>
+       <form method="POST" action="/admin/drivers/${d.id}/goal" class="form" style="margin-top:8px">
+         <label>Set weekly goal ($)<input type="number" name="goal_dollars" min="0" step="1" placeholder="750" required></label>
+         <button type="submit" class="btn">Set goal</button>
+       </form>`;
+  const rows = (routeMatches || []).map((m) => `<tr>
+      <td>${esc(m.opportunity_name || ('#' + m.opportunity_id))}<br><span class="muted">${esc(m.opportunity_location || '')}</span></td>
+      <td>${esc(m.tier || '')}</td>
+      <td>${esc(m.status)}</td>
+      <td class="ts">${fmtTs(m.matched_at)}</td>
+      <td>${m.status === 'assigned'
+        ? `<form method="POST" action="/admin/route-matches/${m.id}/release" style="display:inline"><button type="submit" class="btn btn-secondary">Release</button></form>`
+        : `<span class="muted">${esc(m.release_reason || '')}</span>`}</td>
+    </tr>`).join('');
+  return `
+  <div><strong>Active matches:</strong> ${active.length} of ${quota || '—'}${plan ? ` (${esc(plan)} tier)` : ''}</div>
+  ${goalLine}
+  <table class="admin-table" style="margin-top:10px">
+    <thead><tr><th>Opportunity</th><th>Tier</th><th>Status</th><th>Matched</th><th></th></tr></thead>
+    <tbody>${rows || '<tr><td colspan="5">No route matches yet.</td></tr>'}</tbody>
+  </table>
+  <p><a class="btn" href="/admin/route-matches?driver=${d.id}">Open route-match admin &rarr;</a></p>
+  <p class="muted">Matches are potential opportunities only — never promised routes, loads, contracts, or income.</p>`;
+}
+
+function driverDetailHtml({ driver: d, history, subscription, routeMatches = [], goal = null }) {
   const statusOpts = drivers.DRIVER_STATUSES.map(
     (s) => `<option value="${s}"${d.status === s ? ' selected' : ''}>${esc(drivers.STATUS_LABELS[s])}</option>`
   ).join('');
@@ -135,6 +167,11 @@ function driverDetailHtml({ driver: d, history, subscription }) {
 <p class="muted">Onboarded ${fmtTs(d.submitted_at)} · Source: ${esc(drivers.SOURCE_LABELS[d.source] || d.source)} · <a href="${esc(drivers.driverDashUrl(d.access_token))}">Driver dashboard link</a></p>
 
 ${subCard}
+
+<div class="card">
+  <h3>Route matches (tier-based)</h3>
+  ${routeMatchCardHtml({ driver: d, subscription, routeMatches, goal })}
+</div>
 
 <div class="card">
   <h3>Extended driver profile</h3>
