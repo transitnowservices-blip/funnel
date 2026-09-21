@@ -65,6 +65,9 @@ const followupsLib = require('./lib/followups');
 const alertsLib = require('./lib/alerts');
 const documentsLib = require('./lib/documents');
 const phase6Views = require('./views/phase6');
+// Phase 7: growth ecosystem analytics (spec section 26).
+const analyticsLib = require('./lib/analytics');
+const analyticsViews = require('./views/analytics');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1902,7 +1905,9 @@ app.get('/admin/exceptions/:id/photo', adminAuth, ah(async (req, res) => {
   const photo = await drivers.getExceptionPhoto(req.params.id);
   if (!photo || !photo.photo_blob) return res.status(404).send('No photo attached.');
   res.type(photo.photo_mime || 'application/octet-stream');
-  res.send(photo.photo_blob);
+  // node:sqlite returns BLOBs as Uint8Array; Express would JSON-serialize it
+  // into garbage bytes. Buffer.from() keeps the original bytes intact.
+  res.send(Buffer.from(photo.photo_blob));
 }));
 
 // --- Phase I: admin support ticket triage ---------------------------------------
@@ -3105,7 +3110,9 @@ app.get('/d/:token/exceptions/:id/photo', requireDriver, ah(async (req, res) => 
   const photo = await drivers.getExceptionPhoto(req.params.id);
   if (!photo || !photo.photo_blob) return res.status(404).send('No photo attached.');
   res.type(photo.photo_mime || 'application/octet-stream');
-  res.send(photo.photo_blob);
+  // node:sqlite returns BLOBs as Uint8Array; Express would JSON-serialize it
+  // into garbage bytes. Buffer.from() keeps the original bytes intact.
+  res.send(Buffer.from(photo.photo_blob));
 }));
 
 // --- Phase I: driver support tickets (urgent alerts routed to operations) -------
@@ -3807,6 +3814,17 @@ app.post('/webhooks/email-event', ah(async (req, res) => {
     console.log(`[webhook:email-event] suppressed ${cleanEmail} (${evt})`);
   }
   res.json({ ok: true });
+}));
+
+// --- Phase 7: analytics dashboard (spec section 26) ---------------------------------
+// Additive — existing routes untouched. Admin route uses the explicit
+// adminAuth pattern (registered before app.use('/admin', adminAuth)).
+// Every metric is computed live from the real tables by lib/analytics.js;
+// the UI states each derived metric's definition (started/completed/
+// conversion rate, qualified, approvals) and carries no guarantee language.
+app.get('/admin/analytics', adminAuth, ah(async (req, res) => {
+  const data = await analyticsLib.getAnalytics({ days: req.query.days });
+  res.send(adminViews.adminLayout('Growth analytics', analyticsViews.analyticsHtml(data)));
 }));
 
 // --- Admin -------------------------------------------------------------------------------------

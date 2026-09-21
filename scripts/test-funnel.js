@@ -38,7 +38,15 @@ const fs = require('node:fs');
 const crypto = require('node:crypto');
 const path = require('node:path');
 
+// Phase 7: the analytics lib is exercised in-process (read-only) so every
+// computed metric can be compared exactly against independent SQL counts
+// from this script's own DB handle. The lib shares the same data dir.
+// (Required after APP_ROOT is defined, below.)
+
 const APP_ROOT = path.resolve(__dirname, '..');
+// Phase 7: analytics lib exercised in-process (read-only) for exact
+// metric-vs-SQL comparisons. Same data dir as the server under test.
+const analyticsLib = require(path.join(APP_ROOT, 'lib', 'analytics'));
 const PORT = 3111;
 const BASE = `http://127.0.0.1:${PORT}`;
 const ADMIN_TOKEN = 'test-token';
@@ -3650,6 +3658,312 @@ async function main() {
       db.prepare('SELECT COUNT(*) n FROM lead_followups').get().n === 0 &&
       db.prepare('SELECT COUNT(*) n FROM alerts').get().n === 0 &&
       db.prepare("SELECT COUNT(*) n FROM driver_documents WHERE owner_type = 'driver' AND owner_id NOT IN (SELECT id FROM drivers)").get().n === 0,
+      'leftover rows');
+
+
+    /* ---- Phase 7: analytics dashboard + exception-photo fix ---------------- */
+    // Covers: /admin/analytics adminAuth (403 without token), date-window
+    // filtering, funnel traffic from the existing page_views tracking,
+    // started/drafts/completed/conversion computed live from the real tables
+    // (each compared exactly against independent SQL counts), source
+    // breakdowns, referral-attribution wiring, applicant-profile breakdowns,
+    // pipeline metrics (qualified applicants, driver approvals, active
+    // drivers/businesses, opportunity matches), honest definition copy in the
+    // UI, the command-center deep link, and byte-identical exception-photo
+    // downloads on both the driver and admin routes.
+    const p7ts = Date.now();
+    const p7 = (n) => `p7-${String(n).toLowerCase()}-${p7ts}@example.com`;
+    const p7qBefore = (db.prepare('SELECT MAX(id) m FROM email_queue').get().m || 0);
+    const p7OutboxBefore = outboxFiles();
+
+    // --- auth + page render ---
+    res = await req(`${BASE}/admin/analytics`, {});
+    check('phase7: /admin/analytics requires token (403 without)',
+      res.status === 403, `status=${res.status}`);
+    res = await req(`${BASE}/admin/analytics?token=${ADMIN_TOKEN}`, {});
+    let p7Html = await res.text();
+    check('phase7: analytics page renders sections, definitions, window links',
+      res.status === 200 && p7Html.includes('Growth analytics') &&
+      p7Html.includes('Metric definitions') &&
+      p7Html.includes('unique anonymous visitors') &&
+      p7Html.includes('Completed ÷ Started') &&
+      p7Html.includes('they do not predict or promise future results') &&
+      p7Html.includes('?days=7') && p7Html.includes('?days=90') && p7Html.includes('?days=all'),
+      `status=${res.status}`);
+
+    // Baselines captured BEFORE seeding, so seeded deltas are provable.
+    const base30 = await analyticsLib.getAnalytics({ days: '30' });
+
+    // --- seed funnel traffic (existing page_views tracking reused) ---
+    for (const v of ['p7-va', 'p7-vb', 'p7-vc', 'p7-vd', 'p7-ve']) {
+      db.prepare('INSERT OR IGNORE INTO visitors (id, first_seen, last_seen, visits, source, campaign) VALUES (?, ?, ?, 1, NULL, NULL)')
+        .run(v, p7ts, p7ts);
+    }
+    const p7pv = db.prepare('INSERT INTO page_views (visitor_id, lead_id, path, product_id, ts) VALUES (?, NULL, ?, NULL, ?)');
+    for (const [v, pth] of [
+      ['p7-va', '/grow'], ['p7-vb', '/grow'],
+      ['p7-va', '/grow/apply'], ['p7-vb', '/grow/apply'], ['p7-vc', '/grow/apply'],
+      ['p7-va', '/business'], ['p7-vd', '/rsp'],
+      ['p7-ve', '/dispatch'], ['p7-vb', '/dispatch'],
+    ]) p7pv.run(v, pth, p7ts);
+
+    // --- seed drafts ---
+    const p7draftTokens = [crypto.randomBytes(24).toString('hex'), crypto.randomBytes(24).toString('hex')];
+    const p7dr = db.prepare("INSERT INTO opportunity_lead_drafts (token, lead_type, email, step, data, created_at, updated_at) VALUES (?, 'GROW', ?, 3, '{}', ?, ?)");
+    p7dr.run(p7draftTokens[0], p7('draft1'), p7ts, p7ts);
+    p7dr.run(p7draftTokens[1], p7('draft2'), p7ts, p7ts);
+
+    // --- seed leads ---
+    const p7li = db.prepare(
+      `INSERT INTO opportunity_leads
+         (lead_type, status, first_name, last_name, email, phone, city, state, source,
+          future_role, vehicle_type, experience_level, opportunity_interests, created_at, updated_at)
+       VALUES (?, ?, 'P7', 'Test', ?, '4145550199', 'Milwaukee', ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
+    const p7a1 = p7li.run('GROW', 'NEW', p7('a1'), 'WI', 'tiktok', 'driver', 'car', '1-2y', '["local-routes","dispatch-services"]', p7ts, p7ts).lastInsertRowid;
+    p7li.run('GROW', 'NEW', p7('a2'), 'WI', 'tiktok', 'driver', 'cargo-van', 'new', '["local-routes"]', p7ts, p7ts);
+    p7li.run('GROW', 'QUALIFYING', p7('a3'), 'IL', 'facebook', 'business-owner', 'car', '1-2y', '["building-business"]', p7ts, p7ts);
+    const p7a4 = p7li.run('GROW', 'ACTIVE', p7('a4'), 'WI', 'referral', '', 'none', '', '[]', p7ts, p7ts).lastInsertRowid;
+    p7li.run('GROW', 'NOT A FIT CURRENTLY', p7('a5'), '', '', 'not-sure', 'looking', '5+y', '["not-sure"]', p7ts, p7ts);
+    // 10 days old: inside the 30d window, outside the 7d window.
+    const p7old = p7ts - 10 * 86400e3;
+    p7li.run('GROW', 'NEW', p7('old'), '', 'google', '', '', '', '[]', p7old, p7old);
+    p7li.run('BUSINESS', 'ACTIVE', p7('b1'), '', 'website', '', '', '', '[]', p7ts, p7ts);
+    p7li.run('BUSINESS', 'NEW', p7('b2'), '', 'google', '', '', '', '[]', p7ts, p7ts);
+    p7li.run('RSP', 'RSP INTEREST', p7('r1'), 'WI', 'facebook', '', '', '', '[]', p7ts, p7ts);
+
+    // --- referral wiring: issued code + typed code -> attribution scan ---
+    db.prepare(
+      `INSERT INTO referral_codes (code, issued_to_type, issued_to_id, issued_to_name, issued_by, issued_at, status, notes)
+       VALUES ('TN-P7ABCD', 'driver', NULL, 'P7 Referrer', 'admin', ?, 'active', 'phase7 test')`
+    ).run(p7ts);
+    db.prepare('INSERT INTO lead_sources (lead_id, source, referral_code, created_at) VALUES (?, ?, ?, ?)')
+      .run(p7a4, 'referral', 'tn-p7abcd', p7ts);
+    res = await req(`${BASE}/admin/referrals/attribute?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+    const p7Attr = db.prepare('SELECT * FROM referral_attributions WHERE code = ?').get('TN-P7ABCD');
+    check('phase7: referral attribution links the seeded referred lead',
+      res.status === 302 && !!p7Attr && p7Attr.referred_lead_id === p7a4 && p7Attr.status === 'applied',
+      `status=${res.status} attr=${JSON.stringify(p7Attr && { lead: p7Attr.referred_lead_id, status: p7Attr.status })}`);
+
+    // --- drivers: one approved+active, one still screening ---
+    async function p7Onboard(name, email) {
+      const r = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+        ['full_name', name], ['email', email], ['phone', '4145550199'],
+        ['contact_method', 'text'], ['vehicle_type', 'cargo_van'], ['vehicle_make_model', 'Ford Transit'],
+        ['home_city', 'Milwaukee'], ['home_state', 'WI'], ['days_available', 'mon'],
+        ['work_prefs', 'local'], ['looking_for', 'routes'],
+      ]});
+      if (r.status !== 200) failFast('phase7: driver onboard failed: ' + r.status);
+    }
+    await p7Onboard('P7 Driver One', p7('drv1'));
+    await p7Onboard('P7 Driver Two', p7('drv2'));
+    db.prepare("UPDATE drivers SET status = 'active', extended_status = 'APPROVED' WHERE email = ?").run(p7('drv1'));
+    db.prepare("UPDATE drivers SET extended_status = 'SCREENING' WHERE email = ?").run(p7('drv2'));
+
+    // --- opportunity + potential match ---
+    const p7oppId = db.prepare(
+      "INSERT INTO opportunities (name, status, created_by, created_at, updated_at) VALUES ('P7 Opportunity Alpha', 'OPEN', 'test', ?, ?)"
+    ).run(p7ts, p7ts).lastInsertRowid;
+    db.prepare(
+      'INSERT INTO opportunity_matches (opportunity_id, person_type, person_id, matched_by, note, ts) VALUES (?, ?, ?, ?, ?, ?)'
+    ).run(p7oppId, 'lead', p7a1, 'admin', 'phase7 test match', p7ts);
+
+    // --- analytics vs independent SQL: exact agreement ---
+    const a30 = await analyticsLib.getAnalytics({ days: '30' });
+    const since30 = p7ts - 30 * 86400e3;
+    const since7 = p7ts - 7 * 86400e3;
+    const sqlStarted = (since) =>
+      db.prepare("SELECT COUNT(DISTINCT visitor_id) c FROM page_views WHERE path = '/grow/apply' AND ts >= ?").get(since).c;
+    const sqlCompleted = (since) =>
+      db.prepare("SELECT COUNT(*) c FROM opportunity_leads WHERE lead_type = 'GROW' AND created_at >= ?").get(since).c;
+    const sqlDrafts = (since) =>
+      db.prepare('SELECT COUNT(DISTINCT token) c FROM opportunity_lead_drafts WHERE created_at >= ?').get(since).c;
+    check('phase7: started matches independent page_views count exactly',
+      a30.funnel.started === sqlStarted(since30), `analytics=${a30.funnel.started} sql=${sqlStarted(since30)}`);
+    check('phase7: completed matches independent lead-row count exactly',
+      a30.funnel.completed === sqlCompleted(since30), `analytics=${a30.funnel.completed} sql=${sqlCompleted(since30)}`);
+    check('phase7: drafts match independent draft-token count exactly',
+      a30.funnel.draftsSaved === sqlDrafts(since30), `analytics=${a30.funnel.draftsSaved} sql=${sqlDrafts(since30)}`);
+    check('phase7: seeded deltas are exact (+3 started, +2 drafts, +6 completed, +2 business, +1 rsp)',
+      a30.funnel.started === base30.funnel.started + 3 &&
+      a30.funnel.draftsSaved === base30.funnel.draftsSaved + 2 &&
+      a30.funnel.completed === base30.funnel.completed + 6 &&
+      a30.funnel.businessLeads === base30.funnel.businessLeads + 2 &&
+      a30.funnel.rspInterest === base30.funnel.rspInterest + 1,
+      JSON.stringify({ started: a30.funnel.started, drafts: a30.funnel.draftsSaved, completed: a30.funnel.completed }));
+    const expectedConv = Math.round((a30.funnel.completed / a30.funnel.started) * 1000) / 10;
+    check('phase7: conversion rate math is exact (completed/started, 1 decimal)',
+      a30.funnel.conversionPct === expectedConv,
+      `analytics=${a30.funnel.conversionPct} expected=${expectedConv}`);
+
+    // --- funnel page stats vs SQL ---
+    for (const [pth, expVisitors] of [['/grow', 2], ['/grow/apply', 3], ['/business', 1], ['/rsp', 1], ['/dispatch', 2]]) {
+      const sqlV = db.prepare('SELECT COUNT(DISTINCT visitor_id) c FROM page_views WHERE path = ? AND ts >= ?').get(pth, since30).c;
+      const got = a30.funnel.pages[pth].visitors;
+      check(`phase7: ${pth} unique visitors match SQL (+${expVisitors} seeded)`,
+        got === sqlV && got >= expVisitors, `analytics=${got} sql=${sqlV}`);
+    }
+
+    // --- source breakdowns (deltas) ---
+    const delta = (after, before, label) =>
+      (after.find((r) => r.label === label)?.count || 0) - (before.find((r) => r.label === label)?.count || 0);
+    check('phase7: GROW source breakdown deltas exact (tiktok+2 facebook+1 referral+1 not-provided+1)',
+      delta(a30.sources.GROW, base30.sources.GROW, 'tiktok') === 2 &&
+      delta(a30.sources.GROW, base30.sources.GROW, 'facebook') === 1 &&
+      delta(a30.sources.GROW, base30.sources.GROW, 'referral') === 1 &&
+      delta(a30.sources.GROW, base30.sources.GROW, '(not provided)') === 1);
+    check('phase7: BUSINESS source breakdown deltas exact (website+1 google+1)',
+      delta(a30.sources.BUSINESS, base30.sources.BUSINESS, 'website') === 1 &&
+      delta(a30.sources.BUSINESS, base30.sources.BUSINESS, 'google') === 1);
+    check('phase7: RSP source breakdown delta exact (facebook+1)',
+      delta(a30.sources.RSP, base30.sources.RSP, 'facebook') === 1);
+
+    // --- referral breakdowns ---
+    const baseAttr = (base30.referrals.attributed.find((r) => r.code === 'TN-P7ABCD')?.count || 0);
+    const p7AttrRow = a30.referrals.attributed.find((r) => r.code === 'TN-P7ABCD');
+    check('phase7: attributed referrals include TN-P7ABCD (+1, issued to P7 Referrer)',
+      !!p7AttrRow && p7AttrRow.count === baseAttr + 1 && p7AttrRow.issuedTo === 'P7 Referrer',
+      JSON.stringify(p7AttrRow));
+    const baseTyped = (base30.referrals.typed.find((r) => r.code === 'TN-P7ABCD')?.count || 0);
+    const p7TypedRow = a30.referrals.typed.find((r) => r.code === 'TN-P7ABCD');
+    check('phase7: typed referral codes normalize case (TN-P7ABCD +1)',
+      !!p7TypedRow && p7TypedRow.count === baseTyped + 1, JSON.stringify(p7TypedRow));
+
+    // --- applicant profile breakdowns (deltas) ---
+    check('phase7: future-role breakdown deltas exact',
+      delta(a30.applicant.byFutureRole, base30.applicant.byFutureRole, 'driver') === 2 &&
+      delta(a30.applicant.byFutureRole, base30.applicant.byFutureRole, 'business-owner') === 1 &&
+      delta(a30.applicant.byFutureRole, base30.applicant.byFutureRole, 'not-sure') === 1 &&
+      // p7a4 AND the 10-day-old lead both leave future_role blank
+      delta(a30.applicant.byFutureRole, base30.applicant.byFutureRole, '(not provided)') === 2);
+    check('phase7: vehicle-type breakdown deltas exact',
+      delta(a30.applicant.byVehicleType, base30.applicant.byVehicleType, 'car') === 2 &&
+      delta(a30.applicant.byVehicleType, base30.applicant.byVehicleType, 'cargo-van') === 1 &&
+      delta(a30.applicant.byVehicleType, base30.applicant.byVehicleType, 'none') === 1 &&
+      delta(a30.applicant.byVehicleType, base30.applicant.byVehicleType, 'looking') === 1);
+    check('phase7: state breakdown deltas exact (WI+3 IL+1)',
+      delta(a30.applicant.byState, base30.applicant.byState, 'WI') === 3 &&
+      delta(a30.applicant.byState, base30.applicant.byState, 'IL') === 1);
+    check('phase7: experience breakdown deltas exact',
+      delta(a30.applicant.byExperience, base30.applicant.byExperience, '1-2y') === 2 &&
+      delta(a30.applicant.byExperience, base30.applicant.byExperience, 'new') === 1 &&
+      delta(a30.applicant.byExperience, base30.applicant.byExperience, '5+y') === 1);
+    check('phase7: opportunity-interest breakdown deltas exact',
+      delta(a30.applicant.opportunityInterests, base30.applicant.opportunityInterests, 'local-routes') === 2 &&
+      delta(a30.applicant.opportunityInterests, base30.applicant.opportunityInterests, 'dispatch-services') === 1 &&
+      delta(a30.applicant.opportunityInterests, base30.applicant.opportunityInterests, 'building-business') === 1 &&
+      delta(a30.applicant.opportunityInterests, base30.applicant.opportunityInterests, 'not-sure') === 1);
+
+    // --- pipeline metrics (current state; deltas) ---
+    check('phase7: qualified applicants +2 (QUALIFYING, ACTIVE statuses)',
+      a30.pipeline.qualifiedApplicants === base30.pipeline.qualifiedApplicants + 2,
+      `after=${a30.pipeline.qualifiedApplicants} before=${base30.pipeline.qualifiedApplicants}`);
+    check('phase7: driver approvals +1, active drivers +1, active businesses +1',
+      a30.pipeline.driverApprovals === base30.pipeline.driverApprovals + 1 &&
+      a30.pipeline.activeDrivers === base30.pipeline.activeDrivers + 1 &&
+      a30.pipeline.activeBusinesses === base30.pipeline.activeBusinesses + 1);
+    check('phase7: opportunity matches +1 total and +1 in window',
+      a30.pipeline.opportunityMatches === base30.pipeline.opportunityMatches + 1 &&
+      a30.pipeline.matchesInWindow === base30.pipeline.matchesInWindow + 1);
+
+    // --- date-window filtering ---
+    const a7 = await analyticsLib.getAnalytics({ days: '7' });
+    check('phase7: 7-day window excludes the 10-day-old lead (completed -1 vs 30d)',
+      a7.funnel.completed === a30.funnel.completed - 1 && a7.funnel.started === a30.funnel.started,
+      `7d completed=${a7.funnel.completed} 30d completed=${a30.funnel.completed}`);
+    check('phase7: 7-day completed matches independent SQL',
+      a7.funnel.completed === sqlCompleted(since7), `analytics=${a7.funnel.completed} sql=${sqlCompleted(since7)}`);
+    const aBad = await analyticsLib.getAnalytics({ days: 'bogus' });
+    check('phase7: invalid days param falls back to 30 days',
+      aBad.window.key === '30' && aBad.window.label === 'Last 30 days',
+      `key=${aBad.window.key} label=${aBad.window.label}`);
+
+    // --- HTTP page reflects the live numbers ---
+    res = await req(`${BASE}/admin/analytics?token=${ADMIN_TOKEN}&days=30`, {});
+    p7Html = await res.text();
+    const numFor = (labelStart) => {
+      const m = p7Html.match(new RegExp(`<div class="num">([\\d,]+)</div><div class="label">${labelStart}`));
+      return m ? Number(m[1].replace(/,/g, '')) : null;
+    };
+    check('phase7: page shows live Started and Completed numbers',
+      res.status === 200 && numFor('Started') === a30.funnel.started && numFor('Completed applications') === a30.funnel.completed,
+      `started=${numFor('Started')} completed=${numFor('Completed applications')}`);
+    check('phase7: page shows the live conversion percentage',
+      p7Html.includes(`<strong>${a30.funnel.conversionPct}%</strong>`),
+      `looking for ${a30.funnel.conversionPct}%`);
+    res = await req(`${BASE}/admin/analytics?token=${ADMIN_TOKEN}&days=7`, {});
+    check('phase7: days=7 page shows Last 7 days label',
+      res.status === 200 && (await res.text()).includes('Last 7 days'), `status=${res.status}`);
+    res = await req(`${BASE}/admin/operations?token=${ADMIN_TOKEN}`, {});
+    check('phase7: command center deep-links to analytics',
+      res.status === 200 && (await res.text()).includes('href="/admin/analytics"'), `status=${res.status}`);
+
+    // --- exception photo download: byte-identical round trip (driver + admin) ---
+    await p7Onboard('P7 Photo Driver', p7('photo'));
+    const p7photo = db.prepare('SELECT id, access_token FROM drivers WHERE email = ?').get(p7('photo'));
+    res = await req(`${BASE}/admin/routes?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['driver_id', String(p7photo.id)], ['title', 'P7 Photo Route'], ['scheduled_date', '2026-09-21'],
+    ]});
+    const p7route = db.prepare('SELECT * FROM routes WHERE driver_id = ? ORDER BY id DESC LIMIT 1').get(p7photo.id);
+    res = await req(`${BASE}/admin/routes/${p7route.id}/packages?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
+      ['recipient_name', 'P7 Photo Co'], ['address', '1 Test Way'], ['city', 'Milwaukee'], ['state', 'WI'], ['zip', '53202'],
+    ]});
+    const p7pkg = db.prepare('SELECT * FROM packages WHERE route_id = ? ORDER BY package_id DESC LIMIT 1').get(p7route.id);
+    // Deliberately binary bytes (NULs, high bytes) — JSON-serialization of a
+    // Uint8Array would corrupt these.
+    const p7bytes = Buffer.from([0, 1, 2, 3, 250, 251, 252, 253, 254, 255, 137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 7, 128, 200]);
+    res = await multipartReq(`${BASE}/d/${p7photo.access_token}/packages/${p7pkg.package_id}/exception`, {
+      fields: { exception_type: 'damaged_package', description: 'P7 photo bytes test', photo_confirm: '1' },
+      file: { filename: 'p7.png', mime: 'image/png', buffer: p7bytes },
+    });
+    const p7ex = db.prepare('SELECT * FROM package_exceptions WHERE package_id = ? ORDER BY id DESC LIMIT 1').get(p7pkg.package_id);
+    check('phase7: exception with binary photo recorded',
+      res.status === 302 && !!p7ex && p7ex.photo_mime === 'image/png',
+      `status=${res.status}`);
+    res = await req(`${BASE}/d/${p7photo.access_token}/exceptions/${p7ex.id}/photo`, {});
+    const p7drvPhoto = Buffer.from(await res.arrayBuffer());
+    check('phase7: driver exception photo download is byte-identical to upload',
+      res.status === 200 && (res.headers.get('content-type') || '').includes('image/png') &&
+      p7drvPhoto.equals(p7bytes),
+      `status=${res.status} downloaded=${p7drvPhoto.length}B uploaded=${p7bytes.length}B`);
+    res = await req(`${BASE}/admin/exceptions/${p7ex.id}/photo?token=${ADMIN_TOKEN}`, {});
+    const p7admPhoto = Buffer.from(await res.arrayBuffer());
+    check('phase7: admin exception photo download is byte-identical to upload',
+      res.status === 200 && (res.headers.get('content-type') || '').includes('image/png') &&
+      p7admPhoto.equals(p7bytes),
+      `status=${res.status} downloaded=${p7admPhoto.length}B uploaded=${p7bytes.length}B`);
+
+    // --- Phase 7 cleanup ---
+    db.prepare('DELETE FROM page_views WHERE visitor_id LIKE ?').run('p7-%');
+    db.prepare('DELETE FROM visitors WHERE id LIKE ?').run('p7-%');
+    db.prepare('DELETE FROM opportunity_lead_drafts WHERE email LIKE ?').run('p7-%');
+    db.prepare('DELETE FROM lead_sources WHERE lead_id IN (SELECT id FROM opportunity_leads WHERE email LIKE ?)').run('p7-%');
+    db.prepare('DELETE FROM opportunity_matches WHERE opportunity_id IN (SELECT id FROM opportunities WHERE name LIKE ?)').run('P7 %');
+    db.prepare('DELETE FROM opportunities WHERE name LIKE ?').run('P7 %');
+    db.prepare('DELETE FROM referral_attributions WHERE code LIKE ?').run('TN-P7%');
+    db.prepare('DELETE FROM referral_codes WHERE code LIKE ?').run('TN-P7%');
+    db.prepare('DELETE FROM package_exceptions WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)').run('p7-%');
+    db.prepare('DELETE FROM packages WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)').run('p7-%');
+    db.prepare('DELETE FROM routes WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)').run('p7-%');
+    db.prepare('DELETE FROM driver_status_history WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)').run('p7-%');
+    db.prepare('DELETE FROM drivers WHERE email LIKE ?').run('p7-%');
+    db.prepare('DELETE FROM opportunity_leads WHERE email LIKE ?').run('p7-%');
+    const p7NewQids = db.prepare('SELECT id FROM email_queue WHERE id > ?').all(p7qBefore).map((r) => r.id);
+    const p7NewOutboxFinal = newFilesSince(p7OutboxBefore);
+    for (const qid of p7NewQids) {
+      for (const f of p7NewOutboxFinal) {
+        if (f.startsWith(`${qid}-`) && f.endsWith('.html')) fs.unlinkSync(path.join(OUTBOX, f));
+      }
+    }
+    if (p7NewQids.length) db.prepare(`DELETE FROM email_queue WHERE id IN (${p7NewQids.map(() => '?').join(',')})`).run(...p7NewQids);
+    check('phase7: test data cleaned up',
+      db.prepare("SELECT COUNT(*) n FROM opportunity_leads WHERE email LIKE 'p7-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM drivers WHERE email LIKE 'p7-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM page_views WHERE visitor_id LIKE 'p7-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM opportunity_lead_drafts WHERE email LIKE 'p7-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM referral_codes WHERE code LIKE 'TN-P7%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM opportunities WHERE name LIKE 'P7 %'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM package_exceptions WHERE description = 'P7 photo bytes test'").get().n === 0,
       'leftover rows');
 
 
