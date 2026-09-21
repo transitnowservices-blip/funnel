@@ -2847,8 +2847,11 @@ async function main() {
       exp.urgent_support >= 1 && exp.new_applicants >= 1 && exp.open_opportunities >= 1,
       'status=' + res.status + ' mismatches=[' + p3Mismatches.map((k) => k + ':page=' + p3Metric(p3OpsHtml, k) + ' db=' + exp[k]).join(', ') + ']');
     const p3OpsNoNote = p3OpsHtml.replace(/never estimated or faked/g, '');
-    check('phase3: live video honestly labeled coming in Phase 5 (value 0, never faked)',
-      p3Metric(p3OpsHtml, 'live_video') === 0 && p3OpsHtml.includes('Coming in Phase 5') &&
+    // Phase 5 is now implemented: the note describes the real request/accept/record
+    // workflow and the unconfigured-provider state honestly (SIMULATED TEST).
+    check('phase3: live video honestly labeled (value 0, workflow real, never faked)',
+      p3Metric(p3OpsHtml, 'live_video') === 0 && p3OpsHtml.includes('SIMULATED TEST') &&
+      p3OpsHtml.includes('never estimated or faked') &&
       !/live video[^<]{0,120}(fake|faked|estimated)/i.test(p3OpsNoNote));
     check('phase3: command center deep-links into A-L dashboards',
       p3OpsHtml.includes('href="/admin/routes"') && p3OpsHtml.includes('href="/admin/exceptions?status=open"') &&
@@ -2926,6 +2929,309 @@ async function main() {
       db.prepare("SELECT COUNT(*) n FROM opportunity_leads WHERE email LIKE 'p3-lead-%'").get().n === 0 &&
       db.prepare("SELECT COUNT(*) n FROM opportunities WHERE name LIKE 'P3 Opp %'").get().n === 0 &&
       db.prepare("SELECT COUNT(*) n FROM support_tickets WHERE ticket_id LIKE 'P3T-%'").get().n === 0,
+      'leftover rows');
+
+
+    /* ---- Phase 5: live video support (provider abstraction + lifecycle) ---- */
+    const p5Email = `p5-drv-${ts}@example.com`;
+    const p5EmailB = `p5-drv-b-${ts}@example.com`;
+    const p5EmailC = `p5-drv-c-${ts}@example.com`;
+    const p5qBefore = db.prepare('SELECT MAX(id) m FROM email_queue').get().m || 0;
+    const p5OutboxBefore = new Set(outboxFiles());
+    for (const [nm, em] of [['P5 Driver', p5Email], ['P5 Driver B', p5EmailB], ['P5 Driver C', p5EmailC]]) {
+      res = await req(`${BASE}/drivers/onboard`, { method: 'POST', form: [
+        ['full_name', nm], ['email', em], ['phone', '4145550505'], ['source', 'direct'],
+      ]});
+      if (res.status !== 200) failFast('phase5: onboarding fixture failed for ' + em);
+    }
+    const p5Tok = (e) => db.prepare('SELECT access_token FROM drivers WHERE email = ?').get(e).access_token;
+    const p5DrvId = (e) => db.prepare('SELECT id FROM drivers WHERE email = ?').get(e).id;
+    const p5Token = p5Tok(p5Email), p5TokenB = p5Tok(p5EmailB), p5TokenC = p5Tok(p5EmailC);
+    const p5Loc = (sid) => `/admin/live-sessions/${encodeURIComponent(sid)}?token=${ADMIN_TOKEN}`;
+
+    // Dashboard links the Go Live hub.
+    res = await req(`${BASE}/d/${p5Token}`, {});
+    check('phase5: driver dashboard links Go Live hub',
+      res.status === 200 && (await res.text()).includes('/go-live'), 'status=' + res.status);
+
+    // Go-live page: honest unconfigured-provider state.
+    res = await req(`${BASE}/d/${p5Token}/go-live`, {});
+    const p5GoHtml = await res.text();
+    check('phase5: go-live page renders',
+      res.status === 200 && p5GoHtml.includes('GO LIVE WITH OPERATIONS'), 'status=' + res.status);
+    check('phase5: VIDEO PROVIDER REQUIRED shown when unconfigured',
+      p5GoHtml.includes('VIDEO PROVIDER REQUIRED'));
+    check('phase5: unconfigured workflow labeled SIMULATED TEST',
+      p5GoHtml.includes('SIMULATED TEST'));
+    check('phase5: never claims a connected/live media state',
+      !/you are (now )?connected/i.test(p5GoHtml) && !/real-time (video|audio) (is|now) (active|running)/i.test(p5GoHtml) &&
+      !/call in progress/i.test(p5GoHtml) && !/connected to operations/i.test(p5GoHtml));
+    const p5Reasons = ['Route issue', 'Package issue', 'Delivery issue', 'Wrong address', 'Customer',
+      'Facility', 'Vehicle', 'Safety', 'Technical', 'Dispatch', 'Other'];
+    check('phase5: request form offers exactly the 11 spec reasons',
+      p5Reasons.every((r) => p5GoHtml.includes(`>${r}<`)), 'missing reason label');
+    check('phase5: honest coverage + emergency copy present',
+      p5GoHtml.includes('do not staff 24/7') && p5GoHtml.includes('call 911'));
+    check('phase5: mic/camera/location toggles visible and off-by-default',
+      p5GoHtml.includes('want_camera') && p5GoHtml.includes('want_mic') && p5GoHtml.includes('share_location') &&
+      p5GoHtml.includes('stays off unless you check this'));
+    check('phase5: go-live rejects bad token with 404',
+      (await req(`${BASE}/d/not-a-real-token/go-live`, {})).status === 404);
+
+    // Validation: invalid reason rejected (fresh driver B, no open session yet).
+    res = await req(`${BASE}/d/${p5TokenB}/go-live`, { method: 'POST', form: [['reason', 'bogus']] });
+    check('phase5: invalid session reason rejected with 400', res.status === 400, 'status=' + res.status);
+
+    // Driver A requests a session.
+    res = await req(`${BASE}/d/${p5Token}/go-live`, { method: 'POST', form: [
+      ['reason', 'route_issue'], ['priority', 'HIGH'], ['notes', 'P5 test notes'],
+      ['want_camera', 'on'], ['share_location', 'on'],
+    ]});
+    const p5Redirect = res.headers.get('location') || '';
+    const p5Sid = (p5Redirect.match(/TN-LIVE-\d+/) || [])[0];
+    check('phase5: session request redirects to the new session page',
+      res.status === 302 && !!p5Sid && p5Redirect.includes('/go-live/'), `status=${res.status} loc=${p5Redirect}`);
+    const p5Row = db.prepare('SELECT * FROM live_sessions WHERE session_id = ?').get(p5Sid);
+    check('phase5: live_sessions row created as REQUESTED with reason/priority/location',
+      !!p5Row && p5Row.status === 'REQUESTED' && p5Row.reason === 'route_issue' &&
+      p5Row.priority === 'HIGH' && p5Row.share_location === 1 &&
+      p5Row.driver_id === p5DrvId(p5Email) && p5Row.notes === 'P5 test notes',
+      p5Row ? `status=${p5Row.status} reason=${p5Row.reason}` : 'no row');
+    check('phase5: camera/mic consent defaults OFF, provider_ref never faked',
+      p5Row && p5Row.consent_camera === 0 && p5Row.consent_mic === 0 && p5Row.provider_ref === null);
+    check('phase5: live_support_requests row created (open)',
+      db.prepare('SELECT * FROM live_support_requests WHERE session_id = ?').get(p5Sid)?.status === 'open');
+    const p5Events = db.prepare('SELECT event_type FROM live_session_events WHERE session_id = ? ORDER BY id').all(p5Sid).map((r) => r.event_type);
+    check('phase5: session events append-only log starts with requested (+ preference note)',
+      p5Events.includes('requested') && p5Events.includes('note'), p5Events.join(','));
+    check('phase5: recording consent defaults OFF (row exists, consent_given=0)',
+      db.prepare('SELECT consent_given FROM live_session_recordings WHERE session_id = ?').get(p5Sid)?.consent_given === 0);
+    check('phase5: ops notified via outbox queue (step live-session-request), delivery not claimed',
+      db.prepare("SELECT COUNT(*) n FROM email_queue WHERE id > ? AND step = 'live-session-request'").get(p5qBefore).n === 1);
+    res = await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}`, {});
+    const p5SessHtml = await res.text();
+    check('phase5: session page renders SIMULATED TEST, no connected media state',
+      res.status === 200 && p5SessHtml.includes('SIMULATED TEST') && p5SessHtml.includes('Camera:') &&
+      !/you are (now )?connected/i.test(p5SessHtml), 'status=' + res.status);
+    check('phase5: session page shows other-driver sessions as 404',
+      (await req(`${BASE}/d/${p5TokenB}/go-live/${p5Sid}`, {})).status === 404);
+
+    // Second request while one is open is rejected.
+    res = await req(`${BASE}/d/${p5Token}/go-live`, { method: 'POST', form: [['reason', 'safety']] });
+    check('phase5: duplicate open session rejected with 400', res.status === 400, 'status=' + res.status);
+
+    // Driver B requests (stays REQUESTED for negative tests).
+    res = await req(`${BASE}/d/${p5TokenB}/go-live`, { method: 'POST', form: [['reason', 'safety'], ['priority', 'URGENT']] });
+    const p5SidB = ((res.headers.get('location') || '').match(/TN-LIVE-\d+/) || [])[0];
+    check('phase5: second driver session created (REQUESTED)',
+      res.status === 302 && !!p5SidB, `status=${res.status}`);
+    res = await req(`${BASE}/d/${p5TokenB}/go-live/${p5SidB}/consent`, { method: 'POST', form: [['camera', 'on'], ['mic', 'on']] });
+    check('phase5: camera/mic consent before accept rejected with 400', res.status === 400, 'status=' + res.status);
+    res = await req(`${BASE}/d/${p5TokenB}/go-live/${p5SidB}/end`, { method: 'POST', form: {} });
+    check('phase5: driver cannot end a REQUESTED session (400)', res.status === 400, 'status=' + res.status);
+
+    // Admin queue auth + listing.
+    res = await req(`${BASE}/admin/live-sessions`, {});
+    check('phase5: /admin/live-sessions requires token (403 without)', res.status === 403, 'status=' + res.status);
+    res = await req(`${BASE}/admin/live-sessions?token=${ADMIN_TOKEN}`, {});
+    const p5QueueHtml = await res.text();
+    check('phase5: admin queue lists sessions with SIMULATED TEST + VIDEO PROVIDER REQUIRED',
+      res.status === 200 && p5QueueHtml.includes(p5Sid) && p5QueueHtml.includes('SIMULATED TEST') &&
+      p5QueueHtml.includes('VIDEO PROVIDER REQUIRED'), 'status=' + res.status);
+    res = await req(`${BASE}/admin/live-sessions/NOPE?token=${ADMIN_TOKEN}`, {});
+    check('phase5: admin session detail 404s on unknown id', res.status === 404, 'status=' + res.status);
+    // Invalid transition: REQUESTED -> LIVE rejected.
+    res = await req(`${BASE}/admin/live-sessions/${p5Sid}/start?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    check('phase5: invalid transition REQUESTED->LIVE rejected with 400',
+      res.status === 400 && (await res.text()).includes('Cannot move session'), 'status=' + res.status);
+    check('phase5: session still REQUESTED after rejected transition',
+      db.prepare('SELECT status FROM live_sessions WHERE session_id = ?').get(p5Sid).status === 'REQUESTED');
+
+    // Dispatcher accepts session A.
+    res = await req(`${BASE}/admin/live-sessions/${p5Sid}/accept?token=${ADMIN_TOKEN}`,
+      { method: 'POST', form: [['dispatcher_name', 'P5 Dispatcher']] });
+    check('phase5: dispatcher accept redirects', res.status === 302, 'status=' + res.status);
+    const p5Acc = db.prepare('SELECT * FROM live_sessions WHERE session_id = ?').get(p5Sid);
+    check('phase5: session ACCEPTED with dispatcher name recorded',
+      p5Acc.status === 'ACCEPTED' && p5Acc.dispatcher_name === 'P5 Dispatcher',
+      `status=${p5Acc.status} dispatcher=${p5Acc.dispatcher_name}`);
+    check('phase5: accepted event appended',
+      db.prepare("SELECT COUNT(*) n FROM live_session_events WHERE session_id = ? AND event_type = 'accepted'").get(p5Sid).n === 1);
+    const p5DispPart = db.prepare("SELECT * FROM live_participants WHERE session_id = ? AND role = 'dispatcher'").get(p5Sid);
+    check('phase5: dispatcher participant joined on accept',
+      !!p5DispPart && p5DispPart.staff_name === 'P5 Dispatcher' && p5DispPart.left_at === null,
+      p5DispPart ? `name=${p5DispPart.staff_name} left=${p5DispPart.left_at}` : 'no row');
+
+    // Driver explicitly consents to camera/mic (allowed now).
+    res = await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}/consent`, { method: 'POST', form: [['camera', 'on'], ['mic', 'on']] });
+    check('phase5: driver media consent accepted after accept', res.status === 302, 'status=' + res.status);
+    const p5Cons = db.prepare('SELECT consent_camera, consent_mic FROM live_sessions WHERE session_id = ?').get(p5Sid);
+    check('phase5: consent flags stored', p5Cons.consent_camera === 1 && p5Cons.consent_mic === 1);
+    check('phase5: consent event appended',
+      db.prepare("SELECT COUNT(*) n FROM live_session_events WHERE session_id = ? AND event_type = 'consent'").get(p5Sid).n === 1);
+    const p5DrvPart = db.prepare("SELECT * FROM live_participants WHERE session_id = ? AND role = 'driver'").get(p5Sid);
+    check('phase5: driver participant joined on explicit consent',
+      !!p5DrvPart && p5DrvPart.driver_id === p5DrvId(p5Email) && p5DrvPart.left_at === null,
+      p5DrvPart ? `driver=${p5DrvPart.driver_id} left=${p5DrvPart.left_at}` : 'no row');
+
+    // Location toggle off (voluntary, visibly on/off).
+    res = await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}/location`, { method: 'POST', form: [['on', '0']] });
+    check('phase5: driver can turn location sharing off',
+      res.status === 302 && db.prepare('SELECT share_location FROM live_sessions WHERE session_id = ?').get(p5Sid).share_location === 0,
+      'status=' + res.status);
+
+    // Chat both directions (append-only).
+    await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}/message`, { method: 'POST', form: [['message', 'P5 driver chat msg']] });
+    await req(`${BASE}/admin/live-sessions/${p5Sid}/message?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['message', 'P5 ops chat msg']] });
+    const p5Msgs = db.prepare('SELECT sender_type, message FROM live_session_messages WHERE session_id = ? ORDER BY id').all(p5Sid);
+    check('phase5: in-session chat append-only, both directions stored',
+      p5Msgs.length === 2 && p5Msgs[0].sender_type === 'driver' && p5Msgs[0].message === 'P5 driver chat msg' &&
+      p5Msgs[1].sender_type === 'dispatcher' && p5Msgs[1].message === 'P5 ops chat msg',
+      JSON.stringify(p5Msgs));
+    res = await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}/message`, { method: 'POST', form: [['message', '   ']] });
+    check('phase5: empty chat message rejected with 400', res.status === 400, 'status=' + res.status);
+
+    // Recording: consent required BEFORE — non-explicit attempt leaves it OFF.
+    res = await req(`${BASE}/admin/live-sessions/${p5Sid}/recording-consent?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    const p5Rec0 = db.prepare('SELECT * FROM live_session_recordings WHERE session_id = ?').get(p5Sid);
+    check('phase5: recording stays OFF without explicit opt-in',
+      res.status === 302 && p5Rec0.consent_given === 0, `status=${res.status} consent=${p5Rec0.consent_given}`);
+    res = await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}/recording-consent`, { method: 'POST', form: {} });
+    check('phase5: driver recording consent requires explicit checkbox (400 without)',
+      res.status === 400, 'status=' + res.status);
+    // Explicit opt-in: admin records driver consent.
+    res = await req(`${BASE}/admin/live-sessions/${p5Sid}/recording-consent?token=${ADMIN_TOKEN}`,
+      { method: 'POST', form: [['consent', 'yes'], ['by', 'P5 Dispatcher (driver agreed on call)']] });
+    const p5Rec1 = db.prepare('SELECT * FROM live_session_recordings WHERE session_id = ?').get(p5Sid);
+    check('phase5: explicit recording opt-in stored with 90-day retention expiry',
+      res.status === 302 && p5Rec1.consent_given === 1 && p5Rec1.consent_at > 0 &&
+      p5Rec1.retention_expires_at === p5Rec1.consent_at + 90 * 24 * 3600 * 1000,
+      `status=${res.status} consent=${p5Rec1.consent_given}`);
+    check('phase5: no media capture implemented (storage_ref stays NULL)',
+      p5Rec1.storage_ref === null);
+    check('phase5: recording access logged on consent change',
+      db.prepare('SELECT COUNT(*) n FROM live_recording_access_log WHERE recording_id = ?').get(p5Rec1.id).n >= 1);
+    check('phase5: recording_consent event appended',
+      db.prepare("SELECT COUNT(*) n FROM live_session_events WHERE session_id = ? AND event_type = 'recording_consent'").get(p5Sid).n === 1);
+
+    // Dispatcher starts the session -> LIVE.
+    res = await req(`${BASE}/admin/live-sessions/${p5Sid}/start?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    check('phase5: dispatcher start moves ACCEPTED->LIVE', res.status === 302, 'status=' + res.status);
+    const p5Live = db.prepare('SELECT status, started_at FROM live_sessions WHERE session_id = ?').get(p5Sid);
+    check('phase5: LIVE status + started_at set', p5Live.status === 'LIVE' && p5Live.started_at > 0);
+    res = await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}`, {});
+    const p5LiveHtml = await res.text();
+    check('phase5: LIVE session page still SIMULATED TEST, never claims media connected',
+      p5LiveHtml.includes('SIMULATED TEST (workflow state only, no media connection)') &&
+      p5LiveHtml.includes('SIMULATED TEST') &&
+      !/you are (now )?connected/i.test(p5LiveHtml) &&
+      !/provider-backed media\./i.test(p5LiveHtml));
+    check('phase5: honest audio fallback panel (no provider audio, use chat)',
+      p5LiveHtml.includes('provider-backed audio is also unavailable') &&
+      p5LiveHtml.includes('Use the <strong>chat below</strong>'));
+
+    // Command center counts the genuinely LIVE session (never faked).
+    res = await req(`${BASE}/admin/operations?token=${ADMIN_TOKEN}`, {});
+    check('phase5: command center live_video metric counts the real LIVE session',
+      res.status === 200 && p3Metric(await res.text(), 'live_video') === 1, 'status=' + res.status);
+
+    // End the session.
+    res = await req(`${BASE}/admin/live-sessions/${p5Sid}/end?token=${ADMIN_TOKEN}`,
+      { method: 'POST', form: [['note', 'P5 resolved']] });
+    check('phase5: dispatcher end moves LIVE->ENDED', res.status === 302, 'status=' + res.status);
+    const p5End = db.prepare('SELECT status, started_at, ended_at FROM live_sessions WHERE session_id = ?').get(p5Sid);
+    check('phase5: ENDED with timestamps',
+      p5End.status === 'ENDED' && p5End.started_at > 0 && p5End.ended_at >= p5End.started_at);
+    check('phase5: support request resolved on end',
+      db.prepare('SELECT status FROM live_support_requests WHERE session_id = ?').get(p5Sid).status === 'resolved');
+    check('phase5: participants stamped left when session ends',
+      db.prepare('SELECT COUNT(*) n FROM live_participants WHERE session_id = ? AND left_at IS NULL').get(p5Sid).n === 0 &&
+      db.prepare('SELECT COUNT(*) n FROM live_participants WHERE session_id = ?').get(p5Sid).n === 2);
+    res = await req(`${BASE}/d/${p5Token}/go-live/${p5Sid}/message`, { method: 'POST', form: [['message', 'after end']] });
+    check('phase5: chat rejected after ENDED (400)', res.status === 400, 'status=' + res.status);
+    res = await req(`${BASE}/admin/live-sessions/${p5Sid}/accept?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    check('phase5: invalid transition ENDED->ACCEPTED rejected (400)', res.status === 400, 'status=' + res.status);
+
+    // Decline path (driver B).
+    res = await req(`${BASE}/admin/live-sessions/${p5SidB}/decline?token=${ADMIN_TOKEN}`,
+      { method: 'POST', form: [['dispatcher_name', 'P5 Dispatcher'], ['note', 'P5 decline test']] });
+    check('phase5: dispatcher decline moves REQUESTED->DECLINED',
+      res.status === 302 && db.prepare('SELECT status FROM live_sessions WHERE session_id = ?').get(p5SidB).status === 'DECLINED',
+      'status=' + res.status);
+
+    // Missed path (driver C).
+    res = await req(`${BASE}/d/${p5TokenC}/go-live`, { method: 'POST', form: [['reason', 'vehicle']] });
+    const p5SidC = ((res.headers.get('location') || '').match(/TN-LIVE-\d+/) || [])[0];
+    res = await req(`${BASE}/admin/live-sessions/${p5SidC}/missed?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    check('phase5: dispatcher marks REQUESTED->MISSED',
+      res.status === 302 && db.prepare('SELECT status FROM live_sessions WHERE session_id = ?').get(p5SidC).status === 'MISSED',
+      'status=' + res.status);
+
+    // Live training events + content (admin-gated).
+    res = await req(`${BASE}/admin/live-training/events`, { method: 'POST', form: [['title', 'P5 Training Event']] });
+    check('phase5: /admin/live-training/events requires token (403 without)', res.status === 403, 'status=' + res.status);
+    res = await req(`${BASE}/admin/live-training/events?token=${ADMIN_TOKEN}`,
+      { method: 'POST', form: [['title', 'P5 Training Event'], ['description', 'P5 desc'], ['scheduled_at', '2026-10-01T10:00']] });
+    check('phase5: training event scheduled', res.status === 302, 'status=' + res.status);
+    const p5Ev = db.prepare("SELECT * FROM live_training_events WHERE title = 'P5 Training Event'").get();
+    check('phase5: training event stored, not provider-backed (NULL ref)',
+      !!p5Ev && p5Ev.provider_ref === null && p5Ev.status === 'scheduled');
+    res = await req(`${BASE}/admin/live-training/events/${p5Ev.event_id}/attendance?token=${ADMIN_TOKEN}`,
+      { method: 'POST', form: [['driver_id', String(p5DrvId(p5Email))]] });
+    check('phase5: training attendance recorded',
+      res.status === 302 && db.prepare('SELECT attended FROM live_training_attendance WHERE event_id = ?').get(p5Ev.event_id).attended === 1,
+      'status=' + res.status);
+    res = await req(`${BASE}/admin/live-training/content?token=${ADMIN_TOKEN}`,
+      { method: 'POST', form: [['title', 'P5 Training Video'], ['url', 'https://example.com/p5'], ['duration_mins', '12']] });
+    check('phase5: training content added',
+      res.status === 302 && db.prepare("SELECT COUNT(*) n FROM video_training_content WHERE title = 'P5 Training Video'").get().n === 1,
+      'status=' + res.status);
+    res = await req(`${BASE}/admin/live-training?token=${ADMIN_TOKEN}`, {});
+    const p5TrHtml = await res.text();
+    check('phase5: admin training page lists event + content, labeled not provider-backed',
+      res.status === 200 && p5TrHtml.includes('P5 Training Event') && p5TrHtml.includes('P5 Training Video') &&
+      p5TrHtml.includes('not provider-backed'), 'status=' + res.status);
+    res = await req(`${BASE}/d/${p5Token}/go-live`, {});
+    const p5GoTrainingHtml = await res.text();
+    check('phase5: driver go-live page shows upcoming training labeled SIMULATED TEST',
+      p5GoTrainingHtml.includes('P5 Training Event') && p5GoTrainingHtml.includes('SIMULATED TEST'));
+
+    // --- Cleanup: remove ALL Phase 5 test data ---
+    const p5DriverIds = [p5Email, p5EmailB, p5EmailC].map(p5DrvId);
+    const p5Sids = db.prepare(`SELECT session_id FROM live_sessions WHERE driver_id IN (${p5DriverIds.map(() => '?').join(',')})`)
+      .all(...p5DriverIds).map((r) => r.session_id);
+    for (const sid of p5Sids) {
+      for (const t of ['live_session_events', 'live_session_messages', 'live_participants']) {
+        db.prepare(`DELETE FROM "${t}" WHERE session_id = ?`).run(sid);
+      }
+      const rec = db.prepare('SELECT id FROM live_session_recordings WHERE session_id = ?').get(sid);
+      if (rec) db.prepare('DELETE FROM live_recording_access_log WHERE recording_id = ?').run(rec.id);
+      db.prepare('DELETE FROM live_session_recordings WHERE session_id = ?').run(sid);
+      db.prepare('DELETE FROM live_support_requests WHERE session_id = ?').run(sid);
+    }
+    if (p5Sids.length) db.prepare(`DELETE FROM live_sessions WHERE session_id IN (${p5Sids.map(() => '?').join(',')})`).run(...p5Sids);
+    const p5EvIds = db.prepare("SELECT event_id FROM live_training_events WHERE title LIKE 'P5 %'").all().map((r) => r.event_id);
+    if (p5EvIds.length) db.prepare(`DELETE FROM live_training_attendance WHERE event_id IN (${p5EvIds.map(() => '?').join(',')})`).run(...p5EvIds);
+    db.prepare("DELETE FROM live_training_events WHERE title LIKE 'P5 %'").run();
+    db.prepare("DELETE FROM video_training_content WHERE title LIKE 'P5 %'").run();
+    const p5NewQids = db.prepare('SELECT id FROM email_queue WHERE id > ?').all(p5qBefore).map((r) => r.id);
+    const p5NewOutbox = outboxFiles().filter((f) => !p5OutboxBefore.has(f));
+    for (const qid of p5NewQids) {
+      for (const f of p5NewOutbox) {
+        if (f.startsWith(`${qid}-`) && f.endsWith('.html')) fs.unlinkSync(path.join(OUTBOX, f));
+      }
+    }
+    if (p5NewQids.length) db.prepare(`DELETE FROM email_queue WHERE id IN (${p5NewQids.map(() => '?').join(',')})`).run(...p5NewQids);
+    for (const id of p5DriverIds) db.prepare('DELETE FROM driver_status_history WHERE driver_id = ?').run(id);
+    db.prepare("DELETE FROM drivers WHERE email LIKE 'p5-drv-%'").run();
+    check('phase5: test data cleaned up',
+      db.prepare("SELECT COUNT(*) n FROM live_sessions WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE 'p5-drv-%')").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM drivers WHERE email LIKE 'p5-drv-%'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM live_training_events WHERE title LIKE 'P5 %'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM video_training_content WHERE title LIKE 'P5 %'").get().n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM email_queue WHERE id > ? AND step = 'live-session-request'").get(p5qBefore).n === 0 &&
+      db.prepare("SELECT COUNT(*) n FROM live_session_events WHERE session_id LIKE 'TN-LIVE-%' AND session_id IN (" +
+        (p5Sids.length ? p5Sids.map(() => '?').join(',') : "''") + ")").get(...p5Sids).n === 0,
       'leftover rows');
 
   } finally {

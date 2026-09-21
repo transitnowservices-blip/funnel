@@ -5,7 +5,8 @@
  * existing Phase-L operations dashboard at GET /admin/operations.
  *
  * All numbers come from live tables via lib/command.js. The live-video card
- * is honestly labeled "coming in Phase 5" and is never faked.
+ * counts sessions genuinely in LIVE status and is never faked; the card note
+ * states plainly that video media requires a connected provider.
  */
 const { esc } = require('./layout');
 const command = require('../lib/command');

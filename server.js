@@ -55,6 +55,8 @@ const territories = require('./lib/territories');
 const territoryViews = require('./views/territories');
 const commandLib = require('./lib/command');
 const commandViews = require('./views/command');
+// Phase 5: live video support — provider abstraction (spec section 15).
+const video = require('./lib/video');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1374,6 +1376,8 @@ function publicRateLimit({ windowMs = 10 * 60 * 1000, max = 60 } = {}) {
   };
 }
 const growLimiter = publicRateLimit();
+// Phase 5: live-session requests (driver-token scoped, still rate-limited).
+const liveLimiter = publicRateLimit({ windowMs: 10 * 60 * 1000, max: 30 });
 
 // --- /grow landing + 13-step application ---
 app.get('/grow', (req, res) => {
@@ -1897,7 +1901,151 @@ app.post('/admin/tickets/:ticketId/status', adminAuth, ah(async (req, res) => {
   res.redirect(`/admin/tickets/${encodeURIComponent(req.params.ticketId)}`);
 }));
 
+
+// --- Phase 5: admin live video session queue --------------------------------------
+// All routes carry adminAuth explicitly (registered before app.use('/admin')).
+// Honesty: the queue/detail never present a session as a live/real-time/
+// connected media call; unconfigured-provider state is labeled SIMULATED TEST.
+async function adminSessionProps(sessionId) {
+  const s = await drivers.getSession(sessionId);
+  if (!s) return null;
+  const [driver, events, messages, participants, recording] = await Promise.all([
+    s.driver_id ? drivers.getDriverById(s.driver_id) : null,
+    drivers.getSessionEvents(sessionId),
+    drivers.getSessionMessages(sessionId),
+    drivers.getSessionParticipants(sessionId),
+    drivers.getSessionRecording(sessionId),
+  ]);
+  const accessLog = recording ? await drivers.getRecordingAccessLog(recording.id) : [];
+  return { session: s, driver, events, messages, participants, recording, accessLog, provider: video.providerStatus() };
+}
+
+function renderAdminSession(res, props, error) {
+  if (error) res.status(400);
+  res.send(adminViews.adminLayout('Session ' + props.session.session_id,
+    (error ? `<div class="card" style="border:1px solid #b91c1c"><p><strong>Error:</strong> ${esc(error)}</p></div>` : '') +
+    driverAdminViews.adminLiveSessionHtml(props)));
+}
+
+app.get('/admin/live-sessions', adminAuth, ah(async (req, res) => {
+  const statusFilter = drivers.SESSION_STATUSES.includes(req.query.status) ? req.query.status : null;
+  const list = await drivers.listSessions({ status: statusFilter });
+  const ids = [...new Set(list.map((x) => x.driver_id).filter(Boolean))];
+  const driversById = {};
+  for (const id of ids) driversById[id] = await drivers.getDriverById(id);
+  res.send(adminViews.adminLayout('Live video sessions',
+    driverAdminViews.liveSessionsListHtml({ list, statusFilter, driversById, provider: video.providerStatus() })));
+}));
+
+app.get('/admin/live-sessions/:sessionId', adminAuth, ah(async (req, res) => {
+  const props = await adminSessionProps(req.params.sessionId);
+  if (!props) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Session not found.</p>'));
+  renderAdminSession(res, props, null);
+}));
+
+async function adminSessionAction(req, res, fn) {
+  const props = await adminSessionProps(req.params.sessionId);
+  if (!props) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Session not found.</p>'));
+  try {
+    await fn(props.session);
+  } catch (err) {
+    return renderAdminSession(res, await adminSessionProps(req.params.sessionId), err.message);
+  }
+  res.redirect(`/admin/live-sessions/${encodeURIComponent(req.params.sessionId)}`);
+}
+
+app.post('/admin/live-sessions/:sessionId/accept', adminAuth, ah(async (req, res) => {
+  await adminSessionAction(req, res, (sess) =>
+    drivers.acceptSession(sess.session_id, req.body.dispatcher_name, req.body.note));
+}));
+
+app.post('/admin/live-sessions/:sessionId/decline', adminAuth, ah(async (req, res) => {
+  await adminSessionAction(req, res, (sess) =>
+    drivers.declineSession(sess.session_id, req.body.dispatcher_name, req.body.note));
+}));
+
+app.post('/admin/live-sessions/:sessionId/missed', adminAuth, ah(async (req, res) => {
+  await adminSessionAction(req, res, (sess) =>
+    drivers.markSessionMissed(sess.session_id, 'dispatcher', req.body.note));
+}));
+
+app.post('/admin/live-sessions/:sessionId/start', adminAuth, ah(async (req, res) => {
+  await adminSessionAction(req, res, (sess) => drivers.startSession(sess.session_id, 'dispatcher'));
+}));
+
+app.post('/admin/live-sessions/:sessionId/end', adminAuth, ah(async (req, res) => {
+  await adminSessionAction(req, res, (sess) =>
+    drivers.endSession(sess.session_id, 'dispatcher', req.body.note || 'Ended by operations.'));
+}));
+
+app.post('/admin/live-sessions/:sessionId/message', adminAuth, ah(async (req, res) => {
+  await adminSessionAction(req, res, (sess) =>
+    drivers.addSessionMessage({ sessionId: sess.session_id, senderType: 'dispatcher', senderId: null, message: req.body.message }));
+}));
+
+app.post('/admin/live-sessions/:sessionId/recording-consent', adminAuth, ah(async (req, res) => {
+  await adminSessionAction(req, res, (sess) =>
+    drivers.setRecordingConsent(sess.session_id, {
+      // Explicit opt-in only: anything but an explicit "yes" leaves it OFF.
+      consented: req.body.consent === 'yes',
+      by: 'dispatcher:' + (String(req.body.by || '').trim() || 'operations'),
+    }));
+}));
+
+// --- Phase 5: admin live training events + content library -------------------------
+app.get('/admin/live-training', adminAuth, ah(async (req, res) => {
+  const [events, content] = await Promise.all([
+    drivers.listTrainingEvents({}),
+    drivers.listTrainingContent(),
+  ]);
+  res.send(adminViews.adminLayout('Live training', driverAdminViews.liveTrainingAdminHtml({ events, content })));
+}));
+
+app.post('/admin/live-training/events', adminAuth, ah(async (req, res) => {
+  try {
+    let scheduledAt = null;
+    const raw = String(req.body.scheduled_at || '').trim();
+    if (raw) {
+      const t = new Date(raw).getTime();
+      if (!Number.isFinite(t)) throw new Error('Invalid date/time.');
+      scheduledAt = t;
+    }
+    await drivers.createTrainingEvent({
+      title: req.body.title, description: req.body.description,
+      scheduledAt, createdBy: 'admin',
+    });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${esc(err.message)}</p><p><a href="/admin/live-training">&larr; Back</a></p>`));
+  }
+  res.redirect('/admin/live-training');
+}));
+
+app.post('/admin/live-training/events/:eventId/attendance', adminAuth, ah(async (req, res) => {
+  try {
+    const driverId = Number(req.body.driver_id);
+    if (!Number.isFinite(driverId)) throw new Error('Choose a driver.');
+    await drivers.recordTrainingAttendance(req.params.eventId, driverId, req.body.attended !== '0');
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${esc(err.message)}</p><p><a href="/admin/live-training">&larr; Back</a></p>`));
+  }
+  res.redirect('/admin/live-training');
+}));
+
+app.post('/admin/live-training/content', adminAuth, ah(async (req, res) => {
+  try {
+    const mins = req.body.duration_mins ? Number(req.body.duration_mins) : null;
+    await drivers.createTrainingContent({
+      title: req.body.title, description: req.body.description, url: req.body.url,
+      durationSecs: mins && mins > 0 ? Math.round(mins * 60) : null,
+    });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error', `<p>${esc(err.message)}</p><p><a href="/admin/live-training">&larr; Back</a></p>`));
+  }
+  res.redirect('/admin/live-training');
+}));
+
 // --- Phase J: admin community moderation ------------------------------------------
+
 app.get('/admin/community', adminAuth, ah(async (req, res) => {
   const [posts, reports] = await Promise.all([
     drivers.listCommunityPosts({ includeHidden: true }),
@@ -2698,7 +2846,164 @@ app.post('/d/:token/support/:ticketId/reply', requireDriver, requireDriverTicket
   res.redirect(`/d/${req.driver.access_token}/support/${encodeURIComponent(req.ticket.ticket_id)}`);
 }));
 
+
+// --- Phase 5: live video support — driver routes --------------------------------
+// Token-scoped (requireDriver), like the rest of the driver dashboard. Media
+// honesty rules (docs/VIDEO_SPEC.md) are absolute on every surface here.
+function requireDriverSession(req, res, next) {
+  drivers.getSession(req.params.sessionId).then((sess) => {
+    if (!sess || Number(sess.driver_id) !== Number(req.driver.id)) {
+      res.status(404);
+      return page(res, 'Not found', '<section><h1>Session not found</h1></section>', config.getSite());
+    }
+    req.liveSession = sess;
+    next();
+  }).catch(next);
+}
+
+async function liveSessionProps(driver, sessionId) {
+  const s = await drivers.getSession(sessionId);
+  const [events, messages, participants, recording] = await Promise.all([
+    drivers.getSessionEvents(sessionId),
+    drivers.getSessionMessages(sessionId),
+    drivers.getSessionParticipants(sessionId),
+    drivers.getSessionRecording(sessionId),
+  ]);
+  return { driver, session: s, events, messages, participants, recording, provider: video.providerStatus() };
+}
+
+function renderLiveSessionPage(res, props, error) {
+  const site = config.getSite();
+  page(res, 'Session ' + props.session.session_id,
+    driverViews.liveSessionPage({ ...props, error: error || null }), site);
+}
+
+app.get('/d/:token/go-live', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const [activeSession, sessions, trainingEvents] = await Promise.all([
+    drivers.getActiveSessionForDriver(req.driver.id),
+    drivers.listSessions({ driverId: req.driver.id }),
+    drivers.listTrainingEvents({ upcomingOnly: true }),
+  ]);
+  page(res, 'Go live with operations', driverViews.goLivePage({
+    driver: req.driver, activeSession, sessions,
+    provider: video.providerStatus(), trainingEvents, error: null, form: null,
+  }), site);
+}));
+
+async function renderGoLivePage(res, driver, error, form) {
+  const site = config.getSite();
+  const [activeSession, sessions, trainingEvents] = await Promise.all([
+    drivers.getActiveSessionForDriver(driver.id),
+    drivers.listSessions({ driverId: driver.id }),
+    drivers.listTrainingEvents({ upcomingOnly: true }),
+  ]);
+  page(res, 'Go live with operations', driverViews.goLivePage({
+    driver, activeSession, sessions,
+    provider: video.providerStatus(), trainingEvents, error, form,
+  }), site);
+}
+
+app.post('/d/:token/go-live', requireDriver, liveLimiter, ah(async (req, res) => {
+  const driver = req.driver;
+  const b = req.body || {};
+  try {
+    const existing = await drivers.getActiveSessionForDriver(driver.id);
+    if (existing) throw new Error('You already have an open session (' + existing.session_id + '). End it before requesting a new one.');
+    const session = await drivers.requestLiveSession({
+      driverId: driver.id,
+      reason: b.reason,
+      priority: b.priority,
+      notes: b.notes,
+      shareLocation: b.share_location === 'on' ? 1 : 0,
+    });
+    // Record the driver's stated device preferences as a timeline note.
+    // Preferences only — nothing activates without explicit confirmation.
+    const prefs = `Device preferences for this session: camera ${b.want_camera === 'on' ? 'wanted' : 'not wanted'}, ` +
+      `microphone ${b.want_mic === 'on' ? 'wanted' : 'not wanted'}. Nothing activates automatically.`;
+    await drivers.logSessionEvent(session.session_id, 'note', 'driver', prefs);
+    res.redirect(`/d/${driver.access_token}/go-live/${encodeURIComponent(session.session_id)}`);
+  } catch (err) {
+    res.status(400);
+    await renderGoLivePage(res, driver, err.message, {
+      reason: b.reason, priority: b.priority, notes: b.notes,
+      want_camera: b.want_camera === 'on', want_mic: b.want_mic === 'on',
+      share_location: b.share_location === 'on',
+    });
+  }
+}));
+
+app.get('/d/:token/go-live/:sessionId', requireDriver, requireDriverSession, ah(async (req, res) => {
+  renderLiveSessionPage(res, await liveSessionProps(req.driver, req.liveSession.session_id), null);
+}));
+
+app.post('/d/:token/go-live/:sessionId/message', requireDriver, requireDriverSession, liveLimiter, ah(async (req, res) => {
+  const props = await liveSessionProps(req.driver, req.liveSession.session_id);
+  try {
+    await drivers.addSessionMessage({
+      sessionId: req.liveSession.session_id, senderType: 'driver',
+      senderId: req.driver.id, message: req.body.message,
+    });
+    res.redirect(`/d/${req.driver.access_token}/go-live/${encodeURIComponent(req.liveSession.session_id)}`);
+  } catch (err) {
+    res.status(400);
+    renderLiveSessionPage(res, await liveSessionProps(req.driver, req.liveSession.session_id), err.message);
+  }
+}));
+
+app.post('/d/:token/go-live/:sessionId/consent', requireDriver, requireDriverSession, liveLimiter, ah(async (req, res) => {
+  // Explicit driver confirmation BEFORE their camera/mic may activate.
+  try {
+    await drivers.recordDriverMediaConsent(req.liveSession.session_id, req.driver.id, {
+      camera: req.body.camera === 'on',
+      mic: req.body.mic === 'on',
+    });
+    res.redirect(`/d/${req.driver.access_token}/go-live/${encodeURIComponent(req.liveSession.session_id)}`);
+  } catch (err) {
+    res.status(400);
+    renderLiveSessionPage(res, await liveSessionProps(req.driver, req.liveSession.session_id), err.message);
+  }
+}));
+
+app.post('/d/:token/go-live/:sessionId/location', requireDriver, requireDriverSession, liveLimiter, ah(async (req, res) => {
+  try {
+    await drivers.setLocationSharing(req.liveSession.session_id, req.driver.id, req.body.on === '1');
+    res.redirect(`/d/${req.driver.access_token}/go-live/${encodeURIComponent(req.liveSession.session_id)}`);
+  } catch (err) {
+    res.status(400);
+    renderLiveSessionPage(res, await liveSessionProps(req.driver, req.liveSession.session_id), err.message);
+  }
+}));
+
+app.post('/d/:token/go-live/:sessionId/recording-consent', requireDriver, requireDriverSession, liveLimiter, ah(async (req, res) => {
+  // Explicit opt-in BEFORE any recording may start. Anything but an explicit
+  // "yes" leaves recording OFF.
+  try {
+    if (req.body.consent !== 'yes') throw new Error('Recording stays off unless you explicitly consent.');
+    await drivers.setRecordingConsent(req.liveSession.session_id, {
+      consented: true, by: 'driver:' + req.driver.full_name,
+    });
+    res.redirect(`/d/${req.driver.access_token}/go-live/${encodeURIComponent(req.liveSession.session_id)}`);
+  } catch (err) {
+    res.status(400);
+    renderLiveSessionPage(res, await liveSessionProps(req.driver, req.liveSession.session_id), err.message);
+  }
+}));
+
+app.post('/d/:token/go-live/:sessionId/end', requireDriver, requireDriverSession, liveLimiter, ah(async (req, res) => {
+  try {
+    const s = req.liveSession;
+    if (!['ACCEPTED', 'LIVE'].includes(s.status)) throw new Error('Only an accepted or live session can be ended.');
+    await drivers.endSession(s.session_id, 'driver', 'Ended by driver.');
+    res.redirect(`/d/${req.driver.access_token}/go-live/${encodeURIComponent(s.session_id)}`);
+  } catch (err) {
+    res.status(400);
+    renderLiveSessionPage(res, await liveSessionProps(req.driver, req.liveSession.session_id), err.message);
+  }
+}));
+
 // --- Phase J: private driver community -------------------------------------------
+
 async function communityAuthors(items) {
   const ids = [...new Set(items.map((i) => i.driver_id).filter(Boolean))];
   const map = {};

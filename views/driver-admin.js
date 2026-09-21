@@ -687,3 +687,183 @@ function adminPackageHtml({ pkg, driver, route, events, exceptions }) {
 </div>
 ${exHtml ? `<h3>Exceptions</h3>${exHtml}` : ''}`;
 }
+
+// --- Phase 5: live video support — admin queue + session detail ------------------
+// HONESTY IS ABSOLUTE: the queue/detail must never present a session as a
+// live/real-time/connected media call. With no provider configured, every
+// surface shows VIDEO PROVIDER REQUIRED and labels workflows SIMULATED TEST.
+function liveSessionStatusBadge(status, provider) {
+  const label = drivers.SESSION_STATUS_LABELS[status] || status;
+  // Provider-aware: the DB enum stays LIVE, but the display must not read as a
+  // connected media call until a provider-backed end-to-end call succeeds.
+  const display = (status === 'LIVE' && !(provider && provider.mediaVerified))
+    ? `${label} — SIMULATED TEST (workflow state only, no media connection)`
+    : label;
+  return `<span class="status-badge status-${esc(String(status).toLowerCase())}">${esc(display)}</span>`;
+}
+
+function adminProviderNoteHtml(provider) {
+  if (provider.configured) {
+    // Credentials alone do not prove a media connection: say exactly that.
+    return `<div class="card highlight-card"><p><strong>Video provider credentials configured:</strong> ${esc(provider.providerName)}.
+    Media is <strong>not verified</strong> — no end-to-end media call has succeeded, so sessions remain in
+    <strong>SIMULATED TEST</strong> mode. No real-time video, audio, or media connection is claimed.</p></div>`;
+  }
+  return `<div class="card" style="border:2px solid #b45309;background:#fffbeb" role="alert">
+    <p><strong>VIDEO PROVIDER REQUIRED</strong> — no video provider is connected, so sessions run in
+    <strong>SIMULATED TEST</strong> mode. The request/accept/record workflow below is real; no real-time
+    video, audio, or media connection exists or is claimed.</p>
+  </div>`;
+}
+
+function liveSessionsListHtml({ list, statusFilter, driversById, provider }) {
+  const tabs = drivers.SESSION_STATUSES.map((s) => {
+    const active = statusFilter === s ? ' class="active"' : '';
+    return `<a${active} href="/admin/live-sessions?status=${s}">${esc(drivers.SESSION_STATUS_LABELS[s])}</a>`;
+  }).join('');
+  const allActive = !statusFilter ? ' class="active"' : '';
+  const rows = (list || [])
+    .map((s) => {
+      const d = driversById[s.driver_id];
+      const hot = s.status === 'REQUESTED' && s.priority === 'URGENT';
+      return `<tr${hot ? ' style="background:#fff3cd"' : ''}>
+        <td><a href="/admin/live-sessions/${esc(s.session_id)}"><strong>${esc(s.session_id)}</strong></a></td>
+        <td>${d ? `<a href="/admin/drivers/${d.id}">${esc(d.full_name)}</a>` : '—'}</td>
+        <td>${esc(drivers.SESSION_REASON_LABELS[s.reason] || s.reason || '—')}</td>
+        <td>${s.priority === 'URGENT' ? '<strong>URGENT</strong>' : esc(s.priority || 'NORMAL')}</td>
+        <td>${liveSessionStatusBadge(s.status, provider)}${provider.configured ? '' : ' <span class="muted">SIMULATED TEST</span>'}</td>
+        <td>${fmtTs(s.created_at)}</td>
+      </tr>`;
+    })
+    .join('');
+  return `
+<h2>Live video sessions</h2>
+${adminProviderNoteHtml(provider)}
+<div class="pipeline-nav"><a${allActive} href="/admin/live-sessions">All</a>${tabs}</div>
+<table class="admin-table">
+<thead><tr><th>Session</th><th>Driver</th><th>Reason</th><th>Priority</th><th>Status</th><th>Requested</th></tr></thead>
+<tbody>${rows || '<tr><td colspan="6">No sessions.</td></tr>'}</tbody>
+</table>
+<p><a class="btn btn-small" href="/admin/live-training">Live training events &amp; content &rarr;</a></p>`;
+}
+
+function adminLiveSessionHtml({ session: s, driver, events, messages, participants, recording, accessLog, provider }) {
+  const rec = recording || {};
+  const thread = (messages || [])
+    .map((m) => `<div class="card"><p><strong>${m.sender_type === 'driver' ? 'Driver' : 'Operations'}</strong>
+      <span class="ts">${fmtTs(m.ts)}</span></p><p>${esc(m.message)}</p></div>`)
+    .join('');
+  const timeline = (events || [])
+    .map((e) => `<li><strong>${esc(e.event_type)}</strong> — ${esc(e.details || '')}
+      <span class="muted">(${esc(e.actor || '')} · ${fmtTs(e.ts)})</span></li>`)
+    .join('');
+  const parts = (participants || [])
+    .map((p) => `<li>${p.role === 'driver' ? 'Driver' : 'Operations' + (p.staff_name ? ' (' + esc(p.staff_name) + ')' : '')}
+      — joined ${fmtTs(p.joined_at)}${p.left_at ? ', left ' + fmtTs(p.left_at) : ''}</li>`)
+    .join('');
+  const accessRows = (accessLog || [])
+    .map((a) => `<tr><td>${fmtTs(a.accessed_at)}</td><td>${esc(a.accessed_by)}</td><td>${esc(a.purpose)}</td></tr>`)
+    .join('');
+  const open = ['REQUESTED', 'ACCEPTED', 'LIVE'].includes(s.status);
+  const actionBtn = (action, label, extra = '') => `
+    <form method="POST" action="/admin/live-sessions/${esc(s.session_id)}/${action}" class="form" style="display:inline-block;margin-right:8px">
+      ${action === 'accept' || action === 'decline' ? '<label>Dispatcher name <input type="text" name="dispatcher_name" placeholder="Your name" style="max-width:180px"></label>' : ''}
+      ${action === 'decline' || action === 'end' ? '<label>Note <input type="text" name="note" style="max-width:220px"></label>' : ''}
+      ${extra}
+      <button type="submit" class="btn btn-small">${esc(label)}</button>
+    </form>`;
+  return `
+<p><a href="/admin/live-sessions">&larr; Back to live sessions</a></p>
+<h2>${esc(s.session_id)} ${liveSessionStatusBadge(s.status, provider)}</h2>
+${adminProviderNoteHtml(provider)}
+<div class="card">
+  <h3>Session</h3>
+  <div><strong>Driver:</strong> ${driver ? `<a href="/admin/drivers/${driver.id}">${esc(driver.full_name)}</a> (${esc(driver.email)})` : '—'}</div>
+  <div><strong>Reason:</strong> ${esc(drivers.SESSION_REASON_LABELS[s.reason] || s.reason || '—')}</div>
+  <div><strong>Priority:</strong> ${s.priority === 'URGENT' ? '<strong>URGENT</strong>' : esc(s.priority || 'NORMAL')}</div>
+  <div><strong>Dispatcher:</strong> ${esc(s.dispatcher_name || '—')}</div>
+  <div><strong>Route:</strong> ${s.route_id ? esc(String(s.route_id)) : '—'} · <strong>Contract:</strong> ${s.contract_id ? esc(String(s.contract_id)) : '—'}</div>
+  <div><strong>Requested:</strong> ${fmtTs(s.created_at)}${s.started_at ? ` · <strong>Started:</strong> ${fmtTs(s.started_at)}` : ''}${s.ended_at ? ` · <strong>Ended:</strong> ${fmtTs(s.ended_at)}` : ''}</div>
+  <div><strong>Driver media consent:</strong> camera ${s.consent_camera ? 'ON' : 'OFF'} · mic ${s.consent_mic ? 'ON' : 'OFF'} · location ${s.share_location ? 'ON (voluntary)' : 'OFF'}</div>
+  <div><strong>Provider reference:</strong> ${s.provider_ref ? esc(s.provider_ref) : '<span class="muted">none — no provider-backed media (never faked)</span>'}</div>
+  ${s.notes ? `<div><strong>Driver notes:</strong> ${esc(s.notes)}</div>` : ''}
+</div>
+${open ? `<div class="card"><h3>Actions</h3>
+  ${s.status === 'REQUESTED' ? actionBtn('accept', 'Accept session') + actionBtn('decline', 'Decline') + actionBtn('missed', 'Mark missed') : ''}
+  ${s.status === 'ACCEPTED' ? actionBtn('start', 'Start session (go LIVE)') + actionBtn('end', 'End session') + actionBtn('decline', 'Decline') : ''}
+  ${s.status === 'LIVE' ? actionBtn('end', 'End session') : ''}
+  <p class="microcopy">Only valid lifecycle transitions are allowed; invalid ones are rejected.</p>
+</div>` : ''}
+<div class="card">
+  <h3>Recording</h3>
+  <p><strong>Status:</strong> ${rec.consent_given ? 'CONSENTED' : 'OFF (default)'}</p>
+  ${rec.consent_given ? `<p class="microcopy">Consented by ${esc(rec.consent_by || '—')} at ${fmtTs(rec.consent_at)}.
+    Retention expires ${fmtTs(rec.retention_expires_at)} (90 days).
+    <strong>No media capture is implemented — nothing is being recorded.</strong></p>` : ''}
+  ${open ? `<form method="POST" action="/admin/live-sessions/${esc(s.session_id)}/recording-consent" class="form">
+    <label class="checkbox"><input type="checkbox" name="consent" value="yes">
+      <strong>Driver consents</strong> to this session being recorded (explicit opt-in, recorded before any recording may start).</label>
+    <label>Recorded by <input type="text" name="by" placeholder="Staff name" style="max-width:200px"></label>
+    <button type="submit" class="btn btn-small">Save recording consent</button>
+  </form>` : ''}
+  <h4>Recording access log</h4>
+  <table class="admin-table"><thead><tr><th>When</th><th>Accessed by</th><th>Purpose</th></tr></thead>
+  <tbody>${accessRows || '<tr><td colspan="3">No recorded accesses.</td></tr>'}</tbody></table>
+</div>
+<h3>Chat</h3>
+${thread || '<div class="card"><p>No messages yet.</p></div>'}
+${open ? `<div class="card"><h3>Message the driver</h3>
+  <form method="POST" action="/admin/live-sessions/${esc(s.session_id)}/message" class="form">
+    <label>Message <textarea name="message" rows="2" required maxlength="2000"></textarea></label>
+    <button type="submit" class="btn">Send as operations</button>
+  </form></div>` : ''}
+<h3>Session record (append-only)</h3>
+<ul class="timeline">${timeline || '<li>No events.</li>'}</ul>
+${parts ? `<h3>Participants</h3><ul>${parts}</ul>` : ''}`;
+}
+
+function liveTrainingAdminHtml({ events, content }) {
+  const evRows = (events || [])
+    .map((e) => `<tr><td><strong>${esc(e.event_id)}</strong><br><span class="muted">${esc(e.title)}</span></td>
+      <td>${e.scheduled_at ? fmtTs(e.scheduled_at) : 'TBA'}</td>
+      <td>${esc(e.status || 'scheduled')}</td>
+      <td>${e.provider_ref ? esc(e.provider_ref) : '<span class="muted">not provider-backed</span>'}</td></tr>`)
+    .join('');
+  const contentRows = (content || [])
+    .map((c) => `<tr><td><strong>${esc(c.title)}</strong><br><span class="muted">${esc(c.description || '')}</span></td>
+      <td>${c.url ? `<a href="${esc(c.url)}" target="_blank" rel="noopener">link</a>` : '—'}</td>
+      <td>${c.duration_secs ? Math.round(c.duration_secs / 60) + ' min' : '—'}</td></tr>`)
+    .join('');
+  return `
+<p><a href="/admin/live-sessions">&larr; Back to live sessions</a></p>
+<h2>Live training</h2>
+<p class="microcopy">Training events are provider-backed only when a video provider is configured; otherwise they are clearly labeled as not provider-backed.</p>
+<div class="card"><h3>Schedule a training event</h3>
+  <form method="POST" action="/admin/live-training/events" class="form">
+    <label>Title * <input type="text" name="title" required maxlength="200"></label>
+    <label>Description <textarea name="description" rows="2" maxlength="2000"></textarea></label>
+    <label>Scheduled at <input type="datetime-local" name="scheduled_at"></label>
+    <button type="submit" class="btn">Schedule event</button>
+  </form></div>
+<h3>Scheduled events</h3>
+<table class="admin-table"><thead><tr><th>Event</th><th>When</th><th>Status</th><th>Provider</th></tr></thead>
+<tbody>${evRows || '<tr><td colspan="4">No training events.</td></tr>'}</tbody></table>
+<div class="card"><h3>Add training content</h3>
+  <form method="POST" action="/admin/live-training/content" class="form">
+    <label>Title * <input type="text" name="title" required maxlength="200"></label>
+    <label>Description <textarea name="description" rows="2" maxlength="2000"></textarea></label>
+    <label>URL <input type="url" name="url" maxlength="1000" placeholder="https://…"></label>
+    <label>Duration (minutes) <input type="number" name="duration_mins" min="0" max="10000"></label>
+    <button type="submit" class="btn">Add content</button>
+  </form></div>
+<h3>Training content library</h3>
+<table class="admin-table"><thead><tr><th>Title</th><th>Link</th><th>Length</th></tr></thead>
+<tbody>${contentRows || '<tr><td colspan="3">No content yet.</td></tr>'}</tbody></table>`;
+}
+
+// Phase 5 exports (same additive pattern as the Phase L section above).
+Object.assign(module.exports, {
+  liveSessionsListHtml,
+  adminLiveSessionHtml,
+  liveTrainingAdminHtml,
+});

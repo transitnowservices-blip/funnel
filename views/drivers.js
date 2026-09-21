@@ -161,6 +161,7 @@ function dashboardPage({ site, driver, dashUrl }) {
     ['Packages', '/d/' + driver.access_token + '/packages', 'Packages assigned to you.', true],
     ['Scan a package', '/d/' + driver.access_token + '/scan', 'Scan barcodes at pickup and delivery.', true],
     ['Support', '/d/' + driver.access_token + '/support', 'Get help or report an urgent issue.', true],
+    ['Go live with operations', '/d/' + driver.access_token + '/go-live', 'Request a live video/audio session with operations.', true],
     ['Community', '/d/' + driver.access_token + '/community', 'Connect with other TransitNow drivers.', true],
     ['My plan', '/d/' + driver.access_token + '/plan', 'Your service plan and billing.', true],
   ];
@@ -644,7 +645,7 @@ function planPage({ driver, plans, settings, currentPlanId, pendingRequest, hist
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, planPage, selectField, textField, checkboxGroup, driverApplyPage, driverApplyDonePage };
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, planPage, selectField, textField, checkboxGroup, driverApplyPage, driverApplyDonePage, goLivePage, liveSessionPage, providerBannerHtml };
 
 // --- Phase 2: extended driver application (/drivers/apply/:token) -----------------
 // Token-scoped: operations shares this link with a specific candidate once an
@@ -714,5 +715,278 @@ function driverApplyDonePage({ site, driver, dashUrl }) {
   </div>
   <a class="btn btn-large" href="${esc(dashUrl)}">OPEN MY DASHBOARD &rarr;</a>
   <p class="contact-line">Questions? Call ${esc(site.phone || '')} or email ${esc(site.email || '')}.</p>
+</section>`;
+}
+
+// --- Phase 5: live video support (spec section 15, docs/VIDEO_SPEC.md) ------------
+// HONESTY IS ABSOLUTE: nothing here may claim a live/real-time/connected media
+// call unless a genuine provider-backed media connection exists. With no
+// provider configured (always true until VIDEO_PROVIDER credentials are set),
+// every surface shows VIDEO PROVIDER REQUIRED and labels workflows
+// SIMULATED TEST.
+function fmtLiveTs(ts) {
+  if (!ts) return '—';
+  return new Date(Number(ts)).toLocaleString();
+}
+
+function providerBannerHtml(provider) {
+  if (provider.configured) {
+    // Credentials alone do not prove a media connection: say exactly that.
+    return `<div class="card highlight-card">
+      <p><strong>Video provider credentials configured:</strong> ${esc(provider.providerName)}.
+      Media is <strong>not verified</strong> — no end-to-end media call has succeeded, so this session
+      still runs in <strong>SIMULATED TEST</strong> mode. No real-time video, audio, or media connection is claimed.</p>
+    </div>`;
+  }
+  return `<div class="card" style="border:2px solid #b45309;background:#fffbeb" role="alert">
+    <h2 style="margin-top:0;color:#92400e">VIDEO PROVIDER REQUIRED</h2>
+    <p><strong>Live video calls need a real video provider connected on the TransitNow side.</strong>
+    No provider is connected right now, so this page runs in <strong>SIMULATED TEST</strong> mode:
+    you can submit a session request and walk through the accept/record steps, but
+    <strong>no real-time video, audio, or media connection will happen.</strong></p>
+    <p class="microcopy">A provider is connected only when the VIDEO_PROVIDER credentials are configured
+    on the server and a genuine end-to-end media call succeeds. Until then, nothing here is
+    live, real-time, instant, or connected.</p>
+  </div>`;
+}
+
+function sessionStatusLine(s) {
+  return `${esc(drivers.SESSION_STATUS_LABELS[s.status] || s.status)} · ${esc(drivers.SESSION_REASON_LABELS[s.reason] || s.reason || '')} · Priority ${esc(s.priority || 'NORMAL')}`;
+}
+
+/**
+ * Provider-aware status label. The DB enum stays LIVE (spec), but the display
+ * must never let "Live" read as a connected media call: until a provider-backed
+ * end-to-end call has succeeded (mediaVerified), LIVE is labeled as a workflow
+ * state in SIMULATED TEST.
+ */
+function liveStatusLabel(s, provider) {
+  const base = drivers.SESSION_STATUS_LABELS[s.status] || s.status;
+  if (s.status === 'LIVE' && !(provider && provider.mediaVerified)) {
+    return `${base} — SIMULATED TEST (workflow state only, no media connection)`;
+  }
+  return base;
+}
+
+function goLivePage({ driver, activeSession, sessions, provider, trainingEvents, error, form }) {
+  const f = form || {};
+  const reasonOpts = drivers.SESSION_REASONS.map(
+    (r) => `<option value="${r}"${f.reason === r ? ' selected' : ''}>${esc(drivers.SESSION_REASON_LABELS[r])}</option>`
+  ).join('');
+  const priOpts = drivers.SESSION_PRIORITIES.map(
+    (p) => `<option value="${p}"${(f.priority || 'NORMAL') === p ? ' selected' : ''}>${esc(drivers.SESSION_PRIORITY_LABELS[p])}</option>`
+  ).join('');
+  const active = activeSession
+    ? `<div class="card highlight-card">
+        <h2>Your open session</h2>
+        <p><strong>${esc(activeSession.session_id)}</strong> — ${sessionStatusLine(activeSession)}</p>
+        <p><a class="btn btn-large" href="/d/${esc(driver.access_token)}/go-live/${esc(activeSession.session_id)}">OPEN SESSION &rarr;</a></p>
+      </div>`
+    : '';
+  const past = (sessions || []).filter((s) => !activeSession || s.session_id !== activeSession.session_id);
+  const pastRows = past.slice(0, 10).map(
+    (s) => `<a class="card" href="/d/${esc(driver.access_token)}/go-live/${esc(s.session_id)}">
+      <h3>${esc(s.session_id)} — ${esc(liveStatusLabel(s, provider))}</h3>
+      <p>${esc(drivers.SESSION_REASON_LABELS[s.reason] || '')} · ${fmtLiveTs(s.created_at)}</p>
+    </a>`
+  ).join('');
+  const training = (trainingEvents || []).map(
+    (e) => `<div class="card"><h3>${esc(e.title)}</h3>
+      <p>${esc(e.description || '')}</p>
+      <p class="microcopy">${e.scheduled_at ? 'Scheduled: ' + fmtLiveTs(e.scheduled_at) : 'Time to be announced'}
+      ${provider.configured ? '' : ' · <strong>SIMULATED TEST</strong> — no video provider connected, so this is not a provider-backed live event.'}</p>
+    </div>`
+  ).join('');
+  return `
+<section>
+  <h1>Go live with operations</h1>
+  <p class="subhead">Request a live video/audio support session with TransitNow operations.</p>
+  ${providerBannerHtml(provider)}
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  ${active}
+  <div class="card">
+    <h2>Request a session</h2>
+    <form method="POST" action="/d/${esc(driver.access_token)}/go-live" class="form">
+      <label>Reason *<select name="reason" required>${reasonOpts}</select></label>
+      <label>Priority
+        <select name="priority">${priOpts}</select>
+        <span class="hint">Urgent requests are flagged for operations immediately.</span>
+      </label>
+      <label>Notes for operations
+        <textarea name="notes" rows="3" placeholder="What should operations know before joining?">${esc(f.notes || '')}</textarea>
+      </label>
+      <fieldset>
+        <legend>Your device preferences for this session</legend>
+        <label class="checkbox"><input type="checkbox" name="want_camera" value="on"${f.want_camera ? ' checked' : ''}> I want to use my <strong>camera</strong></label>
+        <label class="checkbox"><input type="checkbox" name="want_mic" value="on"${f.want_mic ? ' checked' : ''}> I want to use my <strong>microphone</strong></label>
+        <label class="checkbox"><input type="checkbox" name="share_location" value="on"${f.share_location ? ' checked' : ''}> <strong>Share my location</strong> with operations (voluntary — stays off unless you check this)</label>
+        <p class="microcopy">These are preferences only. Nothing activates automatically — your camera, microphone,
+        and location stay <strong>off</strong> until you explicitly confirm on the session screen,
+        and media can only run when a real video provider is connected.</p>
+      </fieldset>
+      <p class="microcopy">${esc(drivers.SESSION_COVERAGE_NOTE)} ${esc(drivers.SESSION_EMERGENCY_NOTE)}</p>
+      <button type="submit" class="btn btn-large big-btn">GO LIVE WITH OPERATIONS &rarr;</button>
+      ${provider.configured ? '' : '<p class="microcopy"><strong>SIMULATED TEST:</strong> submitting records a real request and walks the accept/record workflow — no media will run.</p>'}
+    </form>
+  </div>
+  <div class="card">
+    <h2>Test your device <span class="microcopy">(SIMULATED TEST)</span></h2>
+    <p class="microcopy">Checks that your browser can access your camera and microphone <strong>locally only</strong>.
+    This does not connect you to anyone. Your browser will ask permission explicitly.</p>
+    <p>
+      <button type="button" class="btn" id="devtest-cam">Test camera</button>
+      <button type="button" class="btn" id="devtest-mic">Test microphone</button>
+    </p>
+    <video id="devtest-preview" playsinline muted style="display:none;max-width:100%;border-radius:8px"></video>
+    <p class="microcopy" id="devtest-status" role="status"></p>
+  </div>
+  ${training ? `<h2>Upcoming live training</h2>${training}` : ''}
+  ${pastRows ? `<h2>Past sessions</h2>${pastRows}` : ''}
+  <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
+</section>
+<script>
+(function () {
+  var status = document.getElementById('devtest-status');
+  var preview = document.getElementById('devtest-preview');
+  function setStatus(t) { if (status) status.textContent = t; }
+  function needApi() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setStatus('SIMULATED TEST: this browser does not expose camera/microphone access.');
+      return false;
+    }
+    return true;
+  }
+  var camBtn = document.getElementById('devtest-cam');
+  var micBtn = document.getElementById('devtest-mic');
+  var stream = null;
+  if (camBtn) camBtn.addEventListener('click', function () {
+    if (!needApi()) return;
+    setStatus('Requesting camera permission…');
+    navigator.mediaDevices.getUserMedia({ video: true }).then(function (s) {
+      stream = s; preview.style.display = 'block'; preview.srcObject = s; preview.play();
+      setStatus('SIMULATED TEST: camera preview working locally — not connected to anyone.');
+    }).catch(function () { setStatus('SIMULATED TEST: camera access was denied or unavailable.'); });
+  });
+  if (micBtn) micBtn.addEventListener('click', function () {
+    if (!needApi()) return;
+    setStatus('Requesting microphone permission…');
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+      stream = s;
+      setStatus('SIMULATED TEST: microphone access granted locally — not connected to anyone. (No audio is recorded.)');
+      s.getTracks().forEach(function (t) { t.stop(); });
+    }).catch(function () { setStatus('SIMULATED TEST: microphone access was denied or unavailable.'); });
+  });
+  window.addEventListener('beforeunload', function () {
+    if (stream) stream.getTracks().forEach(function (t) { t.stop(); });
+  });
+})();
+</script>`;
+}
+
+function mediaStateHtml(session, provider) {
+  const cam = session.consent_camera ? 'ON (you confirmed)' : 'OFF';
+  const mic = session.consent_mic ? 'ON (you confirmed)' : 'OFF';
+  const loc = session.share_location ? 'ON (voluntary)' : 'OFF';
+  const mediaNote = provider.configured
+    ? '<p class="microcopy">Video provider credentials are configured, but media is <strong>not verified</strong> — no end-to-end media call has succeeded. These switches record your consent only; no real-time video, audio, or media connection is claimed.</p>'
+    : '<p class="microcopy"><strong>SIMULATED TEST:</strong> no provider is connected, so no real-time media is running. These switches record your consent only.</p>';
+  return `<div class="card">
+    <h2>Your media</h2>
+    <p>Camera: <strong>${cam}</strong><br>Microphone: <strong>${mic}</strong><br>Location sharing: <strong>${loc}</strong></p>
+    ${mediaNote}
+  </div>`;
+}
+
+function liveSessionPage({ driver, session, events, messages, participants, recording, provider, error }) {
+  const s = session;
+  const open = ['REQUESTED', 'ACCEPTED', 'LIVE'].includes(s.status);
+  const thread = (messages || []).map(
+    (m) => `<div class="card"><p><strong>${m.sender_type === 'driver' ? 'You' : 'Operations'}</strong>
+      <span class="ts">${fmtLiveTs(m.ts)}</span></p><p>${esc(m.message)}</p></div>`
+  ).join('');
+  const timeline = (events || []).map(
+    (e) => `<li><strong>${esc(e.event_type)}</strong> — ${esc(e.details || '')} <span class="muted">(${esc(e.actor || '')} · ${fmtLiveTs(e.ts)})</span></li>`
+  ).join('');
+  const parts = (participants || []).map(
+    (p) => `<li>${p.role === 'driver' ? 'Driver' : 'Operations' + (p.staff_name ? ' (' + esc(p.staff_name) + ')' : '')}
+      — joined ${fmtLiveTs(p.joined_at)}${p.left_at ? ', left ' + fmtLiveTs(p.left_at) : ''}</li>`
+  ).join('');
+  const canConsentMedia = ['ACCEPTED', 'LIVE'].includes(s.status) && !(s.consent_camera && s.consent_mic);
+  const rec = recording || {};
+  return `
+<section>
+  <h1>Session ${esc(s.session_id)}</h1>
+  <p class="subhead">${sessionStatusLine(s)}</p>
+  ${providerBannerHtml(provider)}
+  ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
+  <div class="card">
+    <h2>Status</h2>
+    <p><strong>${esc(liveStatusLabel(s, provider))}</strong>
+    ${s.dispatcher_name ? ` · Dispatcher: ${esc(s.dispatcher_name)}` : ''}</p>
+    <p class="microcopy">Requested ${fmtLiveTs(s.created_at)}${s.started_at ? ' · Started ' + fmtLiveTs(s.started_at) : ''}${s.ended_at ? ' · Ended ' + fmtLiveTs(s.ended_at) : ''}</p>
+    ${s.notes ? `<p><strong>Your notes:</strong> ${esc(s.notes)}</p>` : ''}
+    ${s.status === 'REQUESTED' ? `<p class="microcopy">Waiting for operations to accept. ${esc(drivers.SESSION_COVERAGE_NOTE)}</p>` : ''}
+  </div>
+  ${mediaStateHtml(s, provider)}
+  <div class="card">
+    <h2>Can't use video?</h2>
+    <p>Video and audio calls both need the same video provider. With no provider
+    connected, <strong>provider-backed audio is also unavailable</strong> — there is no phone
+    or voice-call fallback running behind this page.</p>
+    <p>Use the <strong>chat below</strong> to talk with operations instead. It is part of the
+    session record and works in every session state.</p>
+  </div>
+  ${canConsentMedia ? `<div class="card">
+    <h2>Activate your camera and microphone</h2>
+    <p>Your camera and microphone are currently <strong>OFF</strong>. They will not activate until you confirm here.</p>
+    <form method="POST" action="/d/${esc(driver.access_token)}/go-live/${esc(s.session_id)}/consent" class="form">
+      <label class="checkbox"><input type="checkbox" name="camera" value="on"> Turn on my <strong>camera</strong></label>
+      <label class="checkbox"><input type="checkbox" name="mic" value="on"> Turn on my <strong>microphone</strong></label>
+      <button type="submit" class="btn btn-large">I CONFIRM — ACTIVATE MY CAMERA &amp; MIC</button>
+      ${provider.configured ? '' : '<p class="microcopy"><strong>SIMULATED TEST:</strong> confirming records your consent. With no provider connected, no device access is requested and no media runs.</p>'}
+    </form>
+  </div>` : ''}
+  <div class="card">
+    <h2>Location sharing</h2>
+    <p>Currently: <strong>${s.share_location ? 'ON (voluntary)' : 'OFF'}</strong></p>
+    <form method="POST" action="/d/${esc(driver.access_token)}/go-live/${esc(s.session_id)}/location" class="form">
+      <input type="hidden" name="on" value="${s.share_location ? '0' : '1'}">
+      <button type="submit" class="btn">${s.share_location ? 'Turn location sharing OFF' : 'Turn location sharing ON'}</button>
+    </form>
+    <p class="microcopy">Location sharing is voluntary and visibly on/off. It is never turned on without you choosing it here.</p>
+  </div>
+  <div class="card">
+    <h2>Recording</h2>
+    <p>Recording: <strong>${rec.consent_given ? 'CONSENTED — recording may be enabled by operations' : 'OFF'}</strong></p>
+    ${rec.consent_given
+      ? `<p class="microcopy">You consented${rec.consent_by ? ' (' + esc(rec.consent_by) + ')' : ''}${rec.consent_at ? ' at ' + fmtLiveTs(rec.consent_at) : ''}.
+        ${rec.retention_expires_at ? 'Recordings are kept until ' + fmtLiveTs(rec.retention_expires_at) + ' (90-day retention).' : ''}
+        <strong>No media capture is implemented in this build — nothing is being recorded.</strong></p>`
+      : `<p class="microcopy">Recording is <strong>off by default</strong>. It requires your explicit opt-in consent
+        <strong>before</strong> any recording may start, a visible indicator during recording, and access is restricted and logged.</p>
+      <form method="POST" action="/d/${esc(driver.access_token)}/go-live/${esc(s.session_id)}/recording-consent" class="form">
+        <label class="checkbox"><input type="checkbox" name="consent" value="yes" required>
+          <strong>I consent</strong> to this session being recorded.</label>
+        <button type="submit" class="btn">Record my consent</button>
+      </form>`}
+  </div>
+  ${open ? `<div class="card">
+    <h2>Session chat</h2>
+    ${thread || '<p class="microcopy">No messages yet.</p>'}
+    <form method="POST" action="/d/${esc(driver.access_token)}/go-live/${esc(s.session_id)}/message" class="form">
+      <label>Message <textarea name="message" rows="2" required maxlength="2000" placeholder="Type a message to operations…"></textarea></label>
+      <button type="submit" class="btn">Send</button>
+    </form>
+  </div>` : `<h2>Session chat</h2>${thread || '<p class="microcopy">No messages.</p>'}`}
+  <h2>Session record</h2>
+  <ul class="timeline">${timeline || '<li>No events.</li>'}</ul>
+  ${parts ? `<h2>Participants</h2><ul>${parts}</ul>` : ''}
+  ${open ? `<div class="card">
+    <form method="POST" action="/d/${esc(driver.access_token)}/go-live/${esc(s.session_id)}/end" class="form"
+      onsubmit="return confirm('End this session?');">
+      <button type="submit" class="btn">End session</button>
+    </form>
+  </div>` : ''}
+  <p><a href="/d/${esc(driver.access_token)}/go-live">&larr; Back to Go Live</a></p>
 </section>`;
 }
