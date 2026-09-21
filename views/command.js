@@ -84,7 +84,8 @@ function commandCenterHtml({ metrics, options }) {
   return `
 <h2>Operations command center</h2>
 <p class="microcopy">Today's operation at a glance — every number below is computed live from the real tables (routes, packages, drivers, exceptions, support tickets, leads, opportunities, alerts, follow-ups, community reports, plan requests).
-<a href="/admin/analytics">Growth analytics &rarr;</a> (funnel traffic, conversion, sources, applicant profile, pipeline — definitions included).</p>
+<a href="/admin/analytics">Growth analytics &rarr;</a> (funnel traffic, conversion, sources, applicant profile, pipeline — definitions included).
+<br><a href="/dispatch/today"><strong>📋 Open the dispatcher's daily board</strong></a> (today's routes, live counts, tap-to-call drivers — dispatcher login).</p>
 ${filterFormHtml({ f, options })}
 ${hasFilters ? `<p class="microcopy"><strong>Filters active:</strong> ${esc(activeBits.join(' · '))}</p>` : ''}
 <div class="metric-cards">

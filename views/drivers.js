@@ -212,7 +212,38 @@ function assistantDashCard(driver, assistantInfo) {
   </div>`;
 }
 
-function dashboardPage({ site, driver, dashUrl, matchInfo = null, assistantInfo = null }) {
+// --- Talk to dispatch live (tap-to-call / tap-to-text) -----------------------------
+// 100% real phone behavior: tel: and sms: links to Davena's chosen dispatch
+// number (single source of truth in lib/field_comms.js). Shown to ACTIVE
+// subscribers (Basic and Complete) only. Plainly labeled as a real call/text —
+// never presented as in-app chat.
+function dispatchLiveCard(show) {
+  if (!show) return '';
+  const fc = require('../lib/field_comms');
+  return `<div class="card highlight-card"><h3>Talk to dispatch live</h3>
+    <p>Need us right now? Call or text — it reaches a real phone at dispatch.</p>
+    <p><a class="btn" href="${fc.dispatchTelHref()}">📞 Call dispatch now</a>
+    <a class="btn" href="${fc.dispatchSmsHref()}">💬 Text dispatch now</a></p>
+    <p class="microcopy">${esc(fc.dispatchPhoneDisplay())} · Standard call/text rates may apply.</p>
+  </div>`;
+}
+
+// --- Dispatch messages inbox -----------------------------------------------------
+// Broadcasts from dispatch + direct admin messages, newest first. Unread
+// rows (read_at NULL) render highlighted. Shown to every driver who has
+// messages; drivers with none see nothing (no empty card).
+function dispatchInboxCard(driver, messages) {
+  if (!messages || !messages.length) return '';
+  const items = messages.map((m) => {
+    const unread = !m.read_at;
+    const when = m.created_at ? new Date(Number(m.created_at)).toLocaleString() : '';
+    const tag = m.kind === 'broadcast' ? 'Dispatch broadcast' : 'Message from dispatch';
+    return `<div${unread ? ' style="background:#fff8e1;border-left:4px solid #F5B301;padding:10px 12px;margin:0 -12px 12px;border-radius:4px"' : ' style="margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid #eee"'}>\n      <p><strong>${esc(m.subject)}</strong>${unread ? ' <span class="admin-status-pill" style="background:#F5B301;color:#12263f">NEW</span>' : ''}</p>\n      <p>${esc(m.body).replace(/\n/g, '<br>')}</p>\n      <p class="microcopy">${esc(tag)} · ${esc(when)}</p>\n    </div>`;
+  }).join('');
+  return `<div class="card"><h3>Dispatch messages</h3>\n    ${items}\n    <p class="microcopy">Messages from TransitNow dispatch — broadcasts and direct notes. Newest first.</p>\n  </div>`;
+}
+
+function dashboardPage({ site, driver, dashUrl, matchInfo = null, assistantInfo = null, dispatchInbox = null, dispatchLive = false }) {
   const stage = drivers.STATUS_LABELS[driver.status] || driver.status;
   const nextSteps = {
     new: 'We are reviewing your onboarding information. No action needed right now.',
@@ -250,8 +281,10 @@ function dashboardPage({ site, driver, dashUrl, matchInfo = null, assistantInfo 
   <h1>Hi, ${esc(driver.full_name)}.</h1>
   <p class="subhead">Status: ${esc(stage)}</p>
   <div class="card highlight-card"><p><strong>What happens next:</strong> ${esc(step)}</p></div>
+  ${dispatchLiveCard(dispatchLive)}
   ${routeMatchDashCard(matchInfo)}
   ${assistantDashCard(driver, assistantInfo)}
+  ${dispatchInboxCard(driver, dispatchInbox)}
   <h2>Your hub</h2>
   <div class="dash-grid">
     ${cardsHtml}

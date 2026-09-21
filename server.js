@@ -68,6 +68,11 @@ const documentsLib = require('./lib/documents');
 const phase6Views = require('./views/phase6');
 // Phase 7: growth ecosystem analytics (spec section 26).
 const analyticsLib = require('./lib/analytics');
+// Dispatcher area: real dispatcher logins + daily board + password reset.
+// Additive; the shared ADMIN_TOKEN flow for Davena's own admin is untouched.
+const dispatchAuth = require('./lib/dispatch_auth');
+const dispatchBoard = require('./lib/dispatch_board');
+const dispatchViews = require('./views/dispatch');
 const analyticsViews = require('./views/analytics');
 
 const app = express();
@@ -82,6 +87,12 @@ if (ADMIN_TOKEN === 'changeme') {
 
 /** Wrap an async route handler so rejections reach next(err) (Express 4). */
 const ah = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+/** Best-effort client IP for auth rate limiting. */
+function clientIp(req) {
+  const fwd = (req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return (fwd || req.ip || (req.socket && req.socket.remoteAddress) || '').toString();
+}
 
 // --- Views (real modules with fallback) ----------------------------------------
 function loadViewModule(realPath, fallbackPath, requiredExports, label) {
@@ -921,6 +932,12 @@ function requireRoomMember(handler) {
   return ah(async (req, res, next) => {
     const member = await roomMemberFromReq(req);
     if (!member) return res.redirect('/room/login');
+    // Admin-issued temporary password: force the change screen first.
+    if (member.must_change_password === 1 &&
+        !req.path.startsWith('/room/change-password') &&
+        req.path !== '/room/logout') {
+      return res.redirect('/room/change-password?forced=1');
+    }
     req.roomMember = member;
     return handler(req, res, next);
   });
@@ -930,6 +947,11 @@ function requireRoomMember(handler) {
 const requireRoomMemberMw = ah(async (req, res, next) => {
   const member = await roomMemberFromReq(req);
   if (!member) return res.redirect('/room/login');
+  if (member.must_change_password === 1 &&
+      !req.path.startsWith('/room/change-password') &&
+      req.path !== '/room/logout') {
+    return res.redirect('/room/change-password?forced=1');
+  }
   req.roomMember = member;
   next();
 });
@@ -961,8 +983,62 @@ app.post('/room/login', ah(async (req, res) => {
     return res.send(roomViews.loginPage({ error: 'Incorrect password. Please try again.', email }));
   }
   setRoomSession(res, await room.createSession(email));
+  if (member.must_change_password === 1) return res.redirect('/room/change-password?forced=1');
   res.redirect('/room');
 }));
+
+// Member password reset: "Forgot password?" on /room/login.
+// Self-service path queues a reset email through the existing email_queue
+// pipeline (generic response always — no enumeration); the admin fallback
+// (/admin/room member "Reset password") issues a one-time temporary
+// password that forces a change on next login.
+app.get('/room/forgot', (req, res) => {
+  res.send(roomViews.forgotPage({}));
+});
+app.post('/room/forgot', ah(async (req, res) => {
+  try {
+    await room.roomForgotPassword(req.body.email || '', clientIp(req));
+    res.send(roomViews.forgotPage({ message: room.ROOM_FORGOT_GENERIC_MSG }));
+  } catch (err) {
+    if (err.code === 'forgot_locked') {
+      return res.status(429).send(roomViews.forgotPage({ error: err.message }));
+    }
+    throw err;
+  }
+}));
+app.get('/room/reset/:token', ah(async (req, res) => {
+  const v = await room.validateRoomResetToken(req.params.token);
+  if (!v) return res.status(400).send(roomViews.forgotPage({ error: 'This reset link is invalid or has expired.' }));
+  res.send(roomViews.resetPage({ token: req.params.token }));
+}));
+app.post('/room/reset/:token', ah(async (req, res) => {
+  try {
+    const sessToken = await room.resetRoomPasswordWithToken(req.params.token, req.body.password, req.body.password2);
+    setRoomSession(res, sessToken);
+    res.redirect('/room');
+  } catch (err) {
+    if (err.code === 'bad_token') {
+      return res.status(400).send(roomViews.forgotPage({ error: err.message }));
+    }
+    res.send(roomViews.resetPage({ token: req.params.token, error: err.message }));
+  }
+}));
+app.get('/room/change-password', requireRoomMember((req, res) => {
+  res.send(roomViews.changePasswordPage({
+    member: req.roomMember, forced: req.query.forced === '1' || req.roomMember.must_change_password === 1,
+  }));
+}));
+app.post('/room/change-password', requireRoomMember(ah(async (req, res) => {
+  try {
+    await room.changeRoomPassword(req.roomMember.email, req.body.current, req.body.password, req.body.password2);
+    req.roomMember = await room.getMember(req.roomMember.email);
+    res.send(roomViews.changePasswordPage({ member: req.roomMember, ok: 'Password changed.' }));
+  } catch (err) {
+    res.send(roomViews.changePasswordPage({
+      member: req.roomMember, error: err.message, forced: req.roomMember.must_change_password === 1,
+    }));
+  }
+})));
 
 // Claim access (first-time: member paid via Stripe, now sets a password).
 // Served at both /room/claim and the /claim-access alias.
@@ -1048,6 +1124,10 @@ app.get('/room', requireRoomMember(async (req, res) => {
     goal,
     weekInfo: info,
     checkinDone: !!thisWeekCheckin,
+    // Accountability line (tap-to-call/text): active, claimed members only.
+    // requireRoomMember already guarantees an active session; claimed =
+    // member set a password.
+    accountabilityLine: req.roomMember.status === 'active' && !!req.roomMember.password_hash,
   }));
 }));
 
@@ -1784,6 +1864,7 @@ app.get('/admin/drivers/:id', adminAuth, ah(async (req, res) => {
   res.send(adminViews.adminLayout('Driver: ' + driver.full_name, driverAdminViews.driverDetailHtml({
     driver, history, subscription, routeMatches,
     goal: { goalCents, weekKey: rm.chicagoWeekKey() },
+    notice: req.query.msg || '',
   })));
 }));
 
@@ -1868,9 +1949,32 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   } catch (err) {
     console.error('[dashboard] assistant info failed:', err.message);
   }
-  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, matchInfo, assistantInfo }), site);
+  // Dispatch messages inbox (broadcasts + direct admin messages), newest
+  // first. Unread rows render highlighted; marked read after the page sends.
+  let dispatchInbox = null;
+  try {
+    const fc = require('./lib/field_comms');
+    dispatchInbox = await fc.driverInbox(driver.id, 20);
+  } catch (err) {
+    console.error('[dashboard] dispatch inbox failed:', err.message);
+  }
+  // Talk-to-dispatch-live buttons: ACTIVE subscribers (Basic and Complete)
+  // only. 100% real tel:/sms: links — no in-app chat claims.
+  let dispatchLive = false;
+  try {
+    dispatchLive = await subscriptions.isPaidActive(driver.email);
+  } catch (err) {
+    console.error('[dashboard] dispatch live check failed:', err.message);
+  }
+  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, matchInfo, assistantInfo, dispatchInbox, dispatchLive }), site);
+  if (dispatchInbox && dispatchInbox.length) {
+    try {
+      await require('./lib/field_comms').markInboxRead(driver.id);
+    } catch (err) {
+      console.error('[dashboard] mark inbox read failed:', err.message);
+    }
+  }
 }));
-
 // --- Phase D: driver route + packages (scoped to the token's driver) -------------
 app.get('/d/:token/route', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
@@ -2016,7 +2120,9 @@ app.get('/admin/tickets', adminAuth, ah(async (req, res) => {
   const ids = [...new Set(list.map((t) => t.driver_id).filter(Boolean))];
   const driversById = {};
   for (const id of ids) driversById[id] = await drivers.getDriverById(id);
-  res.send(adminViews.adminLayout('Support tickets', driverAdminViews.ticketsListHtml({ list, statusFilter, driversById })));
+  const fc = require('./lib/field_comms');
+  const siren = require('./views/field_comms').sirenBannerHtml(await fc.unackedUrgentTickets(50), '/dispatch');
+  res.send(adminViews.adminLayout('Support tickets', siren + driverAdminViews.ticketsListHtml({ list, statusFilter, driversById })));
 }));
 
 app.get('/admin/tickets/:ticketId', adminAuth, ah(async (req, res) => {
@@ -2859,6 +2965,303 @@ app.post('/admin/assistant-questions/:id/answer', adminAuth, ah(async (req, res)
       `<p>${esc(err.message)}</p><p><a href="/admin/route-matches">&larr; Back to route matching</a></p>`));
   }
   res.redirect('/admin/route-matches');
+}));
+
+// --- Dispatcher area: real logins behind /dispatch/* --------------------------------
+// Dispatchers get their own email+password logins (lib/dispatch_auth.js) —
+// the shared ADMIN_TOKEN stays Davena-only, and there is no public
+// self-signup: accounts are created only on /admin/dispatchers.
+// Guards: requireDispatcher (dispatcher session only) and dispatcherOrAdmin
+// (dispatcher session OR Davena's admin session — anonymous users are
+// bounced to /dispatch/login either way; nothing here is public).
+const fieldCommsViews = require('./views/field_comms');
+
+function setDispatchSession(res, token) {
+  tracking.setCookie(res, dispatchAuth.SESSION_COOKIE, token, { maxAge: dispatchAuth.SESSION_TTL_MS / 1000 });
+}
+function clearDispatchSession(res) {
+  tracking.setCookie(res, dispatchAuth.SESSION_COOKIE, '', { maxAge: 0 });
+}
+
+const requireDispatcher = ah(async (req, res, next) => {
+  const cookies = req.cookies || tracking.getCookies(req);
+  const dispatcher = await dispatchAuth.getSessionDispatcher(cookies[dispatchAuth.SESSION_COOKIE]);
+  if (!dispatcher) {
+    return res.redirect('/dispatch/login?next=' + encodeURIComponent(req.originalUrl || '/dispatch/today'));
+  }
+  // Admin-issued temporary password: force the change screen before anything else.
+  if (dispatcher.must_change_password === 1 &&
+      !req.path.startsWith('/dispatch/change-password') &&
+      req.path !== '/dispatch/logout') {
+    return res.redirect('/dispatch/change-password?forced=1');
+  }
+  req.dispatcher = dispatcher;
+  next();
+});
+
+const dispatcherOrAdmin = ah(async (req, res, next) => {
+  if (checkAdmin(req, res)) { req.isAdmin = true; return next(); }
+  const cookies = req.cookies || tracking.getCookies(req);
+  const dispatcher = await dispatchAuth.getSessionDispatcher(cookies[dispatchAuth.SESSION_COOKIE]);
+  if (!dispatcher) {
+    return res.redirect('/dispatch/login?next=' + encodeURIComponent(req.originalUrl || '/dispatch/today'));
+  }
+  // Admin-issued temporary password: force the change screen before anything
+  // else (same guard as requireDispatcher — a temp-password session must not
+  // reach the board, field-comms, or ticket actions until changed).
+  if (dispatcher.must_change_password === 1 &&
+      !req.path.startsWith('/dispatch/change-password') &&
+      req.path !== '/dispatch/logout') {
+    return res.redirect('/dispatch/change-password?forced=1');
+  }
+  req.dispatcher = dispatcher;
+  next();
+});
+
+// Login / logout (public pages; the login form itself is the gate).
+app.get('/dispatch/login', (req, res) => {
+  res.send(dispatchViews.loginPageHtml({ next: req.query.next || '' }));
+});
+
+app.post('/dispatch/login', ah(async (req, res) => {
+  const nextRaw = String(req.body.next || '/dispatch/today');
+  const safeNext = nextRaw.startsWith('/dispatch/') ? nextRaw : '/dispatch/today';
+  try {
+    const result = await dispatchAuth.attemptLogin(req.body.email || '', req.body.password || '', clientIp(req));
+    if (!result) {
+      return res.send(dispatchViews.loginPageHtml({ error: dispatchAuth.INVALID_MSG, next: safeNext }));
+    }
+    setDispatchSession(res, result.token);
+    if (result.dispatcher.must_change_password === 1) return res.redirect('/dispatch/change-password?forced=1');
+    res.redirect(safeNext);
+  } catch (err) {
+    if (err.code === 'locked') {
+      return res.status(429).send(dispatchViews.loginPageHtml({ error: err.message, next: safeNext }));
+    }
+    throw err;
+  }
+}));
+
+app.get('/dispatch/logout', ah(async (req, res) => {
+  const cookies = req.cookies || tracking.getCookies(req);
+  await dispatchAuth.destroySession(cookies[dispatchAuth.SESSION_COOKIE]);
+  clearDispatchSession(res);
+  res.redirect('/dispatch/login');
+}));
+
+// Self-service password reset: generic responses always (no enumeration);
+// the email queues through the existing email_queue pipeline.
+app.get('/dispatch/forgot', (req, res) => {
+  res.send(dispatchViews.forgotPageHtml({}));
+});
+app.post('/dispatch/forgot', ah(async (req, res) => {
+  try {
+    await dispatchAuth.forgotPassword(
+      req.body.email || '', clientIp(req), `${req.protocol}://${req.get('host')}`);
+    res.send(dispatchViews.forgotPageHtml({ message: dispatchAuth.FORGOT_GENERIC_MSG }));
+  } catch (err) {
+    if (err.code === 'forgot_locked') {
+      return res.status(429).send(dispatchViews.forgotPageHtml({ error: err.message }));
+    }
+    throw err;
+  }
+}));
+app.get('/dispatch/reset/:token', ah(async (req, res) => {
+  const v = await dispatchAuth.validateResetToken(req.params.token);
+  if (!v) {
+    return res.status(400).send(dispatchViews.dispatcherLayout('Reset password',
+      '<div class="error-box"><strong>This reset link is invalid or has expired.</strong></div>' +
+      '<p><a href="/dispatch/forgot">Request a new link</a></p>', null));
+  }
+  res.send(dispatchViews.resetPageHtml({ token: req.params.token }));
+}));
+app.post('/dispatch/reset/:token', ah(async (req, res) => {
+  try {
+    const { token: sessToken } = await dispatchAuth.resetPasswordWithToken(
+      req.params.token, req.body.password, req.body.password2);
+    setDispatchSession(res, sessToken);
+    res.redirect('/dispatch/today');
+  } catch (err) {
+    if (err.code === 'bad_token') {
+      return res.status(400).send(dispatchViews.dispatcherLayout('Reset password',
+        `<div class="error-box"><strong>${esc(err.message)}</strong></div>` +
+        '<p><a href="/dispatch/forgot">Request a new link</a></p>', null));
+    }
+    res.send(dispatchViews.resetPageHtml({ token: req.params.token, error: err.message }));
+  }
+}));
+
+// Change password (logged-in dispatchers; forced after a temp password).
+app.get('/dispatch/change-password', requireDispatcher, (req, res) => {
+  res.send(dispatchViews.changePasswordPageHtml({
+    dispatcher: req.dispatcher, forced: req.query.forced === '1' || req.dispatcher.must_change_password === 1,
+  }));
+});
+app.post('/dispatch/change-password', requireDispatcher, ah(async (req, res) => {
+  try {
+    await dispatchAuth.changePassword(req.dispatcher.id, req.body.current, req.body.password, req.body.password2);
+    req.dispatcher = await dispatchAuth.getDispatcherById(req.dispatcher.id);
+    res.send(dispatchViews.changePasswordPageHtml({ dispatcher: req.dispatcher, ok: 'Password changed.' }));
+  } catch (err) {
+    res.send(dispatchViews.changePasswordPageHtml({
+      dispatcher: req.dispatcher, error: err.message, forced: req.dispatcher.must_change_password === 1,
+    }));
+  }
+}));
+
+// --- Dispatcher's daily board ----------------------------------------------------
+// One screen per date (default: today, Chicago). Auto-refreshes every 60s.
+// Live counts from the real tables via lib/dispatch_board.js.
+app.get('/dispatch/today', dispatcherOrAdmin, ah(async (req, res) => {
+  const board = await dispatchBoard.boardForDate(req.query.date);
+  res.send(dispatchViews.boardPageHtml({ board, dispatcher: req.dispatcher || null }));
+}));
+app.get('/dispatch/today.json', dispatcherOrAdmin, ah(async (req, res) => {
+  const board = await dispatchBoard.boardForDate(req.query.date);
+  res.json({
+    date: board.date,
+    summary: board.summary,
+    summaryHtml: dispatchViews.summaryStripHtml(board.summary),
+    html: board.routes.length
+      ? board.routes.map(dispatchViews.routeCardHtml).join('\n')
+      : `<div class="route-card"><p class="muted">No routes scheduled for ${dispatchViews.esc(board.date)}.</p></div>`,
+  });
+}));
+
+// Read-only route detail for dispatchers. Uses dispatcherOrAdmin (a dispatcher
+// session cannot open /admin/routes/:id), and renders no mutation forms —
+// status/package changes stay admin-only.
+app.get('/dispatch/routes/:id', dispatcherOrAdmin, ah(async (req, res) => {
+  const route = await drivers.getRouteById(req.params.id);
+  if (!route) {
+    return res.status(404).send(dispatchViews.dispatcherLayout('Not found',
+      '<p>Route not found.</p><p><a href="/dispatch/today">&larr; Back to the board</a></p>',
+      req.dispatcher || null));
+  }
+  const [driver, packages, counts, progress] = await Promise.all([
+    route.driver_id ? drivers.getDriverById(route.driver_id) : null,
+    drivers.listPackages({ routeId: route.id }),
+    drivers.countPackagesByStatus(route.id),
+    drivers.getRouteProgress(route.id),
+  ]);
+  res.send(dispatchViews.dispatcherLayout('Route ' + (route.route_code || route.id),
+    dispatchViews.routeDetailHtml({ route, driver, packages, counts, progress }),
+    req.dispatcher || null));
+}));
+
+// --- Dispatch <-> driver field communications (moved under /dispatch/*) ---------
+// Urgent driver->dispatch contact reuses the existing support ticket system
+// (priority='urgent' tickets already email ops immediately); the siren
+// banner makes them can't-miss until acknowledged. Dispatch->driver
+// (broadcasts + direct messages) rides the existing email_queue pipeline +
+// SMS stub. Anonymous users are bounced to /dispatch/login.
+
+app.get('/dispatch/field-comms', dispatcherOrAdmin, ah(async (req, res) => {
+  const fc = require('./lib/field_comms');
+  const [unacked, broadcasts] = await Promise.all([
+    fc.unackedUrgentTickets(50),
+    fc.recentBroadcasts(20),
+  ]);
+  res.send(dispatchViews.fieldCommsPageHtml({
+    unacked, broadcasts,
+    error: req.query.error || '',
+    sent: req.query.sent || '',
+    dispatcher: req.dispatcher || null,
+  }));
+}));
+
+app.post('/dispatch/field-comms/broadcast', dispatcherOrAdmin, ah(async (req, res) => {
+  const fc = require('./lib/field_comms');
+  try {
+    const { audience, driverCount } = await fc.sendBroadcast({
+      audience: req.body.audience,
+      subject: req.body.subject,
+      message: req.body.message,
+    });
+    res.redirect(`/dispatch/field-comms?sent=${encodeURIComponent(
+      `Broadcast sent to ${driverCount} driver${driverCount === 1 ? '' : 's'} (${fc.audienceLabel(audience)}).`
+    )}`);
+  } catch (err) {
+    res.redirect(`/dispatch/field-comms?error=${encodeURIComponent(err.message)}`);
+  }
+}));
+
+// Acknowledge an urgent ticket's siren: moves it off 'open' via the existing
+// ticket status path (no new tables).
+app.post('/dispatch/tickets/:ticketId/acknowledge', dispatcherOrAdmin, ah(async (req, res) => {
+  const fc = require('./lib/field_comms');
+  const back = req.get('referer') || '/dispatch/field-comms';
+  try {
+    await fc.ackUrgentTicket(req.params.ticketId);
+  } catch (err) {
+    const body = `<p>${esc(err.message)}</p><p><a href="${esc(back)}">&larr; Back</a></p>`;
+    return res.status(400).send(req.isAdmin
+      ? adminViews.adminLayout('Error', body)
+      : dispatchViews.dispatcherLayout('Error', body, req.dispatcher || null));
+  }
+  res.redirect(back);
+}));
+
+// Dispatcher -> one driver: queues email + provider-pending SMS, stores inbox row.
+// Active subscribers only.
+app.post('/dispatch/drivers/:id/message', dispatcherOrAdmin, ah(async (req, res) => {
+  const fc = require('./lib/field_comms');
+  try {
+    await fc.messageDriver(Number(req.params.id), req.body.subject, req.body.message);
+  } catch (err) {
+    if (req.isAdmin) {
+      return res.redirect(`/admin/drivers/${encodeURIComponent(req.params.id)}?msg=${encodeURIComponent('error: ' + err.message)}`);
+    }
+    return res.redirect(`/dispatch/field-comms?error=${encodeURIComponent(err.message)}`);
+  }
+  if (req.isAdmin) {
+    return res.redirect(`/admin/drivers/${encodeURIComponent(req.params.id)}?msg=sent`);
+  }
+  res.redirect(`/dispatch/field-comms?sent=${encodeURIComponent('Message sent to the driver.')}`);
+}));
+
+// --- Admin: dispatcher account management (Davena only, existing adminAuth) ------
+// No public self-signup anywhere — accounts are created here.
+app.get('/admin/dispatchers', adminAuth, ah(async (req, res) => {
+  const list = await dispatchAuth.listDispatchers();
+  res.send(adminViews.adminLayout('Dispatcher accounts', dispatchViews.dispatchersAdminHtml({ dispatchers: list })));
+}));
+
+app.post('/admin/dispatchers', adminAuth, ah(async (req, res) => {
+  const render = async (extra) => {
+    const list = await dispatchAuth.listDispatchers();
+    res.send(adminViews.adminLayout('Dispatcher accounts',
+      dispatchViews.dispatchersAdminHtml({ dispatchers: list, ...extra })));
+  };
+  try {
+    const d = await dispatchAuth.createDispatcher({
+      name: req.body.name, email: req.body.email, password: req.body.password,
+    });
+    await render({ created: { name: d.name, email: d.email, password: req.body.password } });
+  } catch (err) {
+    await render({ error: err.message });
+  }
+}));
+
+app.post('/admin/dispatchers/:id/active', adminAuth, ah(async (req, res) => {
+  await dispatchAuth.setDispatcherActive(req.params.id, req.body.active === '1');
+  res.redirect('/admin/dispatchers');
+}));
+
+// Admin fallback password reset: one-time temporary password shown ONCE
+// (works tonight — no email needed). Stored hashed; forces a change on login.
+app.post('/admin/dispatchers/:id/reset-password', adminAuth, ah(async (req, res) => {
+  const render = async (extra) => {
+    const list = await dispatchAuth.listDispatchers();
+    res.send(adminViews.adminLayout('Dispatcher accounts',
+      dispatchViews.dispatchersAdminHtml({ dispatchers: list, ...extra })));
+  };
+  try {
+    const { dispatcher, tempPassword } = await dispatchAuth.issueTempPassword(req.params.id);
+    await render({ tempShown: { name: dispatcher.name, email: dispatcher.email, password: tempPassword } });
+  } catch (err) {
+    await render({ error: err.message });
+  }
 }));
 
 app.post('/admin/route-matches/assign', adminAuth, ah(async (req, res) => {
@@ -4241,12 +4644,20 @@ app.get('/admin/analytics', adminAuth, ah(async (req, res) => {
  * also set an httpOnly cookie so the admin views' plain /admin links and forms
  * (which don't carry the token) keep working.
  */
-function adminAuth(req, res, next) {
+/**
+ * Non-terminal admin check: true when the request carries Davena's admin
+ * auth (query token or cookie). Extracted so dispatcher-area guards can
+ * accept the admin session too — anonymous users still get bounced.
+ */
+function checkAdmin(req, res) {
   if (req.query.token && req.query.token === ADMIN_TOKEN) {
     tracking.setCookie(res, 'funnel_adm', ADMIN_TOKEN, { maxAge: 12 * 3600 });
-    return next();
+    return true;
   }
-  if (tracking.getCookies(req).funnel_adm === ADMIN_TOKEN) return next();
+  return tracking.getCookies(req).funnel_adm === ADMIN_TOKEN;
+}
+function adminAuth(req, res, next) {
+  if (checkAdmin(req, res)) return next();
   res.status(403).type('text').send('Forbidden: a valid admin token is required (?token=...)');
 }
 app.use('/admin', adminAuth);
@@ -4340,7 +4751,18 @@ app.get('/admin', ah(async (req, res) => {
     typeof adminViews.dashboardSectionsHtml === 'function'
       ? adminViews.dashboardSectionsHtml(metrics)
       : '';
-  res.send(adminViews.adminLayout('Dashboard', adminViews.dashboardHtml(metrics, site) + sections));
+  // Urgent field siren: unacknowledged urgent driver tickets stay
+  // can't-miss at the top of the dashboard until acknowledged.
+  let siren = '';
+  try {
+    siren = require('./views/field_comms').sirenBannerHtml(
+      await require('./lib/field_comms').unackedUrgentTickets(50),
+      '/dispatch'
+    );
+  } catch (err) {
+    console.error('[admin] siren banner failed:', err.message);
+  }
+  res.send(adminViews.adminLayout('Dashboard', siren + adminViews.dashboardHtml(metrics, site) + sections));
 }));
 
 /**
@@ -4557,9 +4979,9 @@ app.post('/admin/suppressions/remove', ah(async (req, res) => {
 
 // --- Wealth Builder's Room admin -------------------------------------------------------------
 // Members list, announcements, pin/delete posts (all behind the admin token).
-app.get('/admin/room', ah(async (req, res) => {
+async function renderAdminRoom(res, tempShown = null) {
   const members = await db.all(
-    'SELECT email, name, joined_at, last_login, password_hash, status FROM room_members ORDER BY joined_at DESC'
+    'SELECT email, name, joined_at, last_login, password_hash, status, must_change_password FROM room_members ORDER BY joined_at DESC'
   );
   const posts = await room.listPosts(100);
   const accountability = [];
@@ -4575,7 +4997,25 @@ app.get('/admin/room', ah(async (req, res) => {
     (a.status === 'active' ? 0 : 1) - (b.status === 'active' ? 0 : 1) ||
     (b.lastCheckinAt || 0) - (a.lastCheckinAt || 0)
   );
-  res.send(adminViews.adminLayout("Wealth Builder's Room", roomViews.roomAdminPage({ members, posts, accountability })));
+  res.send(adminViews.adminLayout("Wealth Builder's Room",
+    roomViews.roomAdminPage({ members, posts, accountability, tempShown })));
+}
+app.get('/admin/room', ah(async (req, res) => {
+  await renderAdminRoom(res);
+}));
+
+// Admin fallback member password reset: one-time temporary password shown
+// ONCE (works tonight — no email needed). Stored hashed; the member is
+// forced to choose their own password on next login.
+app.post('/admin/room/member-reset-password', adminAuth, ah(async (req, res) => {
+  const email = (req.body.email || '').trim().toLowerCase();
+  try {
+    const { member, tempPassword } = await room.issueRoomTempPassword(email);
+    await renderAdminRoom(res, { name: member.name, email: member.email, password: tempPassword });
+  } catch (err) {
+    return res.status(400).send(adminViews.adminLayout('Error',
+      `<p>${esc(err.message)}</p><p><a href="/admin/room">&larr; Back to Room admin</a></p>`));
+  }
 }));
 
 app.post('/admin/room/announce', ah(async (req, res) => {

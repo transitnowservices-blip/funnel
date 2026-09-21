@@ -1388,6 +1388,263 @@ async function main() {
         `status=${res.status}`);
     }
 
+    /* ---- 10i. Dispatch field communications ------------------------------- */
+    // Covers: urgent driver ticket -> immediate ops email (existing
+    // createTicket path) + can't-miss admin siren until acknowledged;
+    // "Broadcast to field" composer (active-subscriber audiences only);
+    // driver "Dispatch messages" inbox (newest first, unread highlight);
+    // admin "Message driver" (email + provider-pending SMS); SMS rows are
+    // never claimed delivered (provider-pending stub); no duplicate
+    // urgent-alert tables exist (support_tickets is reused).
+    {
+      const ftag = 'e2e-field';
+      const fEmail = (n) => `${ftag}-${n}@example.com`.toLowerCase();
+      const nowT3 = Date.now();
+      db.prepare(`DELETE FROM driver_messages WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)`).run(`${ftag}%`);
+      db.prepare(`DELETE FROM broadcast_log WHERE id > 0 AND subject LIKE ?`).run(`%${ftag}%`);
+      db.prepare(`DELETE FROM email_queue WHERE email LIKE ? AND (sequence LIKE 'field-%' OR sequence = 'driver-ops')`).run(`${ftag}%`);
+      db.prepare(`DELETE FROM support_tickets WHERE driver_id IN (SELECT id FROM drivers WHERE email LIKE ?)`).run(`${ftag}%`);
+      db.prepare(`DELETE FROM dispatch_subscriptions WHERE email LIKE ?`).run(`${ftag}%`);
+      db.prepare(`DELETE FROM drivers WHERE email LIKE ?`).run(`${ftag}%`);
+
+      const mkFDriver = (n, phone = '4145550199') => {
+        const email = fEmail(n);
+        db.prepare(`INSERT INTO drivers (full_name, email, phone, home_city, home_state, status, submitted_at, access_token)
+                    VALUES (?, ?, ?, 'Milwaukee', 'WI', 'new', ?, ?)`)
+          .run(`Field Driver ${n}`, email, phone, nowT3, `${ftag}-tok-${n}-` + 'c'.repeat(40));
+        return db.prepare('SELECT * FROM drivers WHERE email = ?').get(email);
+      };
+      const fComplete = mkFDriver('complete');
+      const fBasic = mkFDriver('basic');
+      const fPastDue = mkFDriver('pastdue');
+      const fCanceled = mkFDriver('canceled');
+      const fFree = mkFDriver('free');
+      makePaid(db, fComplete.email, 'complete');
+      makePaid(db, fBasic.email, 'basic');
+      makePaid(db, fPastDue.email, 'complete');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'past_due' WHERE email = ?`).run(fPastDue.email);
+      makePaid(db, fCanceled.email, 'complete');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'canceled' WHERE email = ?`).run(fCanceled.email);
+
+      // 10i-1. Urgent ticket: filed via the existing support path -> ops email
+      // queued immediately with URGENT subject.
+      let r = await req(`${BASE}/d/${fComplete.access_token}/support?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { category: 'vehicle_issue', priority: 'urgent', subject: 'Blowout on I-94', description: 'Tire blew, pulled over safely.' } });
+      const ticket = db.prepare(`SELECT * FROM support_tickets WHERE driver_id = ? ORDER BY id DESC LIMIT 1`).get(fComplete.id);
+      check('urgent support ticket filed via existing path (302, stored urgent+open)',
+        r.status === 302 && !!ticket && ticket.priority === 'urgent' && ticket.status === 'open',
+        `status=${r.status} ticket=${ticket && ticket.priority}/${ticket && ticket.status}`);
+      const opsMail = db.prepare(`SELECT * FROM email_queue WHERE sequence = 'driver-ops' AND step = 'ticket-urgent' ORDER BY id DESC LIMIT 1`).get();
+      check('urgent ticket queues immediate ops email with URGENT subject',
+        !!opsMail && /^URGENT/i.test(opsMail.subject) && /Blowout on I-94/.test(opsMail.subject),
+        `subject=${opsMail && opsMail.subject}`);
+
+      // 10i-2. Siren banner on the admin dashboard until acknowledged.
+      r = await req(`${BASE}/admin?token=${ADMIN_TOKEN}`, {});
+      const dashHtml = await r.text();
+      check('admin dashboard shows the urgent siren banner while unacknowledged',
+        r.status === 200 && /URGENT field ticket/i.test(dashHtml) && new RegExp(ticket.ticket_id).test(dashHtml),
+        `status=${r.status}`);
+      r = await req(`${BASE}/admin/tickets?token=${ADMIN_TOKEN}`, {});
+      check('tickets page also carries the siren banner',
+        r.status === 200 && /URGENT field ticket/i.test(await r.text()),
+        `status=${r.status}`);
+      r = await req(`${BASE}/dispatch/tickets/${encodeURIComponent(ticket.ticket_id)}/acknowledge?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: {} });
+      const acked = db.prepare(`SELECT status FROM support_tickets WHERE ticket_id = ?`).get(ticket.ticket_id);
+      check('acknowledging moves the urgent ticket off open (in_progress)',
+        r.status === 302 && acked.status === 'in_progress',
+        `status=${r.status} ticket=${acked.status}`);
+      r = await req(`${BASE}/admin?token=${ADMIN_TOKEN}`, {});
+      check('siren banner clears from the dashboard once acknowledged',
+        r.status === 200 && !/URGENT field ticket/i.test(await r.text()),
+        `status=${r.status}`);
+
+      // 10i-3. Broadcast to Complete-only audience: only the active Complete
+      // driver gets email + inbox row; Basic/past-due/canceled/unpaid get nothing.
+      const bcCount = (seq, emailAddr) => db.prepare(
+        `SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = ?`).get(emailAddr, seq).n;
+      r = await req(`${BASE}/dispatch/field-comms/broadcast?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { audience: 'complete', subject: `${ftag} Depot heads-up`, message: 'Lot closes 6pm today.' } });
+      check('broadcast POST redirects (302)',
+        r.status === 302, `status=${r.status}`);
+      check('Complete-only broadcast emails only the active Complete driver',
+        bcCount('field-broadcast', fComplete.email) === 1 &&
+          bcCount('field-broadcast', fBasic.email) === 0 &&
+          bcCount('field-broadcast', fPastDue.email) === 0 &&
+          bcCount('field-broadcast', fCanceled.email) === 0 &&
+          bcCount('field-broadcast', fFree.email) === 0,
+        `complete=${bcCount('field-broadcast', fComplete.email)} basic=${bcCount('field-broadcast', fBasic.email)}`);
+      const inboxCount = (id) => db.prepare(
+        `SELECT COUNT(*) n FROM driver_messages WHERE driver_id = ? AND kind = 'broadcast'`).get(id).n;
+      check('broadcast inbox rows only for the Complete audience',
+        inboxCount(fComplete.id) === 1 && inboxCount(fBasic.id) === 0 && inboxCount(fFree.id) === 0,
+        `complete=${inboxCount(fComplete.id)} basic=${inboxCount(fBasic.id)}`);
+      const blog = db.prepare(`SELECT * FROM broadcast_log ORDER BY id DESC LIMIT 1`).get();
+      const expectedComplete = db.prepare(
+        `SELECT COUNT(*) n FROM drivers d
+           JOIN dispatch_subscriptions s ON LOWER(d.email) = s.email
+          WHERE s.status = 'active' AND s.plan = 'complete'`).get().n;
+      check('broadcast logged with audience + driver count',
+        !!blog && blog.audience === 'complete' && Number(blog.driver_count) === expectedComplete && expectedComplete >= 1,
+        `log=${JSON.stringify(blog && { audience: blog.audience, driver_count: blog.driver_count })} expected=${expectedComplete}`);
+      r = await req(`${BASE}/dispatch/field-comms?token=${ADMIN_TOKEN}`, {});
+      const fcHtml = await r.text();
+      check('field-comms admin page renders composer + broadcast log',
+        r.status === 200 && /Broadcast to field/i.test(fcHtml) && /Depot heads-up/i.test(fcHtml),
+        `status=${r.status}`);
+
+      // 10i-4. Driver inbox: newest first, unread highlighted, then marked read.
+      r = await req(`${BASE}/d/${fComplete.access_token}`, {});
+      const inboxHtml = await r.text();
+      check('driver dashboard shows the Dispatch messages inbox with unread highlight',
+        r.status === 200 && /Dispatch messages/i.test(inboxHtml) &&
+          /Depot heads-up/i.test(inboxHtml) && />NEW</i.test(inboxHtml),
+        `status=${r.status}`);
+      r = await req(`${BASE}/d/${fComplete.access_token}`, {});
+      check('inbox highlight clears after the first view (marked read)',
+        r.status === 200 && !/>NEW</i.test(await r.text()),
+        `status=${r.status}`);
+      r = await req(`${BASE}/d/${fBasic.access_token}`, {});
+      check('driver with no messages sees no inbox card',
+        r.status === 200 && !/Dispatch messages/i.test(await r.text()),
+        `status=${r.status}`);
+
+      // 10i-5. Admin "Message driver": email + queued SMS to that driver only;
+      // scheduler marks the SMS provider-pending (never claimed delivered).
+      r = await req(`${BASE}/dispatch/drivers/${fBasic.id}/message?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { subject: `${ftag} Check in`, message: 'Call dispatch when you are free.' } });
+      check('message-driver POST redirects back to the driver page (302)',
+        r.status === 302 && /\/admin\/drivers\//.test(r.headers.get('location') || ''),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      check('direct message queues one email + one SMS for that driver',
+        bcCount('field-message', fBasic.email) === 1 && bcCount('field-message-sms', fBasic.email) === 1,
+        `email=${bcCount('field-message', fBasic.email)} sms=${bcCount('field-message-sms', fBasic.email)}`);
+      const dmRow = db.prepare(`SELECT * FROM driver_messages WHERE driver_id = ? AND kind = 'direct' ORDER BY id DESC LIMIT 1`).get(fBasic.id);
+      check('direct message stored in the driver inbox',
+        !!dmRow && /Check in/.test(dmRow.subject),
+        `row=${JSON.stringify(dmRow && dmRow.subject)}`);
+      const sched = await req(`${BASE}/admin/run-scheduler?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+      const smsRow = db.prepare(`SELECT status FROM email_queue WHERE email = ? AND sequence = 'field-message-sms' ORDER BY id DESC LIMIT 1`).get(fBasic.email);
+      check('scheduler marks the field SMS provider-pending, never delivered',
+        sched.status === 200 && smsRow && smsRow.status === 'provider-stub',
+        `sched=${sched.status} sms=${smsRow && smsRow.status}`);
+
+      // 10i-6. Messaging an unpaid driver is refused (active subscribers only).
+      r = await req(`${BASE}/dispatch/drivers/${fFree.id}/message?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { subject: 'x', message: 'y' } });
+      const loc = r.headers.get('location') || '';
+      check('message-driver refuses unpaid drivers (redirect with error, nothing queued)',
+        r.status === 302 && /msg=error/.test(loc) && bcCount('field-message', fFree.email) === 0,
+        `status=${r.status} loc=${loc}`);
+
+      // 10i-7. No duplicate urgent-ticket tables: the siren reuses support_tickets.
+      const tbls = db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all().map((t) => t.name);
+      check('no duplicate urgent_alerts table exists (support_tickets reused)',
+        !tbls.includes('urgent_alerts') && tbls.includes('support_tickets') &&
+          tbls.includes('driver_messages') && tbls.includes('broadcast_log'),
+        `tables=${tbls.filter((t) => /urgent|ticket|message|broadcast/.test(t)).join(',')}`);
+
+      // 10i-8. Broadcast to "all" reaches both active tiers, still nobody else.
+      r = await req(`${BASE}/dispatch/field-comms/broadcast?token=${ADMIN_TOKEN}`,
+        { method: 'POST', form: { audience: 'all', subject: `${ftag} All-hands`, message: 'Morning check-in at 8am.' } });
+      check('all-audience broadcast reaches every active subscriber and nobody else',
+        r.status === 302 &&
+          bcCount('field-broadcast', fComplete.email) === 2 &&
+          bcCount('field-broadcast', fBasic.email) === 1 &&
+          bcCount('field-broadcast', fPastDue.email) === 0 &&
+          bcCount('field-broadcast', fCanceled.email) === 0 &&
+          bcCount('field-broadcast', fFree.email) === 0,
+        `complete=${bcCount('field-broadcast', fComplete.email)} basic=${bcCount('field-broadcast', fBasic.email)}`);
+    }
+
+    /* ---- 10j. Tap-to-call / tap-to-text live contact ------------------------ */
+    // Covers: the dispatch number lives in ONE constant (lib/field_comms.js)
+    // and renders as tel:+14143680711 / sms:+14143680711; driver "Talk to
+    // dispatch live" buttons show for ACTIVE Basic + Complete subscribers and
+    // are hidden for unpaid/past-due/canceled drivers; Room "accountability
+    // line" buttons show for active claimed members and vanish for inactive
+    // members. 100% real tel:/sms: behavior — no in-app chat claims.
+    {
+      const fcLib = require(path.join(APP_ROOT, 'lib', 'field_comms'));
+      const TEL_HREF = 'tel:+14143680711';
+      const SMS_HREF = 'sms:+14143680711';
+      check('dispatch number is a single constant producing the exact tel:/sms: hrefs',
+        fcLib.DISPATCH_PHONE_DIGITS === '4143680711' &&
+          fcLib.dispatchTelHref() === TEL_HREF &&
+          fcLib.dispatchSmsHref() === SMS_HREF &&
+          fcLib.dispatchPhoneDisplay() === '(414) 368-0711');
+
+      const ltag = 'e2e-live';
+      const lEmail = (n) => `${ltag}-${n}@example.com`.toLowerCase();
+      const nowT4 = Date.now();
+      db.prepare(`DELETE FROM dispatch_subscriptions WHERE email LIKE ?`).run(`${ltag}%`);
+      db.prepare(`DELETE FROM drivers WHERE email LIKE ?`).run(`${ltag}%`);
+      const mkLDriver = (n) => {
+        const email = lEmail(n);
+        db.prepare(`INSERT INTO drivers (full_name, email, phone, home_city, home_state, status, submitted_at, access_token)
+                    VALUES (?, ?, ?, 'Milwaukee', 'WI', 'new', ?, ?)`)
+          .run(`Live Driver ${n}`, email, '4145550199', nowT4, `${ltag}-tok-${n}-` + 'd'.repeat(40));
+        return db.prepare('SELECT * FROM drivers WHERE email = ?').get(email);
+      };
+      const lComplete = mkLDriver('complete');
+      const lBasic = mkLDriver('basic');
+      const lPastDue = mkLDriver('pastdue');
+      const lCanceled = mkLDriver('canceled');
+      const lFree = mkLDriver('free');
+      makePaid(db, lComplete.email, 'complete');
+      makePaid(db, lBasic.email, 'basic');
+      makePaid(db, lPastDue.email, 'complete');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'past_due' WHERE email = ?`).run(lPastDue.email);
+      makePaid(db, lCanceled.email, 'complete');
+      db.prepare(`UPDATE dispatch_subscriptions SET status = 'canceled' WHERE email = ?`).run(lCanceled.email);
+
+      // 10j-1. Active Basic + Complete drivers see both live-contact buttons.
+      for (const [label, drv] of [['Complete', lComplete], ['Basic', lBasic]]) {
+        r = await req(`${BASE}/d/${drv.access_token}`, {});
+        const html = await r.text();
+        check(`${label} active driver sees Talk-to-dispatch-live with exact tel:/sms: hrefs`,
+          r.status === 200 && /Talk to dispatch live/i.test(html) &&
+            html.includes(`href="${TEL_HREF}"`) && html.includes(`href="${SMS_HREF}"`),
+          `status=${r.status}`);
+      }
+
+      // 10j-2. Unpaid / past-due / canceled drivers never see the buttons.
+      for (const [label, drv] of [['past-due', lPastDue], ['canceled', lCanceled], ['unpaid', lFree]]) {
+        r = await req(`${BASE}/d/${drv.access_token}`, {});
+        const html = await r.text();
+        check(`${label} driver does NOT see live-contact buttons`,
+          r.status === 200 && !/Talk to dispatch live/i.test(html) && !html.includes(TEL_HREF),
+          `status=${r.status}`);
+      }
+
+      // 10j-3. Room: active claimed member sees the accountability line buttons.
+      const liveRoomEmail = `e2e-live-room-${ts}@example.com`;
+      db.prepare(`DELETE FROM room_sessions WHERE email = ?`).run(liveRoomEmail);
+      db.prepare(`DELETE FROM room_members WHERE email = ?`).run(liveRoomEmail);
+      res = await req(`${BASE}/webhooks/stripe`, { method: 'POST', json: { email: liveRoomEmail, productId: 'room', amountCents: 4900 } });
+      const liveJar = new Jar();
+      res = await req(`${BASE}/room/claim`, { jar: liveJar, method: 'POST', form: { email: liveRoomEmail, password: 'livetestpass1', password2: 'livetestpass1' } });
+      check('room claim provisions the live-test member session',
+        res.status === 302 && liveJar.has('room_sess'), `status=${res.status}`);
+      res = await req(`${BASE}/room/welcome`, { jar: liveJar, method: 'POST', form: {} });
+      res = await req(`${BASE}/room`, { jar: liveJar });
+      const roomHtml = await res.text();
+      check('active claimed member sees accountability line call/text buttons',
+        res.status === 200 && /accountability line/i.test(roomHtml) &&
+          roomHtml.includes(`href="${TEL_HREF}"`) && roomHtml.includes(`href="${SMS_HREF}"`),
+        `status=${res.status}`);
+
+      // 10j-4. Inactive member: no member area, no buttons.
+      db.prepare(`UPDATE room_members SET status = 'canceled' WHERE email = ?`).run(liveRoomEmail);
+      res = await req(`${BASE}/room`, { jar: liveJar });
+      check('canceled member is bounced to login (no accountability line)',
+        res.status === 302 && (res.headers.get('location') || '').endsWith('/room/login'),
+        `status=${res.status} location=${res.headers.get('location')}`);
+      db.prepare(`DELETE FROM room_sessions WHERE email = ?`).run(liveRoomEmail);
+      db.prepare(`DELETE FROM room_members WHERE email = ?`).run(liveRoomEmail);
+    }
+
     /* ---- 11. Wealth Builder's Room --------------------------------- */
     // Covers: /checkout/room 302 to the $49/mo Stripe link, webhook room
     // provisioning (unsigned dev shape + signed shape), claim -> password ->
@@ -4702,6 +4959,514 @@ async function main() {
       'leftover rows');
 
 
+
+    /* ---- 12. Dispatcher logins + daily board + password reset ----------------- */
+    // Covers: real dispatcher logins (no public signup), 302-to-login for
+    // anonymous users, httpOnly session cookies, scrypt password storage,
+    // the daily board (today/Chicago, date nav, live counts matching the
+    // real tables, tel:/sms: driver buttons, 60s auto-refresh), login
+    // rate limiting, self-service reset (single-use 1h tokens, generic
+    // responses), admin one-time temp passwords with forced change,
+    // deactivation, and logout.
+    {
+      const dtag = 'e2e-dt';
+      const dEmail = (n) => `${dtag}-${n}-${ts}@example.com`;
+      const dispRow = (email) => db.prepare('SELECT * FROM dispatchers WHERE email = ?').get(email);
+      const chicagoToday = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'America/Chicago', year: 'numeric', month: '2-digit', day: '2-digit',
+      }).format(new Date());
+      const shiftDay = (ds, n) => {
+        const [y, m, d] = ds.split('-').map(Number);
+        const dt = new Date(Date.UTC(y, m - 1, d));
+        dt.setUTCDate(dt.getUTCDate() + n);
+        return dt.toISOString().slice(0, 10);
+      };
+      const tomorrow = shiftDay(chicagoToday, 1);
+
+      // 12-1. Anonymous users are bounced to the dispatcher login.
+      let r = await req(`${BASE}/dispatch/today`, {});
+      check('unauthenticated GET /dispatch/today redirects to /dispatch/login',
+        r.status === 302 && (r.headers.get('location') || '').includes('/dispatch/login'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      r = await req(`${BASE}/dispatch/today.json`, {});
+      check('unauthenticated board JSON also redirects to login',
+        r.status === 302 && (r.headers.get('location') || '').includes('/dispatch/login'),
+        `status=${r.status}`);
+      r = await req(`${BASE}/dispatch/field-comms`, {});
+      check('unauthenticated dispatcher field-comms redirects to login',
+        r.status === 302 && (r.headers.get('location') || '').includes('/dispatch/login'),
+        `status=${r.status}`);
+
+      // 12-2. Login page renders; wrong credentials fail generically.
+      r = await req(`${BASE}/dispatch/login`, {});
+      check('GET /dispatch/login renders the dispatcher login form',
+        r.status === 200 && /Dispatcher Login/.test(await r.text()), `status=${r.status}`);
+      const badJar = new Jar();
+      r = await req(`${BASE}/dispatch/login`, {
+        method: 'POST', jar: badJar, form: { email: dEmail('ghost'), password: 'wrongpassword1' },
+      });
+      check('login with wrong credentials fails with the generic message (no enumeration, no session)',
+        r.status === 200 && /Invalid email or password/.test(await r.text()) && !badJar.has('dispatch_sess'),
+        `status=${r.status} cookies=[${[...badJar.c.keys()].join(',')}]`);
+
+      // 12-3. Admin creates a dispatcher (shown once); non-admin refused.
+      r = await req(`${BASE}/admin/dispatchers`, {});
+      check('non-admin GET /admin/dispatchers is 403', r.status === 403, `status=${r.status}`);
+      const pwA = 'dispatchpass1';
+      r = await req(`${BASE}/admin/dispatchers?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { name: 'Dana Dispatcher', email: dEmail('a'), password: pwA },
+      });
+      const createdHtml = await r.text();
+      check('admin creates a dispatcher and the password is shown once',
+        r.status === 200 && /Dispatcher created/.test(createdHtml) && createdHtml.includes(pwA) &&
+          /Dana Dispatcher/.test(createdHtml),
+        `status=${r.status}`);
+      const dA = dispRow(dEmail('a'));
+      check('dispatcher password stored hashed with the room scrypt scheme (not plaintext)',
+        dA && dA.password_hash && dA.password_hash.startsWith('scrypt$') && !dA.password_hash.includes(pwA),
+        `hash=${dA && String(dA.password_hash).slice(0, 24)}`);
+
+      // 12-4. Correct login reaches the board; cookie is httpOnly.
+      const dJar = new Jar();
+      r = await req(`${BASE}/dispatch/login`, {
+        method: 'POST', jar: dJar, form: { email: dEmail('a'), password: pwA },
+      });
+      check('correct dispatcher login redirects to the board and sets the session cookie',
+        r.status === 302 && (r.headers.get('location') || '').endsWith('/dispatch/today') && dJar.has('dispatch_sess'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      const scHeaders = typeof r.headers.getSetCookie === 'function' ? r.headers.getSetCookie() : [];
+      check('dispatcher session cookie is httpOnly',
+        scHeaders.some((h) => h.startsWith('dispatch_sess=') && /httponly/i.test(h)),
+        `set-cookie=${JSON.stringify(scHeaders)}`);
+      r = await req(`${BASE}/dispatch/today`, { jar: dJar });
+      const boardHtml = await r.text();
+      check("logged-in dispatcher reaches the daily board (Today's routes)",
+        r.status === 200 && /Today's routes/.test(boardHtml) && /setInterval\(tick, 60000\)/.test(boardHtml),
+        `status=${r.status}`);
+
+      // 12-5. Board fixture: active route today, driver phone, 3 packages
+      // (2 delivered), 3 stops, 1 open exception.
+      db.prepare(`INSERT INTO drivers (full_name, email, phone, home_city, home_state, status, submitted_at, access_token)
+                  VALUES (?, ?, ?, 'Milwaukee', 'WI', 'active', ?, ?)`)
+        .run('Board Driver', dEmail('driver'), '4145550137', ts, `${dtag}-tok-${ts}`);
+      const bDrv = db.prepare('SELECT * FROM drivers WHERE email = ?').get(dEmail('driver'));
+      db.prepare(`INSERT INTO routes (route_code, driver_id, title, status, scheduled_date, stops, created_at, updated_at)
+                  VALUES (?, ?, ?, 'active', ?, ?, ?, ?)`)
+        .run(`${dtag}-R1`, bDrv.id, 'Downtown loop', chicagoToday,
+          JSON.stringify([{ stop: 1 }, { stop: 2 }, { stop: 3 }]), ts, ts);
+      const bRoute = db.prepare('SELECT * FROM routes WHERE route_code = ?').get(`${dtag}-R1`);
+      for (const [n, st] of [[1, 'delivered'], [2, 'delivered'], [3, 'in_transit']]) {
+        db.prepare(`INSERT INTO packages (package_id, route_id, driver_id, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)`)
+          .run(`${dtag}-P${n}`, bRoute.id, bDrv.id, st, ts, ts);
+      }
+      db.prepare(`INSERT INTO package_exceptions (package_id, route_id, driver_id, exception_type, description, status, created_at)
+                  VALUES (?, ?, ?, 'damaged', 'Box crushed', 'open', ?)`)
+        .run(`${dtag}-P3`, bRoute.id, bDrv.id, ts);
+
+      r = await req(`${BASE}/dispatch/today.json?date=${chicagoToday}`, { jar: dJar });
+      const bj = await r.json();
+      const expRoutes = db.prepare('SELECT COUNT(*) n FROM routes WHERE scheduled_date = ?').get(chicagoToday).n;
+      const expActive = db.prepare("SELECT COUNT(*) n FROM routes WHERE scheduled_date = ? AND status = 'active'").get(chicagoToday).n;
+      const expCompleted = db.prepare("SELECT COUNT(*) n FROM routes WHERE scheduled_date = ? AND status = 'completed'").get(chicagoToday).n;
+      const expDelivered = db.prepare(`SELECT COUNT(*) n FROM packages p JOIN routes r ON r.id = p.route_id
+                                       WHERE r.scheduled_date = ? AND p.status = 'delivered'`).get(chicagoToday).n;
+      const expExc = db.prepare(`SELECT COUNT(*) n FROM package_exceptions e JOIN routes r ON r.id = e.route_id
+                                 WHERE r.scheduled_date = ? AND e.status = 'open'`).get(chicagoToday).n;
+      check('board summary counts match the real tables exactly',
+        r.status === 200 && bj.summary.routes === expRoutes && bj.summary.active === expActive &&
+          bj.summary.completed === expCompleted && bj.summary.packages_delivered === expDelivered &&
+          bj.summary.open_exceptions === expExc && expRoutes >= 1,
+        `summary=${JSON.stringify(bj.summary)} expected=${JSON.stringify({ routes: expRoutes, active: expActive, completed: expCompleted, packages_delivered: expDelivered, open_exceptions: expExc })}`);
+      const row1 = (bj.html.match(new RegExp(`${dtag}-R1[\\s\\S]*?route-card`, 'g')) || []);
+      check('board row shows route code, driver name, stops, delivered/remaining, and the red exception flag',
+        bj.html.includes(`${dtag}-R1`) && bj.html.includes('Board Driver') && /3 stops/.test(bj.html) &&
+          /2\/3 delivered \(1 remaining\)/.test(bj.html) && /1 open exception/.test(bj.html),
+        `row-check`);
+      check('board row has tap-to-call / tap-to-text hrefs from the stored driver phone',
+        bj.html.includes('href="tel:+14145550137"') && bj.html.includes('href="sms:+14145550137"'),
+        'tel/sms hrefs');
+      check('board row links to the dispatcher-accessible route detail page',
+        bj.html.includes(`/dispatch/routes/${bRoute.id}`) && !bj.html.includes(`/admin/routes/${bRoute.id}`),
+        'route detail link');
+
+      // 12-5b. Read-only route detail page (dispatcher-accessible; no admin forms).
+      r = await req(`${BASE}/dispatch/routes/${bRoute.id}`, { jar: dJar });
+      const detailHtml = await r.text();
+      check('dispatcher can open the read-only route detail page',
+        r.status === 200 && detailHtml.includes(`${dtag}-R1`) && detailHtml.includes('Board Driver') &&
+          detailHtml.includes(`${dtag}-P1`) && /Downtown loop/.test(detailHtml),
+        `status=${r.status}`);
+      check('route detail shows driver tap-to-call / tap-to-text and no mutation forms',
+        detailHtml.includes('href="tel:+14145550137"') && detailHtml.includes('href="sms:+14145550137"') &&
+          !/<form/i.test(detailHtml),
+        'read-only detail');
+      r = await req(`${BASE}/dispatch/routes/${bRoute.id}`, {});
+      check('anonymous users cannot open the route detail page (302 to login)',
+        r.status === 302 && (r.headers.get('location') || '').includes('/dispatch/login'),
+        `status=${r.status}`);
+      r = await req(`${BASE}/dispatch/routes/999999999`, { jar: dJar });
+      check('unknown route id returns 404 on the dispatcher detail page',
+        r.status === 404, `status=${r.status}`);
+
+      // 12-6. Date navigation changes the set.
+      db.prepare(`INSERT INTO routes (route_code, driver_id, title, status, scheduled_date, stops, created_at, updated_at)
+                  VALUES (?, ?, ?, 'planned', ?, '[]', ?, ?)`)
+        .run(`${dtag}-R2`, bDrv.id, 'North run', tomorrow, ts, ts);
+      r = await req(`${BASE}/dispatch/today?date=${tomorrow}`, { jar: dJar });
+      const tmHtml = await r.text();
+      check('date picker shows only the chosen date routes',
+        r.status === 200 && tmHtml.includes(`${dtag}-R2`) && !tmHtml.includes(`${dtag}-R1`),
+        `status=${r.status}`);
+      r = await req(`${BASE}/dispatch/today`, { jar: dJar });
+      const todayHtml = await r.text();
+      check('default board is today (Chicago) with prev/next day navigation',
+        todayHtml.includes(`${dtag}-R1`) && !todayHtml.includes(`${dtag}-R2`) &&
+          todayHtml.includes(`date=${shiftDay(chicagoToday, -1)}`) && todayHtml.includes(`date=${tomorrow}`),
+        'nav links');
+
+      // 12-7. Self-service forgot: generic always; email only for active accounts.
+      const qCount = (email) => db.prepare(
+        `SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'dispatch-reset'`).get(email).n;
+      r = await req(`${BASE}/dispatch/forgot`, {
+        method: 'POST', form: { email: dEmail('a') },
+      });
+      check('forgot-password responds with the generic message (no enumeration)',
+        r.status === 200 && /If an account exists for that email, a reset link is on its way/.test(await r.text()),
+        `status=${r.status}`);
+      check('reset email queued for the existing active dispatcher',
+        qCount(dEmail('a')) === 1, `queued=${qCount(dEmail('a'))}`);
+      const resetBody = db.prepare(
+        `SELECT body_html FROM email_queue WHERE email = ? AND sequence = 'dispatch-reset' ORDER BY id DESC LIMIT 1`)
+        .get(dEmail('a')).body_html;
+      const tokenMatch = String(resetBody).match(/\/dispatch\/reset\/([a-f0-9]{64})/);
+      check('queued reset email carries a single-use /dispatch/reset/ link',
+        !!tokenMatch, 'token in email');
+      const resetToken = tokenMatch[1];
+      r = await req(`${BASE}/dispatch/forgot`, { method: 'POST', form: { email: dEmail('unknown') } });
+      check('forgot-password for an unknown email gives the same generic response with no email queued',
+        r.status === 200 && /If an account exists for that email/.test(await r.text()) && qCount(dEmail('unknown')) === 0,
+        `status=${r.status} queued=${qCount(dEmail('unknown'))}`);
+      // Deactivated dispatcher gets the generic response but no email.
+      r = await req(`${BASE}/admin/dispatchers?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { name: 'Deac Tivated', email: dEmail('c'), password: 'dispatchpass1' },
+      });
+      const dC = dispRow(dEmail('c'));
+      await req(`${BASE}/admin/dispatchers/${dC.id}/active?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { active: '0' },
+      });
+      r = await req(`${BASE}/dispatch/forgot`, { method: 'POST', form: { email: dEmail('c') } });
+      check('forgot-password for a deactivated dispatcher gives the generic response with no email queued',
+        r.status === 200 && /If an account exists for that email/.test(await r.text()) && qCount(dEmail('c')) === 0,
+        `queued=${qCount(dEmail('c'))}`);
+
+      // 12-8. Reset token: single-use, mismatch-safe, logs in.
+      r = await req(`${BASE}/dispatch/reset/${resetToken}`, {});
+      check('valid reset token renders the new-password form',
+        r.status === 200 && /Choose a new password/.test(await r.text()), `status=${r.status}`);
+      r = await req(`${BASE}/dispatch/reset/${resetToken}`, {
+        method: 'POST', form: { password: 'newdispatchpass1', password2: 'differentpass2' },
+      });
+      check('mismatched new passwords are rejected without consuming the token',
+        r.status === 200 && /do not match/.test(await r.text()), `status=${r.status}`);
+      r = await req(`${BASE}/dispatch/reset/${resetToken}`, {});
+      check('token still valid after a failed attempt',
+        r.status === 200 && /Choose a new password/.test(await r.text()), `status=${r.status}`);
+      const resetJar = new Jar();
+      r = await req(`${BASE}/dispatch/reset/${resetToken}`, {
+        method: 'POST', jar: resetJar, form: { password: 'newdispatchpass1', password2: 'newdispatchpass1' },
+      });
+      check('valid reset sets the new password and logs the dispatcher in',
+        r.status === 302 && (r.headers.get('location') || '').endsWith('/dispatch/today') && resetJar.has('dispatch_sess'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      const dA2 = dispRow(dEmail('a'));
+      check('reset password stored hashed (not plaintext)',
+        dA2.password_hash.startsWith('scrypt$') && !dA2.password_hash.includes('newdispatchpass1'));
+      r = await req(`${BASE}/dispatch/reset/${resetToken}`, {});
+      check('reset token cannot be reused',
+        r.status === 400 && /invalid or has expired/i.test(await r.text()), `status=${r.status}`);
+
+      // 12-9. Expired token rejected.
+      await req(`${BASE}/dispatch/forgot`, { method: 'POST', form: { email: dEmail('a') } });
+      const body2 = db.prepare(
+        `SELECT body_html FROM email_queue WHERE email = ? AND sequence = 'dispatch-reset' ORDER BY id DESC LIMIT 1`)
+        .get(dEmail('a')).body_html;
+      const token2 = String(body2).match(/\/dispatch\/reset\/([a-f0-9]{64})/)[1];
+      db.prepare(`UPDATE dispatcher_reset_tokens SET expires_at = ? WHERE dispatcher_id = ? AND used_at IS NULL`)
+        .run(Date.now() - 1000, dA.id);
+      r = await req(`${BASE}/dispatch/reset/${token2}`, {});
+      check('expired reset token is rejected',
+        r.status === 400 && /invalid or has expired/i.test(await r.text()), `status=${r.status}`);
+
+      // 12-10. Forgot-password rate limit: 5/hr per IP, then 429.
+      // (The forgot calls above already consumed part of the hourly
+      // allowance, so clear the counter to test the limiter in isolation.)
+      db.prepare('DELETE FROM dispatcher_forgot_attempts').run();
+      let forgotLocked = 0;
+      for (let i = 0; i < 6; i++) {
+        r = await req(`${BASE}/dispatch/forgot`, { method: 'POST', form: { email: dEmail('rl') } });
+        if (r.status === 429) forgotLocked++;
+      }
+      check('forgot-password endpoint rate-limits after 5 requests per hour per IP',
+        forgotLocked === 1, `locked-responses=${forgotLocked}`);
+      db.prepare('DELETE FROM dispatcher_forgot_attempts').run();
+
+      // 12-11. Admin one-time temp password forces a change on next login.
+      r = await req(`${BASE}/admin/dispatchers/${dA.id}/reset-password?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+      const tempHtml = await r.text();
+      const tempMatch = tempHtml.match(/Temporary password for[\s\S]*?<code[^>]*>([^<]+)<\/code>/);
+      check('admin temp password is shown once on the management page',
+        r.status === 200 && !!tempMatch, `status=${r.status}`);
+      const tempPw = tempMatch[1];
+      const dA3 = dispRow(dEmail('a'));
+      check('temp password stored hashed with must_change_password set',
+        dA3.password_hash.startsWith('scrypt$') && !dA3.password_hash.includes(tempPw) && dA3.must_change_password === 1,
+        'hash+flag');
+      const tempJar = new Jar();
+      r = await req(`${BASE}/dispatch/login`, {
+        method: 'POST', jar: tempJar, form: { email: dEmail('a'), password: tempPw },
+      });
+      check('login with the temp password forces the change-password screen',
+        r.status === 302 && (r.headers.get('location') || '').includes('/dispatch/change-password'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      r = await req(`${BASE}/dispatch/today`, { jar: tempJar });
+      check('temp-password session cannot reach the board before changing the password',
+        r.status === 302 && (r.headers.get('location') || '').includes('/dispatch/change-password'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      r = await req(`${BASE}/dispatch/change-password`, {
+        method: 'POST', jar: tempJar, form: { current: tempPw, password: 'finaldispatch1', password2: 'finaldispatch1' },
+      });
+      check('dispatcher chooses their own password (forced change succeeds)',
+        r.status === 200 && /Password changed/.test(await r.text()), `status=${r.status}`);
+      const finJar = new Jar();
+      r = await req(`${BASE}/dispatch/login`, {
+        method: 'POST', jar: finJar, form: { email: dEmail('a'), password: 'finaldispatch1' },
+      });
+      check('new password works and lands on the board',
+        r.status === 302 && (r.headers.get('location') || '').endsWith('/dispatch/today'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      const deadJar = new Jar();
+      r = await req(`${BASE}/dispatch/login`, {
+        method: 'POST', jar: deadJar, form: { email: dEmail('a'), password: tempPw },
+      });
+      check('the one-time temp password no longer works after the change',
+        r.status === 200 && /Invalid email or password/.test(await r.text()) && !deadJar.has('dispatch_sess'),
+        `status=${r.status}`);
+
+      // 12-12. Login rate limit: 5 failed attempts per 15 min per email+IP, then lockout.
+      let lockStatuses = [];
+      for (let i = 0; i < 6; i++) {
+        r = await req(`${BASE}/dispatch/login`, {
+          method: 'POST', form: { email: dEmail('ratelimit'), password: 'wrongpassword1' },
+        });
+        lockStatuses.push(r.status);
+      }
+      check('login rate-limits after 5 failed attempts (429 on the 6th)',
+        lockStatuses.slice(0, 5).every((s) => s === 200) && lockStatuses[5] === 429,
+        `statuses=${lockStatuses.join(',')}`);
+
+      // 12-13. Change password with the wrong current password is rejected.
+      r = await req(`${BASE}/dispatch/change-password`, {
+        method: 'POST', jar: finJar, form: { current: 'nottherightone', password: 'anotherpass12', password2: 'anotherpass12' },
+      });
+      check('change-password rejects a wrong current password',
+        r.status === 200 && /current password is not correct/i.test(await r.text()), `status=${r.status}`);
+
+      // 12-14. Logout ends the session.
+      r = await req(`${BASE}/dispatch/logout`, { jar: finJar });
+      check('logout redirects to the login page',
+        r.status === 302 && (r.headers.get('location') || '').endsWith('/dispatch/login'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      r = await req(`${BASE}/dispatch/today`, { jar: finJar });
+      check('board is unreachable after logout (302 to login)',
+        r.status === 302 && (r.headers.get('location') || '').includes('/dispatch/login'),
+        `status=${r.status}`);
+
+      // 12-15. Deactivated dispatcher cannot log in; sessions are killed.
+      await req(`${BASE}/admin/dispatchers/${dA.id}/active?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { active: '0' },
+      });
+      const deacJar = new Jar();
+      r = await req(`${BASE}/dispatch/login`, {
+        method: 'POST', jar: deacJar, form: { email: dEmail('a'), password: 'finaldispatch1' },
+      });
+      check('deactivated dispatcher cannot log in (generic message, no session)',
+        r.status === 200 && /Invalid email or password/.test(await r.text()) && !deacJar.has('dispatch_sess'),
+        `status=${r.status}`);
+
+      // Cleanup dispatcher fixtures.
+      db.prepare('DELETE FROM dispatcher_sessions WHERE dispatcher_id IN (SELECT id FROM dispatchers WHERE email LIKE ?)').run(`${dtag}-%`);
+      db.prepare('DELETE FROM dispatcher_reset_tokens WHERE dispatcher_id IN (SELECT id FROM dispatchers WHERE email LIKE ?)').run(`${dtag}-%`);
+      db.prepare('DELETE FROM dispatcher_login_attempts WHERE email LIKE ?').run(`${dtag}-%`);
+      db.prepare('DELETE FROM dispatchers WHERE email LIKE ?').run(`${dtag}-%`);
+      db.prepare('DELETE FROM package_exceptions WHERE package_id LIKE ?').run(`${dtag}-%`);
+      db.prepare('DELETE FROM packages WHERE package_id LIKE ?').run(`${dtag}-%`);
+      db.prepare('DELETE FROM routes WHERE route_code LIKE ?').run(`${dtag}-%`);
+      db.prepare('DELETE FROM drivers WHERE email LIKE ?').run(`${dtag}-%`);
+      db.prepare(`DELETE FROM email_queue WHERE email LIKE ? AND sequence = 'dispatch-reset'`).run(`${dtag}-%`);
+      check('dispatcher test fixtures cleaned up',
+        dispRow(dEmail('a')) === undefined &&
+          db.prepare('SELECT COUNT(*) n FROM routes WHERE route_code LIKE ?').get(`${dtag}-%`).n === 0,
+        'leftovers');
+    }
+
+    /* ---- 13. Wealth Room member password reset -------------------------------- */
+    // Mirrors the dispatcher reset: self-service forgot with generic
+    // responses (active + claimed members only), single-use 1-hour tokens,
+    // admin one-time temp passwords with forced change, member change
+    // password, and forgot rate limiting.
+    {
+      const rtag = 'e2e-rt';
+      const rEmail = (n) => `${rtag}-${n}-${ts}@example.com`.toLowerCase();
+      const roomLib = require(path.join(APP_ROOT, 'lib', 'room'));
+      const mkMember = (n, { claimed = true, status = 'active' } = {}) => {
+        const email = rEmail(n);
+        db.prepare(`INSERT INTO room_members (email, name, password_hash, joined_at, status, must_change_password)
+                    VALUES (?, ?, ?, ?, ?, 0)`)
+          .run(email, `Reset Member ${n}`, claimed ? roomLib.hashPassword('memberpass1') : null, ts, status);
+        return email;
+      };
+      const memberEmail = mkMember('a');
+      const unclaimedEmail = mkMember('unclaimed', { claimed: false });
+      const inactiveEmail = mkMember('inactive', { status: 'inactive' });
+      const rQCount = (email) => db.prepare(
+        `SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-reset'`).get(email).n;
+
+      // 13-1. Login page carries the forgot link; forgot is generic either way.
+      let r = await req(`${BASE}/room/login`, {});
+      check('room login page links to forgot password',
+        r.status === 200 && /\/room\/forgot/.test(await r.text()), `status=${r.status}`);
+      r = await req(`${BASE}/room/forgot`, {});
+      check('GET /room/forgot renders', r.status === 200 && /Reset Your Password/.test(await r.text()), `status=${r.status}`);
+      r = await req(`${BASE}/room/forgot`, { method: 'POST', form: { email: memberEmail } });
+      check('member forgot-password responds with the generic message',
+        r.status === 200 && /If an account exists for that email, a reset link is on its way/.test(await r.text()),
+        `status=${r.status}`);
+      check('reset email queued for the active claimed member',
+        rQCount(memberEmail) === 1, `queued=${rQCount(memberEmail)}`);
+      const rBody = db.prepare(
+        `SELECT body_html FROM email_queue WHERE email = ? AND sequence = 'room-reset' ORDER BY id DESC LIMIT 1`)
+        .get(memberEmail).body_html;
+      const rTokMatch = String(rBody).match(/\/room\/reset\/([a-f0-9]{64})/);
+      check('queued member reset email carries a single-use /room/reset/ link', !!rTokMatch, 'token in email');
+      const rToken = rTokMatch[1];
+      r = await req(`${BASE}/room/forgot`, { method: 'POST', form: { email: rEmail('unknown') } });
+      check('member forgot for an unknown email: same generic response, no email queued',
+        r.status === 200 && /If an account exists for that email/.test(await r.text()) && rQCount(rEmail('unknown')) === 0,
+        `queued=${rQCount(rEmail('unknown'))}`);
+      r = await req(`${BASE}/room/forgot`, { method: 'POST', form: { email: unclaimedEmail } });
+      check('unclaimed member (no password yet): generic response, no email queued',
+        r.status === 200 && /If an account exists for that email/.test(await r.text()) && rQCount(unclaimedEmail) === 0,
+        `queued=${rQCount(unclaimedEmail)}`);
+      r = await req(`${BASE}/room/forgot`, { method: 'POST', form: { email: inactiveEmail } });
+      check('inactive member: generic response, no email queued',
+        r.status === 200 && /If an account exists for that email/.test(await r.text()) && rQCount(inactiveEmail) === 0,
+        `queued=${rQCount(inactiveEmail)}`);
+
+      // 13-2. Reset token: single-use, logs the member in.
+      r = await req(`${BASE}/room/reset/${rToken}`, {});
+      check('valid member reset token renders the new-password form',
+        r.status === 200 && /Choose a New Password/.test(await r.text()), `status=${r.status}`);
+      const rJar = new Jar();
+      r = await req(`${BASE}/room/reset/${rToken}`, {
+        method: 'POST', jar: rJar, form: { password: 'newmemberpass1', password2: 'newmemberpass1' },
+      });
+      check('valid member reset sets the password and logs the member in',
+        r.status === 302 && (r.headers.get('location') || '').endsWith('/room') && rJar.has('room_sess'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      const mRow = db.prepare('SELECT password_hash FROM room_members WHERE email = ?').get(memberEmail);
+      check('member reset password stored hashed (not plaintext)',
+        mRow.password_hash.startsWith('scrypt$') && !mRow.password_hash.includes('newmemberpass1'));
+      r = await req(`${BASE}/room/reset/${rToken}`, {});
+      check('member reset token cannot be reused',
+        r.status === 400 && /invalid or has expired/i.test(await r.text()), `status=${r.status}`);
+
+      // 13-3. Expired token rejected.
+      await req(`${BASE}/room/forgot`, { method: 'POST', form: { email: memberEmail } });
+      const rBody2 = db.prepare(
+        `SELECT body_html FROM email_queue WHERE email = ? AND sequence = 'room-reset' ORDER BY id DESC LIMIT 1`)
+        .get(memberEmail).body_html;
+      const rToken2 = String(rBody2).match(/\/room\/reset\/([a-f0-9]{64})/)[1];
+      db.prepare('UPDATE room_reset_tokens SET expires_at = ? WHERE email = ? AND used_at IS NULL')
+        .run(Date.now() - 1000, memberEmail);
+      r = await req(`${BASE}/room/reset/${rToken2}`, {});
+      check('expired member reset token is rejected',
+        r.status === 400 && /invalid or has expired/i.test(await r.text()), `status=${r.status}`);
+
+      // 13-4. Forgot rate limit for members.
+      // (Earlier member forgot calls consumed part of the hourly allowance;
+      // clear the counter to test the limiter in isolation.)
+      db.prepare('DELETE FROM room_forgot_attempts').run();
+      let rLocked = 0;
+      for (let i = 0; i < 6; i++) {
+        r = await req(`${BASE}/room/forgot`, { method: 'POST', form: { email: rEmail('rl') } });
+        if (r.status === 429) rLocked++;
+      }
+      check('member forgot-password rate-limits after 5 requests per hour per IP',
+        rLocked === 1, `locked-responses=${rLocked}`);
+      db.prepare('DELETE FROM room_forgot_attempts').run();
+
+      // 13-5. Admin one-time temp password forces a member password change.
+      r = await req(`${BASE}/admin/room/member-reset-password?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { email: memberEmail },
+      });
+      const rTempHtml = await r.text();
+      const rTempMatch = rTempHtml.match(/Temporary password for[\s\S]*?<code[^>]*>([^<]+)<\/code>/);
+      check('admin member temp password is shown once',
+        r.status === 200 && !!rTempMatch, `status=${r.status}`);
+      const rTemp = rTempMatch[1];
+      const mRow2 = db.prepare('SELECT password_hash, must_change_password FROM room_members WHERE email = ?').get(memberEmail);
+      check('member temp password stored hashed with must_change_password set',
+        mRow2.password_hash.startsWith('scrypt$') && !mRow2.password_hash.includes(rTemp) && mRow2.must_change_password === 1,
+        'hash+flag');
+      const rtJar = new Jar();
+      r = await req(`${BASE}/room/login`, {
+        method: 'POST', jar: rtJar, form: { email: memberEmail, password: rTemp },
+      });
+      check('member login with the temp password forces the change-password screen',
+        r.status === 302 && (r.headers.get('location') || '').includes('/room/change-password'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      r = await req(`${BASE}/room`, { jar: rtJar });
+      check('member cannot reach the Room before changing the temp password',
+        r.status === 302 && (r.headers.get('location') || '').includes('/room/change-password'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      r = await req(`${BASE}/room/change-password`, {
+        method: 'POST', jar: rtJar, form: { current: rTemp, password: 'finalmember1', password2: 'finalmember1' },
+      });
+      check('member chooses their own password (forced change succeeds)',
+        r.status === 200 && /Password changed/.test(await r.text()), `status=${r.status}`);
+      r = await req(`${BASE}/room`, { jar: rtJar });
+      check('member is logged in after the forced change (fresh members flow to /room/welcome, not login)',
+        r.status === 302 && (r.headers.get('location') || '').endsWith('/room/welcome'),
+        `status=${r.status} loc=${r.headers.get('location')}`);
+      r = await req(`${BASE}/room/welcome`, { jar: rtJar });
+      check('member can open the Room welcome page after the forced change',
+        r.status === 200, `status=${r.status}`);
+      const rtDead = new Jar();
+      r = await req(`${BASE}/room/login`, {
+        method: 'POST', jar: rtDead, form: { email: memberEmail, password: rTemp },
+      });
+      check('the one-time member temp password no longer works after the change',
+        /Incorrect password|could not find/i.test(await r.text()) && !rtDead.has('room_sess'),
+        `status=${r.status}`);
+
+      // 13-6. Logged-in member change password (wrong current rejected).
+      r = await req(`${BASE}/room/change-password`, {
+        method: 'POST', jar: rtJar, form: { current: 'wrongcurrent1', password: 'anotherpass1', password2: 'anotherpass1' },
+      });
+      check('member change-password rejects a wrong current password',
+        r.status === 200 && /current password is not correct/i.test(await r.text()), `status=${r.status}`);
+
+      // Cleanup member fixtures.
+      db.prepare('DELETE FROM room_sessions WHERE email LIKE ?').run(`${rtag}-%`);
+      db.prepare('DELETE FROM room_reset_tokens WHERE email LIKE ?').run(`${rtag}-%`);
+      db.prepare('DELETE FROM room_members WHERE email LIKE ?').run(`${rtag}-%`);
+      db.prepare(`DELETE FROM email_queue WHERE email LIKE ? AND sequence = 'room-reset'`).run(`${rtag}-%`);
+      check('member reset fixtures cleaned up',
+        db.prepare('SELECT COUNT(*) n FROM room_members WHERE email LIKE ?').get(`${rtag}-%`).n === 0 &&
+          db.prepare('SELECT COUNT(*) n FROM room_reset_tokens WHERE email LIKE ?').get(`${rtag}-%`).n === 0,
+        'leftovers');
+    }
   } finally {
     try { if (db) db.close(); } catch {}
     await stopServer(child);

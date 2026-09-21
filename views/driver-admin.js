@@ -128,7 +128,7 @@ function routeMatchCardHtml({ driver: d, subscription, routeMatches = [], goal =
   <p class="muted">Matches are potential opportunities only — never promised routes, loads, contracts, or income.</p>`;
 }
 
-function driverDetailHtml({ driver: d, history, subscription, routeMatches = [], goal = null }) {
+function driverDetailHtml({ driver: d, history, subscription, routeMatches = [], goal = null, notice = '' }) {
   const statusOpts = drivers.DRIVER_STATUSES.map(
     (s) => `<option value="${s}"${d.status === s ? ' selected' : ''}>${esc(drivers.STATUS_LABELS[s])}</option>`
   ).join('');
@@ -163,10 +163,27 @@ function driverDetailHtml({ driver: d, history, subscription, routeMatches = [],
 
   return `
 <p><a href="/admin/drivers">&larr; Back to pipeline</a></p>
+${notice ? (String(notice).startsWith('error:')
+  ? `<p style="color:#d32f2f"><strong>${esc(notice)}</strong></p>`
+  : `<p style="color:#1b7f3b"><strong>Message queued — the driver gets one email plus one text.</strong></p>`) : ''}
 <h2>${esc(d.full_name)} ${statusBadge(d.status)}</h2>
 <p class="muted">Onboarded ${fmtTs(d.submitted_at)} · Source: ${esc(drivers.SOURCE_LABELS[d.source] || d.source)} · <a href="${esc(drivers.driverDashUrl(d.access_token))}">Driver dashboard link</a></p>
 
 ${subCard}
+
+<div class="card">
+  <h3>Message driver</h3>
+  <p class="muted">Queues one email plus one text to this driver (texts queue as provider-pending until a real SMS provider is configured). Active subscribers only.</p>
+  <form method="POST" action="/dispatch/drivers/${d.id}/message" class="form">
+    <label>Subject
+      <input type="text" name="subject" maxlength="120" required>
+    </label>
+    <label>Message
+      <textarea name="message" rows="3" maxlength="2000" required></textarea>
+    </label>
+    <button type="submit" class="btn">Send message</button>
+  </form>
+</div>
 
 <div class="card">
   <h3>Route matches (tier-based)</h3>

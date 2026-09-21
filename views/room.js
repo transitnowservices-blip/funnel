@@ -159,6 +159,7 @@ ${error ? `<div class="error">${esc(error)}</div>` : ''}
   <p><button type="submit" class="btn">Log In</button></p>
 </form>
 </div>
+<p class="muted">Forgot your password? <a href="/room/forgot">Reset it</a>.</p>
 <p class="muted">Paid but haven't set your password yet? <a href="/room/claim">Claim your access</a>.</p>`,
   });
 }
@@ -189,8 +190,68 @@ ${error ? `<div class="error">${esc(error)}</div>` : ''}
   });
 }
 
+function forgotPage({ message = '', error = '' } = {}) {
+  return roomLayout({
+    title: 'Reset Your Password',
+    member: null,
+    body: `<h1>Reset Your Password</h1>
+${message ? `<div class="notice">${esc(message)}</div>` : ''}
+${error ? `<div class="error">${esc(error)}</div>` : ''}
+<div class="card">
+<form method="POST" action="/room/forgot" class="form">
+  <label for="email">Email (the one you paid with)</label>
+  <input type="email" id="email" name="email" required autocomplete="email">
+  <p><button type="submit" class="btn">Send Reset Link</button></p>
+</form>
+</div>
+<p class="muted">The link expires in 1 hour and can only be used once.</p>
+<p><a href="/room/login">&larr; Back to login</a></p>`,
+  });
+}
+
+function resetPage({ token, error = '' } = {}) {
+  return roomLayout({
+    title: 'Choose a New Password',
+    member: null,
+    body: `<h1>Choose a New Password</h1>
+${error ? `<div class="error">${esc(error)}</div>` : ''}
+<div class="card">
+<form method="POST" action="/room/reset/${esc(token)}" class="form">
+  <label for="password">New password (8+ characters)</label>
+  <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password">
+  <label for="password2">Confirm new password</label>
+  <input type="password" id="password2" name="password2" required minlength="8" autocomplete="new-password">
+  <p><button type="submit" class="btn btn-gold">Set New Password</button></p>
+</form>
+</div>`,
+  });
+}
+
+function changePasswordPage({ member, error = '', ok = '', forced = false } = {}) {
+  return roomLayout({
+    title: 'Change Password',
+    member,
+    body: `<h1>Change Password</h1>
+${forced ? `<div class="notice"><strong>Your administrator issued a temporary password.</strong> Please choose your own password now to continue.</div>` : ''}
+${ok ? `<div class="notice">${esc(ok)}</div>` : ''}
+${error ? `<div class="error">${esc(error)}</div>` : ''}
+<div class="card">
+<form method="POST" action="/room/change-password" class="form">
+  <label for="current">Current password</label>
+  <input type="password" id="current" name="current" required autocomplete="current-password">
+  <label for="password">New password (8+ characters)</label>
+  <input type="password" id="password" name="password" required minlength="8" autocomplete="new-password">
+  <label for="password2">Confirm new password</label>
+  <input type="password" id="password2" name="password2" required minlength="8" autocomplete="new-password">
+  <p><button type="submit" class="btn">Change Password</button></p>
+</form>
+</div>
+<p><a href="/room">&larr; Back to the Room</a></p>`,
+  });
+}
+
 // --- Dashboard ----------------------------------------------------------------------
-function dashboardPage({ member, progress, announcements, goal, weekInfo, checkinDone }) {
+function dashboardPage({ member, progress, announcements, goal, weekInfo, checkinDone, accountabilityLine = false }) {
   const pct = progress.pct;
   const ann = (announcements || [])
     .map(
@@ -218,6 +279,7 @@ function dashboardPage({ member, progress, announcements, goal, weekInfo, checki
     member,
     body: `<h1>Your Wealth-Building Headquarters</h1>
 ${goalCard}
+${accountabilityLine ? accountabilityLineCard() : ''}
 <div class="card">
   <h2 style="margin-top:0">90-Day Wealth Action Plan</h2>
   <p class="muted">${progress.done} of ${progress.total} actions complete</p>
@@ -230,6 +292,21 @@ ${goalCard}
 </div>
 ${ann ? `<h2>Announcements</h2>${ann}` : ''}`,
   });
+}
+
+// --- Accountability line (tap-to-call / tap-to-text) --------------------------------
+// 100% real phone behavior: tel: and sms: links to Davena's chosen number
+// (single source of truth in lib/field_comms.js). Shown to active, claimed
+// Room members only. Plainly labeled as a real call/text.
+function accountabilityLineCard() {
+  const fc = require('../lib/field_comms');
+  return `<div class="card" style="border:2px solid var(--gold)">
+  <h2 style="margin-top:0">Your accountability line</h2>
+  <p>Talk to a real person on the Wealth Builder's Room team — call or text, it reaches a real phone.</p>
+  <p><a class="btn" href="${fc.dispatchTelHref()}">📞 Call your accountability line</a>
+  <a class="btn" href="${fc.dispatchSmsHref()}">💬 Text your accountability line</a></p>
+  <p class="muted">${esc(fc.dispatchPhoneDisplay())} · Standard call/text rates may apply.</p>
+</div>`;
 }
 
 // --- Classroom -------------------------------------------------------------------------
@@ -610,22 +687,31 @@ ${inThisWeek.length ? `<ul>${inThisWeek.map(li).join('')}</ul>` : '<p class="mut
 ${notThisWeek.length ? `<ul>${notThisWeek.map(li).join('')}</ul>` : '<p class="muted">Everyone with a goal has checked in. 🎉</p>'}`;
 }
 
-function roomAdminPage({ members, posts, accountability }) {
+function roomAdminPage({ members, posts, accountability, tempShown = null }) {
   const mrows = (members || [])
     .map(
       (m) => `<tr>
       <td>${esc(m.email)}</td><td>${esc(m.name || '—')}</td>
       <td>${esc(fmtDate(m.joined_at))}</td><td>${esc(fmtDateTime(m.last_login))}</td>
-      <td>${m.password_hash ? 'claimed' : 'not claimed'}</td>
+      <td>${m.password_hash ? 'claimed' : 'not claimed'}${m.must_change_password ? '<br><span class="muted">must change password</span>' : ''}</td>
       <td>${esc(m.status)}</td>
       <td><form method="POST" action="/admin/room/member-status" class="inline-form">
         <input type="hidden" name="email" value="${esc(m.email)}">
         <input type="hidden" name="status" value="${m.status === 'active' ? 'inactive' : 'active'}">
         <button type="submit" class="btn-small btn">${m.status === 'active' ? 'Deactivate' : 'Reactivate'}</button>
+      </form>
+      <form method="POST" action="/admin/room/member-reset-password" class="inline-form" style="margin-top:4px">
+        <input type="hidden" name="email" value="${esc(m.email)}">
+        <button type="submit" class="btn-small btn">Reset password</button>
       </form></td>
     </tr>`
     )
     .join('');
+  const tempBanner = tempShown
+    ? `<div class="notice" style="margin:12px 0"><strong>Temporary password for ${esc(tempShown.name || tempShown.email)} (${esc(tempShown.email)}) — shown once:</strong><br>` +
+      `<code style="font-size:18px">${esc(tempShown.password)}</code><br>` +
+      `<span class="muted">Give it to them by phone or text. They will be forced to choose their own password on next login.</span></div>`
+    : '';
   const prows = (posts || [])
     .map(
       (p) => `<tr>
@@ -648,7 +734,7 @@ function roomAdminPage({ members, posts, accountability }) {
     </tr>`
     )
     .join('');
-  return `<h2>Members (${(members || []).length})</h2>
+  return `${tempBanner}<h2>Members (${(members || []).length})</h2>
 <table class="admin-table"><thead><tr>
 <th>Email</th><th>Name</th><th>Joined</th><th>Last login</th><th>Access</th><th>Status</th><th>Action</th>
 </tr></thead><tbody>${mrows || '<tr><td colspan="7">No members yet.</td></tr>'}</tbody></table>
@@ -684,6 +770,9 @@ module.exports = {
   roomLayout,
   loginPage,
   claimPage,
+  forgotPage,
+  resetPage,
+  changePasswordPage,
   dashboardPage,
   classroomIndexPage,
   pillarPage,
