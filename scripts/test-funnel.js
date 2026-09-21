@@ -5294,6 +5294,63 @@ async function main() {
         r.status === 200 && /Invalid email or password/.test(await r.text()) && !deacJar.has('dispatch_sess'),
         `status=${r.status}`);
 
+      // 12-16. Queue processor delivers dispatch-reset emails (no lead record
+      // required — dispatchers are staff, not marketing leads). Regression
+      // test: these rows used to be cancelled as 'lead-missing'.
+      const autoLibD = require(path.join(APP_ROOT, 'lib', 'automation'));
+      const dProc = dEmail('proc');
+      db.prepare(`DELETE FROM email_queue WHERE email = ? AND sequence = 'dispatch-reset'`).run(dProc);
+      db.prepare(`DELETE FROM dispatchers WHERE email = ?`).run(dProc);
+      await req(`${BASE}/admin/dispatchers?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { name: 'Proc Test', email: dProc, password: 'dispatchpass1' },
+      });
+      await req(`${BASE}/dispatch/forgot`, { method: 'POST', form: { email: dProc } });
+      let pRow = db.prepare(
+        `SELECT * FROM email_queue WHERE email = ? AND sequence = 'dispatch-reset' ORDER BY id DESC LIMIT 1`).get(dProc);
+      check('dispatch-reset row is queued (not pre-cancelled)',
+        !!pRow && pRow.status === 'queued', `status=${pRow && pRow.status}`);
+      // Park every other due row so the sweep only touches our fixtures,
+      // then restore their original schedule afterwards.
+      const sweepNow = Date.now();
+      const parked = db.prepare(
+        `SELECT id, scheduled_for FROM email_queue WHERE status = 'queued' AND id != ? AND scheduled_for <= ?`)
+        .all(pRow.id, sweepNow);
+      const parkStmt = db.prepare(`UPDATE email_queue SET scheduled_for = ? WHERE id = ?`);
+      for (const pr of parked) parkStmt.run(sweepNow + 3600000, pr.id);
+      await autoLibD.processDueEmails(sweepNow);
+      const restoreStmt = db.prepare(`UPDATE email_queue SET scheduled_for = ? WHERE id = ?`);
+      for (const pr of parked) restoreStmt.run(pr.scheduled_for, pr.id);
+      pRow = db.prepare(`SELECT * FROM email_queue WHERE id = ?`).get(pRow.id);
+      check('queue processor sends the dispatch-reset email without a lead record',
+        pRow.status === 'sent', `status=${pRow.status} reason=${pRow.cancel_reason || 'none'}`);
+      // A dispatcher deactivated after requesting the reset must not receive it.
+      const dProc2 = dEmail('proc2');
+      db.prepare(`DELETE FROM email_queue WHERE email = ? AND sequence = 'dispatch-reset'`).run(dProc2);
+      db.prepare(`DELETE FROM dispatchers WHERE email = ?`).run(dProc2);
+      await req(`${BASE}/admin/dispatchers?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { name: 'Proc Test 2', email: dProc2, password: 'dispatchpass1' },
+      });
+      await req(`${BASE}/dispatch/forgot`, { method: 'POST', form: { email: dProc2 } });
+      const dP2 = dispRow(dProc2);
+      await req(`${BASE}/admin/dispatchers/${dP2.id}/active?token=${ADMIN_TOKEN}`, {
+        method: 'POST', form: { active: '0' },
+      });
+      let pRow2 = db.prepare(
+        `SELECT * FROM email_queue WHERE email = ? AND sequence = 'dispatch-reset' ORDER BY id DESC LIMIT 1`).get(dProc2);
+      const sweepNow2 = Date.now();
+      const parked2 = db.prepare(
+        `SELECT id, scheduled_for FROM email_queue WHERE status = 'queued' AND id != ? AND scheduled_for <= ?`)
+        .all(pRow2.id, sweepNow2);
+      for (const pr of parked2) parkStmt.run(sweepNow2 + 3600000, pr.id);
+      await autoLibD.processDueEmails(sweepNow2);
+      for (const pr of parked2) restoreStmt.run(pr.scheduled_for, pr.id);
+      pRow2 = db.prepare(`SELECT * FROM email_queue WHERE id = ?`).get(pRow2.id);
+      check('queue processor cancels the reset email for a deactivated dispatcher',
+        pRow2.status === 'cancelled' && pRow2.cancel_reason === 'inactive-dispatcher',
+        `status=${pRow2.status} reason=${pRow2.cancel_reason || 'none'}`);
+      db.prepare(`DELETE FROM email_queue WHERE email IN (?, ?) AND sequence = 'dispatch-reset'`).run(dProc, dProc2);
+      db.prepare(`DELETE FROM dispatchers WHERE email IN (?, ?)`).run(dProc, dProc2);
+
       // Cleanup dispatcher fixtures.
       db.prepare('DELETE FROM dispatcher_sessions WHERE dispatcher_id IN (SELECT id FROM dispatchers WHERE email LIKE ?)').run(`${dtag}-%`);
       db.prepare('DELETE FROM dispatcher_reset_tokens WHERE dispatcher_id IN (SELECT id FROM dispatchers WHERE email LIKE ?)').run(`${dtag}-%`);

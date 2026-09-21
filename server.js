@@ -4892,9 +4892,11 @@ app.get('/admin/emails', ah(async (req, res) => {
   const mapped = rows.map((e) => ({
     id: e.id,
     lead_id: e.lead_id,
+    to: e.email || '',
     sequence: e.sequence,
     step_id: e.step,
     subject: e.subject,
+    body_preview: String(e.body_html || '').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 140),
     scheduled_at: fmtTs(e.scheduled_for),
     sent_at: e.sent_at ? fmtTs(e.sent_at) : 'pending',
     status: e.status + (e.cancel_reason ? ` (${e.cancel_reason})` : ''),

@@ -159,11 +159,12 @@ function cartsTableHtml(carts) {
 function emailsTableHtml(queue) {
   const list = Array.isArray(queue) ? queue : [];
   const rows = list.map(e => [
-    e.id, e.lead_id, e.sequence, e.step_id, e.subject,
+    e.id, e.lead_id, e.to || '', e.sequence, e.step_id, e.subject,
+    e.body_preview || '',
     e.scheduled_at, e.sent_at || 'pending', e.status,
   ]);
   return `<p>${list.length} queued/sent email(s)</p>` +
-    table(['ID', 'Lead', 'Sequence', 'Step', 'Subject', 'Scheduled', 'Sent', 'Status'], rows);
+    table(['ID', 'Lead', 'To', 'Sequence', 'Step', 'Subject', 'Body preview', 'Scheduled', 'Sent', 'Status'], rows);
 }
 
 function outboxHtml(items) {

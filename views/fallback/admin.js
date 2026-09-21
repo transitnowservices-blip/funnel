@@ -156,13 +156,14 @@ function cartsTableHtml(carts) {
 function emailsTableHtml(queue) {
   const rows = (Array.isArray(queue) ? queue : [])
     .map(
-      (e) => `<tr><td>${e.id}</td><td>${esc(e.lead_id)}</td><td>${esc(e.sequence)}</td>
+      (e) => `<tr><td>${e.id}</td><td>${esc(e.lead_id)}</td><td>${esc(e.to || '')}</td><td>${esc(e.sequence)}</td>
         <td>${esc(e.step_id)}</td><td>${esc((e.subject || '').slice(0, 80))}</td>
+        <td>${esc((e.body_preview || '').slice(0, 140))}</td>
         <td>${esc(e.scheduled_at)}</td><td>${esc(e.sent_at)}</td><td>${esc(e.status)}</td></tr>`
     )
     .join('');
   const body = `<table class="admin">
-      <tr><th>ID</th><th>Lead</th><th>Sequence</th><th>Step</th><th>Subject</th><th>Scheduled</th><th>Sent</th><th>Status</th></tr>
+      <tr><th>ID</th><th>Lead</th><th>To</th><th>Sequence</th><th>Step</th><th>Subject</th><th>Body preview</th><th>Scheduled</th><th>Sent</th><th>Status</th></tr>
       ${rows || '<tr><td colspan="8">Queue is empty.</td></tr>'}
     </table>`;
   return body; // server.js wraps page fns with adminLayout() (same as real views)
