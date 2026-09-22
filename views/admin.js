@@ -2,6 +2,17 @@
 // /admin routes and supplies real data. No backend logic here.
 'use strict';
 
+// Content-library metadata (offers, cadences, kinds, tracked-URL builder).
+// lib/content.js only pulls in lib/db + lib/config — no cycle with views.
+let contentOffers = {}, contentCadences = {}, contentKinds = {}, contentTrackedUrl = null;
+try {
+  const _content = require('../lib/content');
+  contentOffers = _content.OFFERS;
+  contentCadences = _content.CADENCES;
+  contentKinds = _content.KINDS;
+  contentTrackedUrl = _content.trackedUrl;
+} catch (e) { /* library unavailable — pages render without it */ }
+
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
@@ -44,6 +55,7 @@ pre.config-view{background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto;
 <nav class="admin-nav">
   <a href="/admin">Dashboard</a>
   <a href="/admin/leads">Leads</a>
+  <a href="/admin/content">Content</a>
   <a href="/admin/crm">CRM</a>
   <a href="/admin/carts">Carts</a>
   <a href="/admin/emails">Emails</a>
@@ -162,6 +174,105 @@ function followUpTableHtml(items) {
 function fmtTsLocal(ts) {
   try { return new Date(Number(ts)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
   catch (e) { return ''; }
+}
+
+function contentSuggestionHtml(suggestion, baseUrl, token) {
+  if (!suggestion || !suggestion.primary) {
+    return `<h2>What should I post today?</h2><p>No content is due right now. Add items to the library below and mark their cadence.</p>`;
+  }
+  const p = suggestion.primary;
+  const offerName = (typeof contentOffers !== 'undefined' && contentOffers[p.offer]) || p.offer;
+  const flyer = p.flyer_path
+    ? (/\.(png|jpe?g|gif|webp)$/i.test(p.flyer_path)
+        ? `<img src="${esc(p.flyer_path)}" alt="flyer" style="max-width:320px;border:1px solid #ccc;border-radius:8px">`
+        : `<p><a href="${esc(p.flyer_path)}" target="_blank">View flyer</a></p>`)
+    : '';
+  const link = (typeof contentTrackedUrl === 'function')
+    ? contentTrackedUrl(p, baseUrl)
+    : `${esc(baseUrl)}${esc(p.link)}?campaign=${esc(p.campaign_code)}`;
+  const also = (suggestion.alsoDue || []).map(a =>
+    `<li><strong>${esc(a.title)}</strong> — ${esc((typeof contentCadences !== 'undefined' && contentCadences[a.cadence]) || a.cadence)}</li>`
+  ).join('');
+  return `<h2>What should I post today?</h2>
+  <div style="border:2px solid #1F3A5F;border-radius:10px;padding:16px;margin:12px 0;background:#f8fafc">
+    <p style="margin:0 0 4px"><strong>${esc(offerName)}</strong> · ${esc((typeof contentCadences !== 'undefined' && contentCadences[p.cadence]) || p.cadence)}</p>
+    <h3 style="margin:4px 0">${esc(p.title)}</h3>
+    ${flyer}
+    <p><strong>Caption / message:</strong></p>
+    <p style="background:#fff;border:1px solid #ddd;border-radius:6px;padding:10px">${esc(p.body || '')}</p>
+    <p><strong>CTA:</strong> ${esc(p.cta || '')}</p>
+    <p><strong>Where to post:</strong> ${esc(p.where_to_post || '—')}</p>
+    <p><strong>Tracked link (post this exact link):</strong><br>
+    <input type="text" readonly value="${esc(link)}" onclick="this.select()" style="width:100%;min-height:40px"></p>
+  </div>
+  ${also ? `<p><strong>Also due:</strong></p><ul>${also}</ul>` : ''}`;
+}
+
+function contentLibraryTableHtml(items, statsById, baseUrl, token) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return '<p>No content yet. Add your first flyer or message below.</p>';
+  const groups = {};
+  for (const it of list) { (groups[it.offer] = groups[it.offer] || []).push(it); }
+  let html = '';
+  for (const offer of Object.keys(groups)) {
+    const offerName = (typeof contentOffers !== 'undefined' && contentOffers[offer]) || offer;
+    const rows = groups[offer].map(it => {
+      const st = (statsById && statsById[it.id]) || { leads: 0, customers: 0 };
+      const toggleLabel = it.active ? 'Deactivate' : 'Activate';
+      return `<tr>
+        <td>${esc(it.title)}<br><small>${esc(it.kind)} · code: <code>${esc(it.campaign_code)}</code></small></td>
+        <td>${esc((typeof contentCadences !== 'undefined' && contentCadences[it.cadence]) || it.cadence)}</td>
+        <td>${st.leads}</td>
+        <td>${st.customers}</td>
+        <td>${it.times_suggested || 0}×</td>
+        <td>${it.active ? 'yes' : 'no'}</td>
+        <td>
+          <a href="/admin/content/${it.id}/edit?token=${esc(token)}">Edit</a> ·
+          <form method="POST" action="/admin/content/${it.id}/toggle?token=${esc(token)}" style="display:inline">
+            <button type="submit">${toggleLabel}</button>
+          </form>
+        </td>
+      </tr>`;
+    }).join('');
+    html += `<h3>${esc(offerName)}</h3>` +
+      `<table class="admin-table"><thead><tr><th>Item</th><th>Cadence</th><th>Leads</th><th>Customers</th><th>Suggested</th><th>Active</th><th>Actions</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }
+  return html;
+}
+
+function contentFormHtml(item, offers, cadences, kinds, token) {
+  const it = item || {};
+  const isEdit = !!(item && item.id);
+  const action = isEdit ? `/admin/content/${it.id}?token=${esc(token)}` : `/admin/content/add?token=${esc(token)}`;
+  const opt = (map, cur) => Object.keys(map).map(k =>
+    `<option value="${esc(k)}"${k === cur ? ' selected' : ''}>${esc(map[k])}</option>`).join('');
+  return `<h2>${isEdit ? 'Edit content item' : 'Add flyer / message'}</h2>
+  <form method="POST" action="${action}" style="max-width:640px">
+    <p><label>Offer<br><select name="offer">${opt(offers, it.offer || 'room')}</select></label></p>
+    <p><label>Title<br><input type="text" name="title" value="${esc(it.title || '')}" style="width:100%"></label></p>
+    <p><label>Type<br><select name="kind">${opt(kinds, it.kind || 'message')}</select></label></p>
+    <p><label>Caption / message<br><textarea name="body" rows="5" style="width:100%">${esc(it.body || '')}</textarea></label></p>
+    <p><label>Flyer file path (e.g. /content/dispatch-flyer.png — optional)<br><input type="text" name="flyer_path" value="${esc(it.flyer_path || '')}" style="width:100%"></label></p>
+    <p><label>How often<br><select name="cadence">${opt(cadences, it.cadence || 'weekly')}</select></label></p>
+    <p><label>CTA<br><input type="text" name="cta" value="${esc(it.cta || '')}" style="width:100%"></label></p>
+    <p><label>Where to post<br><input type="text" name="where_to_post" value="${esc(it.where_to_post || '')}" style="width:100%"></label></p>
+    <p><label>Destination link<br><input type="text" name="link" value="${esc(it.link || '')}" style="width:100%"></label></p>
+    <p><label>Campaign code (goes in the tracked link)<br><input type="text" name="campaign_code" value="${esc(it.campaign_code || '')}" style="width:100%"></label></p>
+    <p><button type="submit">${isEdit ? 'Save changes' : 'Add to library'}</button>
+    ${isEdit ? ` <a href="/admin/content?token=${esc(token)}">Cancel</a>` : ''}</p>
+  </form>`;
+}
+
+function contentPageHtml(opts) {
+  const { suggestion, items, statsById, baseUrl, token } = opts || {};
+  return contentSuggestionHtml(suggestion, baseUrl, token) +
+    `<h2>Content library</h2>
+     <p>Leads and customers are counted from the tracked <code>?campaign=</code> links. Post the exact tracked link shown above so results attribute correctly.</p>` +
+    contentLibraryTableHtml(items, statsById, baseUrl, token) +
+    contentFormHtml(null,
+      (typeof contentOffers !== 'undefined' ? contentOffers : {}),
+      (typeof contentCadences !== 'undefined' ? contentCadences : {}),
+      (typeof contentKinds !== 'undefined' ? contentKinds : {}), token);
 }
 
 function cartsTableHtml(carts) {
@@ -482,6 +593,8 @@ module.exports = {
   dashboardHtml,
   leadsTableHtml,
   followUpTableHtml,
+  contentPageHtml,
+  contentFormHtml,
   cartsTableHtml,
   emailsTableHtml,
   outboxHtml,

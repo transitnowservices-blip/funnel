@@ -30,6 +30,7 @@ const db = require('./lib/db');
 const config = require('./lib/config');
 const tags = require('./lib/tags');
 const pipeline = require('./lib/pipeline');
+const content = require('./lib/content');
 const subscriptions = require('./lib/subscriptions');
 const tracking = require('./lib/tracking');
 const automation = require('./lib/automation');
@@ -411,6 +412,11 @@ async function identifyLead(req, res, fields, product, consent) {
   // Merge this visitor's anonymous history onto the lead.
   await db.run('UPDATE page_views SET lead_id = ? WHERE visitor_id = ? AND lead_id IS NULL', [lead.id, req.vid]);
   await db.run('UPDATE events SET lead_id = ? WHERE visitor_id = ? AND lead_id IS NULL', [lead.id, req.vid]);
+  // Attribute the lead to the content-library item (flyer/message) whose
+  // tracked ?campaign= link they came in on, so Davena sees what produces.
+  if (lead.campaign) {
+    try { await content.recordAttribution(lead.id, lead.campaign); } catch (e) { /* attribution never blocks capture */ }
+  }
   tracking.setCookie(res, 'lid', String(lead.id));
   return lead;
 }
@@ -5191,6 +5197,44 @@ app.post('/admin/config/:file', (req, res) => {
   res.json({ ok: true, file });
 });
 
+// --- Content library: Davena's reusable flyers/messages -------------------------
+// "What should I post today?" + library management + per-item attribution.
+app.get('/admin/content', ah(async (req, res) => {
+  await content.ensureSeeded();
+  const site = config.getSite() || {};
+  const base = String(site.baseUrl || '').replace(/\/$/, '');
+  const m = await adminMetrics().catch(() => ({}));
+  const suggestion = await content.suggestToday(Date.now(), (m && m.followUpsDue) || 0);
+  const items = await content.listItems(false);
+  const statsById = {};
+  for (const it of items) statsById[it.id] = await content.itemStats(it.id);
+  res.send(adminViews.adminLayout('Content library',
+    adminViews.contentPageHtml({ suggestion, items, statsById, baseUrl: base, token: req.query.token || '' })));
+}));
+
+app.post('/admin/content/add', ah(async (req, res) => {
+  await content.createItem(req.body || {});
+  res.redirect('/admin/content?token=' + encodeURIComponent(req.query.token || ''));
+}));
+
+app.get('/admin/content/:id/edit', ah(async (req, res) => {
+  const item = await content.getItem(req.params.id);
+  if (!item) return res.status(404).type('text').send('Not found');
+  res.send(adminViews.adminLayout('Edit content',
+    adminViews.contentFormHtml(item, content.OFFERS, content.CADENCES, content.KINDS, req.query.token || '')));
+}));
+
+app.post('/admin/content/:id', ah(async (req, res) => {
+  await content.updateItem(req.params.id, req.body || {});
+  res.redirect('/admin/content?token=' + encodeURIComponent(req.query.token || ''));
+}));
+
+app.post('/admin/content/:id/toggle', ah(async (req, res) => {
+  const item = await content.getItem(req.params.id);
+  if (item) await content.setActive(item.id, !item.active);
+  res.redirect('/admin/content?token=' + encodeURIComponent(req.query.token || ''));
+}));
+
 app.post('/admin/run-scheduler', ah(async (req, res) => {
   // Optional `now` override (epoch ms) lets tests drive a deterministic
   // weekday through the scheduler. Admin-token protected like the endpoint.
@@ -5229,6 +5273,11 @@ setInterval(() => {
 // Seed the Room's foundational community posts (idempotent — skips existing titles).
 seedRoomPosts().catch((err) => {
   console.error('[boot] seedRoomPosts failed:', err);
+});
+
+// Seed Davena's reusable content library (idempotent — skips when items exist).
+content.ensureSeeded().catch((err) => {
+  console.error('[boot] content library seed failed:', err);
 });
 
 automation.runSchedulerPass().then((boot) => {

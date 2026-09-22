@@ -1988,6 +1988,69 @@ async function main() {
       db.prepare(`DELETE FROM email_queue WHERE email = ? AND sequence = 'room-noprogress-nudge'`).run(em);
     }
 
+    /* ---- 12c. Content library: reuse flyers/messages, rotate, attribute ---- */
+    const seededItems = db.prepare('SELECT id, offer, cadence, campaign_code FROM content_library WHERE active = 1').all();
+    check('content library seeded with one item per offer',
+      seededItems.length >= 5 && new Set(seededItems.map(i => i.offer)).size >= 5,
+      `items=${seededItems.length}`);
+    const roomItem = seededItems.find(i => i.offer === 'room');
+
+    res = await req(`${BASE}/admin/content?token=${ADMIN_TOKEN}`, {});
+    const contentHtml = await res.text();
+    check('GET /admin/content shows "What should I post today?"',
+      res.status === 200 && /What should I post today/i.test(contentHtml), `status=${res.status}`);
+    check('suggestion includes caption, CTA, and where-to-post',
+      /stop collecting ideas/i.test(contentHtml) && /fill out the short form/i.test(contentHtml) && /Where to post/i.test(contentHtml),
+      '');
+    check('suggestion shows the exact tracked link with campaign code',
+      contentHtml.includes('campaign=room-ideas-income'), '');
+
+    // Attribution: a lead arriving on a tracked link is tied to the item.
+    const attrEmail = `e2e-attribution-${ts}@example.com`;
+    const attrJar = new Jar();
+    res = await req(`${BASE}/room/start?campaign=room-ideas-income`, { jar: attrJar, method: 'POST', form: { first_name: 'Attr', email: attrEmail, goal: 'build-a-business', consent: 'yes' } });
+    const attrLead = db.prepare('SELECT id, campaign FROM leads WHERE email = ?').get(attrEmail);
+    const attrRow = attrLead && db.prepare(
+      `SELECT a.lead_id FROM content_attribution a
+       JOIN content_library c ON c.id = a.content_id
+       WHERE a.lead_id = ? AND c.campaign_code = 'room-ideas-income'`).get(attrLead.id);
+    check('lead from tracked link attributed to the library item',
+      !!(attrLead && attrLead.campaign === 'room-ideas-income' && attrRow),
+      `campaign=${attrLead && attrLead.campaign}`);
+
+    // Rotation: add a second daily item; two page loads must suggest different items.
+    res = await req(`${BASE}/admin/content/add?token=${ADMIN_TOKEN}`, { method: 'POST', form: {
+      offer: 'room', title: 'Rotation test message', kind: 'message', cadence: 'daily',
+      body: 'Rotation test body', cta: 'Test CTA', where_to_post: 'Facebook',
+      link: '/room/start', campaign_code: `room-rotation-${ts}`,
+    } });
+    check('POST /admin/content/add creates item (302)', res.status === 302, `status=${res.status}`);
+    const firstTitle = /<h3 style="margin:4px 0">([^<]+)<\/h3>/.exec(await (await req(`${BASE}/admin/content?token=${ADMIN_TOKEN}`, {})).text());
+    const secondTitle = /<h3 style="margin:4px 0">([^<]+)<\/h3>/.exec(await (await req(`${BASE}/admin/content?token=${ADMIN_TOKEN}`, {})).text());
+    check('suggestions rotate between daily items',
+      firstTitle && secondTitle && firstTitle[1] !== secondTitle[1],
+      `first=${firstTitle && firstTitle[1]} second=${secondTitle && secondTitle[1]}`);
+
+    // Edit + deactivate flow.
+    const rotItem = db.prepare('SELECT id FROM content_library WHERE campaign_code = ?').get(`room-rotation-${ts}`);
+    res = await req(`${BASE}/admin/content/${rotItem.id}?token=${ADMIN_TOKEN}`, { method: 'POST', form: {
+      offer: 'room', title: 'Rotation test message (edited)', kind: 'message', cadence: 'daily',
+      body: 'Rotation test body', cta: 'Test CTA', where_to_post: 'Facebook',
+      link: '/room/start', campaign_code: `room-rotation-${ts}`,
+    } });
+    check('POST /admin/content/:id edits item (302)', res.status === 302, `status=${res.status}`);
+    res = await req(`${BASE}/admin/content/${rotItem.id}/edit?token=${ADMIN_TOKEN}`, {});
+    check('edit page shows updated title', res.status === 200 && (await res.text()).includes('Rotation test message (edited)'),
+      `status=${res.status}`);
+    res = await req(`${BASE}/admin/content/${rotItem.id}/toggle?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    const toggled = db.prepare('SELECT active FROM content_library WHERE id = ?').get(rotItem.id);
+    check('toggle deactivates item', res.status === 302 && toggled.active === 0, `active=${toggled.active}`);
+
+    // Per-item results: the library page reports leads generated.
+    res = await req(`${BASE}/admin/content?token=${ADMIN_TOKEN}`, {});
+    check('library table shows attribution counts', res.status === 200 && /Leads<\/th>/.test(await res.text()),
+      `status=${res.status}`);
+
     // Admin: new dashboard sections, lead detail, config env status.
     res = await req(`${BASE}/admin?token=${ADMIN_TOKEN}`, {});
     const dashHtml = await res.text();
