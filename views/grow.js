@@ -168,6 +168,22 @@ function growLandingPage() {
   </p>
 </section>
 ${dispatchPricingSection()}
+<section id="learn-the-play">
+  <h2>Or learn the play yourself</h2>
+  <p class="lede">Two paths, one goal. <strong>Run the play</strong> with TransitNow Dispatch above — or <strong>learn the play</strong> in the Wealth Builder's Room: daily accountability, a 90-day goal, and the training to build it yourself.</p>
+  <div class="card price-box">
+    <h3>Wealth Builder's Room — Learn the play</h3>
+    <p class="price">$49<span class="billing">/month</span></p>
+    <ul class="bullets" style="text-align:left">
+      <li>Daily accountability check-ins</li>
+      <li>Your own 90-day goal, tracked weekly</li>
+      <li>Business and wealth-building training</li>
+      <li>Learn to run your own operation</li>
+    </ul>
+    <p><a class="btn btn-secondary btn-large" href="${STRIPE_ROOM_URL}">JOIN THE ROOM — $49/MO</a></p>
+    <p class="honest-note">Secure checkout via Stripe. Cancel anytime.</p>
+  </div>
+</section>
 <section>
   <h2>Straight answers</h2>
   <p><strong>Is work guaranteed?</strong><br>No — and anyone who guarantees it is lying to you. Matches are real opportunities from our pipeline. What you book depends on your qualifications, availability, and territory.</p>
@@ -194,6 +210,7 @@ module.exports.growLandingPage = growLandingPage;
 // never change them. Copy keeps no-guarantee language throughout.
 const STRIPE_BASIC_URL = 'https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n';
 const STRIPE_COMPLETE_URL = 'https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o';
+const STRIPE_ROOM_URL = 'https://buy.stripe.com/5kQdRbfEp5Hrc8Yf38dIA00';
 
 function dispatchPricingSection() {
   return `
