@@ -130,31 +130,61 @@ function disclosureBox() {
 
 module.exports = { escHtml, escAttr, LABELS, asArray, textField, textArea, checkGroup, radioGroup, selectField, errorBox, disclosureBox };
 
-// --- /grow landing page (spec section 2 — exact copy) ---
+// --- /grow landing page: built to convert cold flyer traffic -----------------
+// First touch for flyer QR scanners. Speaks to the driver's pain, shows exactly
+// what the dispatch plans do, and drives to the Stripe subscribe buttons.
+// Pricing section, Stripe URLs, and no-guarantee disclosures are untouched.
 function growLandingPage() {
   return `
 <section class="hero">
-  <p class="eyebrow">GROW WITH TRANSITNOW</p>
-  <h1>WE'RE GROWING — COME GROW WITH US.</h1>
-  <p class="subhead">TransitNow is building an actively growing courier and logistics company, and we're looking for drivers, business owners, fleet operators, dispatchers, and motivated people who want to grow with us.</p>
+  <p class="eyebrow">TRANSITNOW DISPATCH</p>
+  <h1>YOU DRIVE. WE FIND THE WORK.</h1>
+  <p class="subhead">Stop burning hours chasing brokers and deadheading between loads. TransitNow Dispatch puts a dispatcher in your corner — fresh route matches in your city, delivered to your phone every Monday. From $50/month. Cancel anytime.</p>
+  <p>
+    <a class="btn btn-large" href="#dispatch-plans">START DISPATCH — $50/MO</a>
+    <a class="btn btn-secondary btn-large" href="#how-it-works">HOW IT WORKS</a>
+  </p>
 </section>
 <section>
-  <h2>If you deliver…</h2>
-  <p>Tell us about your experience, your vehicle, your availability, and where you like to run. When a route or delivery opportunity fits your profile, we want to know who to call.</p>
-  <h2>If you have a vehicle…</h2>
-  <p>Tell us what you're driving — car, SUV, cargo van, box truck, or something bigger. Different opportunities need different equipment, and knowing what you bring helps us see where you may fit.</p>
-  <h2>If you own a business…</h2>
-  <p>Tell us what you've built, how many drivers and vehicles you run, and what you're trying to grow into. We're interested in real operators, not just resumes.</p>
-  <h2>If dispatch interests you…</h2>
-  <p>Tell us about your interest in the business side — dispatch, route management, driver recruiting, operations. Growing beyond the driver seat starts with a conversation.</p>
-  <p class="lede">Tell us where you are now. Tell us what experience you have. Tell us what you have available. Tell us what you're trying to build. We'll take it from there.</p>
-  <p>
-    <a class="btn btn-large" href="/grow/apply">TELL US ABOUT YOU</a>
-    <a class="btn btn-secondary btn-large" href="/dispatch">SEE HOW TRANSITNOW WORKS</a>
-  </p>
-  <p class="disclosure">Submitting this form does not guarantee employment, routes, loads, contracts, income, partnership, or acceptance into any TransitNow program. Information is collected so our team can understand your background and contact you regarding opportunities that may be relevant.</p>
+  <h2>Sound familiar?</h2>
+  <ul class="bullets" style="text-align:left;max-width:34rem;margin:0 auto">
+    <li>You spend more time calling brokers than driving.</li>
+    <li>Deadhead miles eat your profit between loads.</li>
+    <li>The good freight goes to whoever answers first — and you're still on hold.</li>
+    <li>Paperwork, check calls, and rate games steal your evenings.</li>
+  </ul>
+  <p class="lede">Now imagine opening your phone Monday morning to route matches picked for your city, your vehicle, and your lanes — and just driving.</p>
 </section>
-${dispatchPricingSection()}`;
+<section id="how-it-works">
+  <h2>How it works</h2>
+  <ol class="steps" style="text-align:left;max-width:34rem;margin:0 auto">
+    <li><strong>Subscribe.</strong> Basic $50/month or Complete $100/month. Secure Stripe checkout. Cancel anytime — no contract.</li>
+    <li><strong>Get set up.</strong> We review your carrier/business and vehicle information and lock in your freight and lane preferences.</li>
+    <li><strong>Get matched.</strong> Fresh route matches land in your email and text every Monday. You drive — we keep your pipeline full.</li>
+  </ol>
+  <p class="lede">Basic is $50 a month. That is less than $2 a day for a dispatcher working your pipeline every single week.</p>
+  <p>
+    <a class="btn btn-large" href="#dispatch-plans">SEE THE PLANS</a>
+  </p>
+</section>
+${dispatchPricingSection()}
+<section>
+  <h2>Straight answers</h2>
+  <p><strong>Is work guaranteed?</strong><br>No — and anyone who guarantees it is lying to you. Matches are real opportunities from our pipeline. What you book depends on your qualifications, availability, and territory.</p>
+  <p><strong>Can I cancel?</strong><br>Anytime. Both plans are month-to-month subscriptions with no contract.</p>
+  <p><strong>What do you need from me?</strong><br>Your carrier/business information, your vehicle details, and where you like to run. We review it all during onboarding.</p>
+  <p><strong>When do matches start?</strong><br>Complete starts with 5 matches on day one. Basic joins the next Monday match cycle.</p>
+  <p><strong>I'm not ready to subscribe — can I still talk to you?</strong><br>Yes. <a href="/grow/apply">Tell us about you here</a> — when a route or opportunity fits your profile, we will reach out.</p>
+</section>
+<section>
+  <h2>Ready to stop chasing loads?</h2>
+  <p class="lede">Join the drivers who let TransitNow work the phones while they work the road.</p>
+  <p>
+    <a class="btn btn-large" href="https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n">START BASIC — $50/MO</a>
+    <a class="btn btn-secondary btn-large" href="https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o">GO COMPLETE — $100/MO</a>
+  </p>
+  <p class="disclosure">Dispatch plans are a support service. Route matches are potential opportunities only — TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income. Actual opportunities depend on territory, client demand, your qualifications, and availability.</p>
+</section>`;
 }
 
 module.exports.growLandingPage = growLandingPage;

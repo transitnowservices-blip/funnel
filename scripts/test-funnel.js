@@ -3170,10 +3170,12 @@ async function main() {
     // --- Public pages, exact copy, navigation ---
     res = await req(`${BASE}/grow`, {});
     const p1GrowHtml = await res.text();
-    check('phase1: GET /grow 200 with exact headline, CTA, disclosure',
-      res.status === 200 && p1GrowHtml.includes("WE'RE GROWING") && p1GrowHtml.includes('COME GROW WITH US.') &&
-      p1GrowHtml.includes('TELL US ABOUT YOU') && p1GrowHtml.includes('/grow/apply') &&
-      p1GrowHtml.includes('does not guarantee employment, routes, loads, contracts, income, partnership'),
+    check('phase1: GET /grow 200 with captivating headline, CTAs, pricing, disclosure',
+      res.status === 200 && p1GrowHtml.includes('YOU DRIVE. WE FIND THE WORK.') &&
+      p1GrowHtml.includes('START DISPATCH') && p1GrowHtml.includes('#dispatch-plans') &&
+      p1GrowHtml.includes('HOW IT WORKS') && p1GrowHtml.includes('/grow/apply') &&
+      p1GrowHtml.includes('SUBSCRIBE — BASIC $50/MO') && p1GrowHtml.includes('SUBSCRIBE — COMPLETE $100/MO') &&
+      p1GrowHtml.includes('does not promise or guarantee routes, loads, contracts, work, earnings, or income'),
       `status=${res.status}`);
 
     res = await req(`${BASE}/grow/apply`, {});
