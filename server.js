@@ -4708,7 +4708,9 @@ app.get('/admin/analytics', adminAuth, ah(async (req, res) => {
  */
 function checkAdmin(req, res) {
   if (req.query.token && req.query.token === ADMIN_TOKEN) {
-    tracking.setCookie(res, 'funnel_adm', ADMIN_TOKEN, { maxAge: 12 * 3600 });
+    // Davena's admin sign-in lasts 30 days so her phone isn't bounced to
+    // the dispatcher login every 12 hours.
+    tracking.setCookie(res, 'funnel_adm', ADMIN_TOKEN, { maxAge: 30 * 24 * 3600 });
     return true;
   }
   return tracking.getCookies(req).funnel_adm === ADMIN_TOKEN;

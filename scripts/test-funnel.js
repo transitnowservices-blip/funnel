@@ -584,6 +584,20 @@ async function main() {
     check('GET /admin dashboard 200 with key metric labels', res.status === 200 && hits.length >= 3,
       `status=${res.status} labels found=[${hits.join(',')}]`);
 
+    // Davena's admin sign-in: ?token= sets a 30-day cookie, and the cookie
+    // alone opens admin-gated pages like the dispatcher's daily board.
+    const setCookies = typeof res.headers.getSetCookie === 'function'
+      ? res.headers.getSetCookie()
+      : [res.headers.get('set-cookie') || ''];
+    const admCookie = setCookies.find(h => h && h.startsWith('funnel_adm='));
+    check('admin ?token= visit sets funnel_adm cookie with 30-day Max-Age',
+      !!admCookie && admCookie.includes('Max-Age=2592000'), `cookie=${admCookie}`);
+    const adminJar = new Jar();
+    await req(`${BASE}/admin?token=${ADMIN_TOKEN}`, { jar: adminJar });
+    const boardRes = await req(`${BASE}/dispatch/today`, { jar: adminJar });
+    check('daily board opens for admin-cookie session (no login redirect)',
+      boardRes.status === 200, `status=${boardRes.status} location=${boardRes.headers.get('location')}`);
+
     /* ---- 10. Stripe webhook signature verification ------------------ */
     // Second server instance WITH STRIPE_WEBHOOK_SECRET set, exercising the
     // real signature-verification path end to end.
