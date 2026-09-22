@@ -328,8 +328,8 @@ function roomStartPage(site, query, error) {
     <label for="room_email">Email Address
       <input type="email" id="room_email" name="email" required autocomplete="email" placeholder="you@example.com">
     </label>
-    <label for="room_phone">Phone Number <span class="optional">(optional)</span>
-      <input type="tel" id="room_phone" name="phone" autocomplete="tel" placeholder="(optional)">
+    <label for="room_phone">Phone Number
+      <input type="tel" id="room_phone" name="phone" required autocomplete="tel" placeholder="Your phone number">
     </label>
     <label for="room_goal">What are you trying to build right now?
       <select id="room_goal" name="goal">

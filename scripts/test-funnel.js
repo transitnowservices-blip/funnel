@@ -1831,10 +1831,13 @@ async function main() {
       `status=${res.status}`);
 
     res = await req(`${BASE}/room/start`, { jar: funnelJar });
-    check('GET /room/start returns 200 lead form', res.status === 200 && (await res.text()).includes('room_goal'),
+    const startHtml = await res.text();
+    check('GET /room/start returns 200 lead form', res.status === 200 && startHtml.includes('room_goal'),
       `status=${res.status}`);
+    check('Room form marks phone as required', startHtml.includes('name="phone" required') && !startHtml.includes('Phone Number <span class="optional">'),
+      '');
 
-    res = await req(`${BASE}/room/start`, { jar: funnelJar, method: 'POST', form: { first_name: 'Room', email: funnelEmail, goal: 'build-a-business', consent: 'yes' } });
+    res = await req(`${BASE}/room/start`, { jar: funnelJar, method: 'POST', form: { first_name: 'Room', email: funnelEmail, phone: '4145550100', goal: 'build-a-business', consent: 'yes' } });
     check('POST /room/start creates lead and redirects to /room/offer',
       res.status === 302 && (res.headers.get('location') || '').endsWith('/room/offer'),
       `status=${res.status} location=${res.headers.get('location')}`);
@@ -1844,6 +1847,18 @@ async function main() {
     check('roomNurture sequence queued (5 steps)', roomNurtureQueued === 5, `queued=${roomNurtureQueued}`);
     const leadEv = db.prepare("SELECT COUNT(*) n FROM events WHERE lead_id = ? AND type = 'lead_submitted'").get(funnelLead.id).n;
     check('lead_submitted event recorded', leadEv === 1, `count=${leadEv}`);
+
+    // Phone is required: missing or junk phone -> 400, no lead created.
+    const noPhoneEmail = `e2e-roomnophone-${ts}@example.com`;
+    res = await req(`${BASE}/room/start`, { jar: new Jar(), method: 'POST', form: { first_name: 'NoPhone', email: noPhoneEmail, goal: 'extra-income', consent: 'yes' } });
+    check('POST /room/start without phone returns 400', res.status === 400, `status=${res.status}`);
+    check('no lead created when phone is missing',
+      !db.prepare('SELECT 1 FROM leads WHERE email = ?').get(noPhoneEmail), '');
+    const junkPhoneEmail = `e2e-roomjunkphone-${ts}@example.com`;
+    res = await req(`${BASE}/room/start`, { jar: new Jar(), method: 'POST', form: { first_name: 'Junk', email: junkPhoneEmail, phone: 'abc', goal: 'extra-income', consent: 'yes' } });
+    check('POST /room/start with junk phone returns 400', res.status === 400, `status=${res.status}`);
+    check('no lead created when phone is junk',
+      !db.prepare('SELECT 1 FROM leads WHERE email = ?').get(junkPhoneEmail), '');
 
     /* ---- 12b. Room sales pipeline: stages, intent routing, cadence ---- */
     const hasStageTag = (leadId, stage) =>
@@ -1871,10 +1886,27 @@ async function main() {
     check('scheduler pass runs', res.status === 200, `status=${res.status}`);
     check('pipeline: CONTACTED after first email sent', hasStageTag(funnelLead.id, 'CONTACTED'), '');
 
+    // CONTACTED race: a real browser hits /room/offer (INTERESTED) before
+    // the immediate nurture email sends. The stage must not move backward,
+    // but the contact itself is still logged.
+    const raceEmail = `e2e-roomrace-${ts}@example.com`;
+    const raceJar = new Jar();
+    res = await req(`${BASE}/room/start`, { jar: raceJar, method: 'POST', form: { first_name: 'Race', email: raceEmail, phone: '4145550103', goal: 'extra-income', consent: 'yes' } });
+    check('race setup: lead submits and lands on /room/offer', res.status === 302, `status=${res.status}`);
+    const raceLead = db.prepare('SELECT id FROM leads WHERE email = ?').get(raceEmail);
+    res = await req(`${BASE}/room/offer`, { jar: raceJar });
+    check('race setup: offer viewed -> INTERESTED', res.status === 200 && hasStageTag(raceLead.id, 'INTERESTED'), `status=${res.status}`);
+    res = await req(`${BASE}/admin/run-scheduler?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    check('scheduler pass runs (race)', res.status === 200, `status=${res.status}`);
+    check('race: stage stays INTERESTED after first email sends (never backward)',
+      hasStageTag(raceLead.id, 'INTERESTED') && !hasStageTag(raceLead.id, 'CONTACTED'), '');
+    check('race: FIRST_TOUCH_SENT tag recorded even when stage already advanced',
+      !!db.prepare('SELECT 1 FROM tags WHERE lead_id = ? AND tag = ?').get(raceLead.id, 'FIRST_TOUCH_SENT'), '');
+
     // Intent routing: courier-work goal skips the Room nurture -> /dispatch.
     const dispEmail = `e2e-roomdispatch-${ts}@example.com`;
     const dispJar = new Jar();
-    res = await req(`${BASE}/room/start`, { jar: dispJar, method: 'POST', form: { first_name: 'Route', email: dispEmail, goal: 'courier-work', consent: 'yes' } });
+    res = await req(`${BASE}/room/start`, { jar: dispJar, method: 'POST', form: { first_name: 'Route', email: dispEmail, phone: '4145550101', goal: 'courier-work', consent: 'yes' } });
     check('POST /room/start with courier-work goal redirects to /dispatch',
       res.status === 302 && (res.headers.get('location') || '').endsWith('/dispatch'),
       `status=${res.status} location=${res.headers.get('location')}`);
@@ -2008,7 +2040,7 @@ async function main() {
     // Attribution: a lead arriving on a tracked link is tied to the item.
     const attrEmail = `e2e-attribution-${ts}@example.com`;
     const attrJar = new Jar();
-    res = await req(`${BASE}/room/start?campaign=room-ideas-income`, { jar: attrJar, method: 'POST', form: { first_name: 'Attr', email: attrEmail, goal: 'build-a-business', consent: 'yes' } });
+    res = await req(`${BASE}/room/start?campaign=room-ideas-income`, { jar: attrJar, method: 'POST', form: { first_name: 'Attr', email: attrEmail, phone: '4145550102', goal: 'build-a-business', consent: 'yes' } });
     const attrLead = db.prepare('SELECT id, campaign FROM leads WHERE email = ?').get(attrEmail);
     const attrRow = attrLead && db.prepare(
       `SELECT a.lead_id FROM content_attribution a

@@ -730,11 +730,12 @@ app.post('/room/start', ah(async (req, res) => {
   const product = config.getProduct('room');
   const firstName = (req.body.first_name || '').trim();
   const emailAddr = (req.body.email || '').trim().toLowerCase();
-  if (!firstName || !EMAIL_RE.test(emailAddr)) {
+  const phoneDigits = String(req.body.phone || '').replace(/\D/g, '');
+  if (!firstName || !EMAIL_RE.test(emailAddr) || phoneDigits.length < 7) {
     res.status(400);
     return page(
       res, 'Start building',
-      pages.roomStartPage(site, req.query, 'Please enter your first name and a valid email address.'),
+      pages.roomStartPage(site, req.query, 'Please enter your first name, a valid email address, and a phone number.'),
       site
     );
   }
