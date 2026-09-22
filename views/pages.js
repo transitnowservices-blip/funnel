@@ -312,6 +312,7 @@ function roomStartPage(site, query, error) {
     ['investing-ownership', 'Investing/ownership'],
     ['multiple-income-streams', 'Multiple income streams'],
     ['idea-needs-plan', 'I have an idea but need a plan'],
+    ['courier-work', 'Courier/delivery work (routes, dispatch)'],
     ['not-sure', "I'm not sure yet"],
   ];
   return `

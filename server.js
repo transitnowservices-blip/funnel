@@ -29,6 +29,7 @@ const crypto = require('crypto');
 const db = require('./lib/db');
 const config = require('./lib/config');
 const tags = require('./lib/tags');
+const pipeline = require('./lib/pipeline');
 const subscriptions = require('./lib/subscriptions');
 const tracking = require('./lib/tracking');
 const automation = require('./lib/automation');
@@ -745,6 +746,19 @@ app.post('/room/start', ah(async (req, res) => {
   );
   await tags.addTag(lead.id, 'NEW_LEAD');
   await tags.addTag(lead.id, 'OFFER_room_LEAD');
+  await pipeline.setStage(lead.id, 'NEW');
+  // Intent routing: courier/dispatch interest goes to the TransitNow
+  // Dispatch Services offer instead of the Room nurture path.
+  const goalValue = String(req.body.goal || '').trim().toLowerCase();
+  if (goalValue === 'courier-work') {
+    await tags.addTag(lead.id, 'INTENT_DISPATCH');
+    await db.recordEvent({
+      visitor_id: req.vid, lead_id: lead.id, type: 'intent_routed_dispatch',
+      product_id: 'room', meta: { goal: lead.goal || null },
+    });
+    return res.redirect('/dispatch');
+  }
+  await tags.addTag(lead.id, 'INTENT_ROOM');
   await db.recordEvent({
     visitor_id: req.vid, lead_id: lead.id, type: 'LEAD_SUBMITTED',
     product_id: 'room', meta: { source: lead.source || null, goal: lead.goal || null },
@@ -760,6 +774,7 @@ app.post('/room/start', ah(async (req, res) => {
 app.get('/room/offer', ah(async (req, res) => {
   const site = roomSite();
   const lead = await leadFromReq(req);
+  if (lead) await pipeline.setStage(lead.id, 'INTERESTED');
   await db.recordEvent({
     visitor_id: req.vid, lead_id: lead ? lead.id : null,
     type: 'offer_viewed', product_id: 'room', meta: { path: '/room/offer' },
@@ -767,11 +782,13 @@ app.get('/room/offer', ah(async (req, res) => {
   page(res, "Wealth Builder's Room", pages.roomOfferPage(site), site);
 }));
 
-app.get('/room/checkout', (req, res) => {
+app.get('/room/checkout', ah(async (req, res) => {
   const site = roomSite();
+  const lead = await leadFromReq(req);
+  if (lead) await pipeline.setStage(lead.id, 'QUALIFIED');
   const product = config.getProduct('room');
   page(res, 'Checkout', roomFunnelViews.roomCheckoutPage({ product, site }), site);
-});
+}));
 
 app.post('/room/checkout', ah(async (req, res) => {
   const product = config.getProduct('room');
@@ -799,6 +816,7 @@ app.post('/room/checkout', ah(async (req, res) => {
   );
   await tags.addTag(lead.id, 'STARTED_CHECKOUT');
   await tags.addTag(lead.id, 'HIGH_INTENT');
+  await pipeline.setStage(lead.id, 'OFFER SENT');
   await db.recordEvent({ visitor_id: req.vid, lead_id: lead.id, type: 'CHECKOUT_STARTED', product_id: 'room' });
   await db.recordEvent({ visitor_id: req.vid, lead_id: lead.id, type: 'checkout_started', product_id: 'room' });
   if (product.stripeLink) {
@@ -4279,6 +4297,7 @@ async function handleRoomPurchase({ email, name, amountCents, mode, sessionId })
   await tags.addTag(leadId, 'CUSTOMER');
   await tags.addTag(leadId, 'ROOM_PURCHASED');
   await tags.addTag(leadId, 'OFFER_room_PURCHASED');
+  await pipeline.setStage(leadId, 'PAID');
   await db.run("UPDATE leads SET status = 'customer' WHERE id = ?", [leadId]);
 
   // Welcome email (queued immediately; suppression-aware at send time).
@@ -4757,6 +4776,20 @@ async function adminMetrics() {
     roomClaimedMembers: (await q("SELECT COUNT(*) c FROM room_members WHERE status = 'active' AND password_hash IS NOT NULL")).c,
     roomUnclaimedMembers: (await q("SELECT COUNT(*) c FROM room_members WHERE status = 'active' AND password_hash IS NULL")).c,
     roomPosts: (await q('SELECT COUNT(*) c FROM room_posts')).c,
+    roomRevenue:
+      Math.round(((await q("SELECT COALESCE(SUM(amount_cents), 0) s FROM purchases WHERE product_id = 'room'")).s / 100) * 100) / 100,
+    // Room sales pipeline: leads still in early stages with no purchase yet.
+    followUpsDue: (await q(`
+      SELECT COUNT(DISTINCT l.id) c FROM leads l
+      WHERE EXISTS (SELECT 1 FROM tags WHERE lead_id = l.id AND tag = 'OFFER_room_LEAD')
+        AND EXISTS (SELECT 1 FROM tags WHERE lead_id = l.id AND tag IN ('STAGE_NEW', 'STAGE_CONTACTED', 'STAGE_INTERESTED'))
+        AND NOT EXISTS (SELECT 1 FROM tags WHERE lead_id = l.id AND tag = 'ROOM_PURCHASED')
+    `)).c,
+    offersSent: (await q(`
+      SELECT COUNT(DISTINCT t.lead_id) c FROM tags t
+      WHERE t.tag = 'STAGE_OFFER_SENT'
+        AND EXISTS (SELECT 1 FROM tags WHERE lead_id = t.lead_id AND tag = 'OFFER_room_LEAD')
+    `)).c,
   };
   // MRR for the $49/month Room (derived from the active member count above).
   metrics.mrr = roomMrr(metrics.activeMembers);
@@ -4893,7 +4926,25 @@ app.get('/admin/leads', ah(async (req, res) => {
     consent: !!l.consent_marketing,
     created_at: fmtTs(l.date_captured),
   }));
-  res.send(adminViews.adminLayout('Leads', adminViews.leadsTableHtml(mapped, req.query)));
+  // Room pipeline: leads stuck in early stages with no purchase — Davena's
+  // personal follow-up list, oldest first.
+  const followUps = await db.all(`
+    SELECT l.first_name, l.email, l.phone, l.goal, l.date_captured,
+      MAX(CASE WHEN t.tag = 'STAGE_NEW' THEN 1 WHEN t.tag = 'STAGE_CONTACTED' THEN 2
+               WHEN t.tag = 'STAGE_INTERESTED' THEN 3 ELSE 0 END) AS stage_rank,
+      (SELECT MAX(scheduled_for) FROM email_queue q
+        WHERE q.lead_id = l.id AND q.status IN ('sent', 'queued')) AS last_touch
+    FROM leads l
+    JOIN tags r ON r.lead_id = l.id AND r.tag = 'OFFER_room_LEAD'
+    JOIN tags t ON t.lead_id = l.id AND t.tag LIKE 'STAGE\\_%' ESCAPE '\\'
+    WHERE NOT EXISTS (SELECT 1 FROM tags p WHERE p.lead_id = l.id AND p.tag = 'ROOM_PURCHASED')
+    GROUP BY l.id
+    HAVING stage_rank BETWEEN 1 AND 3
+    ORDER BY l.date_captured ASC
+    LIMIT 100
+  `);
+  res.send(adminViews.adminLayout('Leads',
+    adminViews.followUpTableHtml(followUps) + adminViews.leadsTableHtml(mapped, req.query)));
 }));
 
 app.get('/admin/carts', ah(async (req, res) => {
@@ -5141,7 +5192,12 @@ app.post('/admin/config/:file', (req, res) => {
 });
 
 app.post('/admin/run-scheduler', ah(async (req, res) => {
-  const result = await automation.runSchedulerPass();
+  // Optional `now` override (epoch ms) lets tests drive a deterministic
+  // weekday through the scheduler. Admin-token protected like the endpoint.
+  const nowOverride = Number(req.body && req.body.now);
+  const result = await automation.runSchedulerPass(
+    Number.isFinite(nowOverride) && nowOverride > 0 ? nowOverride : undefined
+  );
   res.json({ ok: true, ...result });
 }));
 

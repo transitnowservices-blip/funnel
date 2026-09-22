@@ -1845,20 +1845,63 @@ async function main() {
     const leadEv = db.prepare("SELECT COUNT(*) n FROM events WHERE lead_id = ? AND type = 'lead_submitted'").get(funnelLead.id).n;
     check('lead_submitted event recorded', leadEv === 1, `count=${leadEv}`);
 
+    /* ---- 12b. Room sales pipeline: stages, intent routing, cadence ---- */
+    const hasStageTag = (leadId, stage) =>
+      !!db.prepare('SELECT 1 FROM tags WHERE lead_id = ? AND tag = ?').get(leadId, 'STAGE_' + stage.replace(/ /g, '_'));
+    check('pipeline: NEW stage set on lead submit', hasStageTag(funnelLead.id, 'NEW'),
+      `tags=${JSON.stringify(db.prepare('SELECT tag FROM tags WHERE lead_id = ?').all(funnelLead.id).map(r => r.tag))}`);
+    check('pipeline: only one STAGE_* tag at a time',
+      db.prepare("SELECT COUNT(*) n FROM tags WHERE lead_id = ? AND tag LIKE 'STAGE\\_%' ESCAPE '\\'").get(funnelLead.id).n === 1,
+      '');
+
+    // Nurture cadence: welcome now, then 24h / 3d / 7d / 14d.
+    const nurtureDelays = db.prepare("SELECT step, scheduled_for FROM email_queue WHERE lead_id = ? AND sequence = 'roomNurture' AND status = 'queued' ORDER BY scheduled_for").all(funnelLead.id);
+    const dayMs = 24 * 3600 * 1000;
+    const approxDays = (ms) => Math.round(ms / dayMs);
+    const delaysOk = nurtureDelays.length === 5 &&
+      approxDays(nurtureDelays[1].scheduled_for - nurtureDelays[0].scheduled_for) === 1 &&
+      approxDays(nurtureDelays[2].scheduled_for - nurtureDelays[0].scheduled_for) === 3 &&
+      approxDays(nurtureDelays[3].scheduled_for - nurtureDelays[0].scheduled_for) === 7 &&
+      approxDays(nurtureDelays[4].scheduled_for - nurtureDelays[0].scheduled_for) === 14;
+    check('roomNurture cadence is 0h / 24h / 3d / 7d / 14d', delaysOk,
+      `steps=${nurtureDelays.length}`);
+
+    // Run the scheduler: the immediate welcome email sends -> CONTACTED.
+    res = await req(`${BASE}/admin/run-scheduler?token=${ADMIN_TOKEN}`, { method: 'POST', form: {} });
+    check('scheduler pass runs', res.status === 200, `status=${res.status}`);
+    check('pipeline: CONTACTED after first email sent', hasStageTag(funnelLead.id, 'CONTACTED'), '');
+
+    // Intent routing: courier-work goal skips the Room nurture -> /dispatch.
+    const dispEmail = `e2e-roomdispatch-${ts}@example.com`;
+    const dispJar = new Jar();
+    res = await req(`${BASE}/room/start`, { jar: dispJar, method: 'POST', form: { first_name: 'Route', email: dispEmail, goal: 'courier-work', consent: 'yes' } });
+    check('POST /room/start with courier-work goal redirects to /dispatch',
+      res.status === 302 && (res.headers.get('location') || '').endsWith('/dispatch'),
+      `status=${res.status} location=${res.headers.get('location')}`);
+    const dispLead = db.prepare('SELECT id FROM leads WHERE email = ?').get(dispEmail);
+    const dispTags = db.prepare('SELECT tag FROM tags WHERE lead_id = ?').all(dispLead.id).map(r => r.tag);
+    check('dispatch-intent lead tagged INTENT_DISPATCH (not INTENT_ROOM)',
+      dispTags.includes('INTENT_DISPATCH') && !dispTags.includes('INTENT_ROOM'), `tags=${JSON.stringify(dispTags)}`);
+    const dispNurture = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE lead_id = ? AND sequence = 'roomNurture'").get(dispLead.id).n;
+    check('dispatch-intent lead gets no roomNurture sequence', dispNurture === 0, `queued=${dispNurture}`);
+
     res = await req(`${BASE}/room/offer`, { jar: funnelJar });
     check('GET /room/offer returns 200 sales copy', res.status === 200 && (await res.text()).includes('Stop Collecting Ideas'),
       `status=${res.status}`);
+    check('pipeline: INTERESTED after offer viewed', hasStageTag(funnelLead.id, 'INTERESTED'), '');
 
     res = await req(`${BASE}/room/checkout`, { jar: funnelJar });
     const coHtml = await res.text();
     check('GET /room/checkout shows $49/month recurring disclosure',
       res.status === 200 && coHtml.includes('$49/month recurring membership'),
       `status=${res.status}`);
+    check('pipeline: QUALIFIED after checkout viewed', hasStageTag(funnelLead.id, 'QUALIFIED'), '');
 
     res = await req(`${BASE}/room/checkout`, { jar: funnelJar, method: 'POST', form: { email: funnelEmail, first_name: 'Room' } });
     check('POST /room/checkout creates cart and 302s to the unchanged Stripe link',
       res.status === 302 && res.headers.get('location') === ROOM_STRIPE_LINK,
       `status=${res.status} location=${res.headers.get('location')}`);
+    check('pipeline: OFFER SENT after cart created', hasStageTag(funnelLead.id, 'OFFER SENT'), '');
     const roomCartRow = db.prepare("SELECT * FROM carts WHERE lead_id = ? AND product_id = 'room'").get(funnelLead.id);
     check('room cart row recorded (open)', roomCartRow && roomCartRow.purchased === 0, `row=${JSON.stringify(roomCartRow)}`);
     const coEv = db.prepare("SELECT COUNT(*) n FROM events WHERE lead_id = ? AND type = 'checkout_started'").get(funnelLead.id).n;
@@ -1885,14 +1928,65 @@ async function main() {
     const convLead = db.prepare('SELECT status FROM leads WHERE email = ?').get(funnelEmail);
     check('lead converted to customer', convLead && convLead.status === 'customer', `row=${JSON.stringify(convLead)}`);
     const welcomeQueued = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE lead_id = ? AND sequence = 'roomWelcome'").get(funnelLead.id).n;
-    check('roomWelcome email queued on purchase', welcomeQueued === 1, `queued=${welcomeQueued}`);
+    check('roomWelcome sequence queued on purchase (5 emails)', welcomeQueued === 5, `queued=${welcomeQueued}`);
     const nurtureCancelled = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE lead_id = ? AND sequence = 'roomNurture' AND status = 'cancelled'").get(funnelLead.id).n;
-    check('roomNurture cancelled on purchase', nurtureCancelled === 5, `cancelled=${nurtureCancelled}`);
+    const nurtureSent = db.prepare("SELECT COUNT(*) n FROM email_queue WHERE lead_id = ? AND sequence = 'roomNurture' AND status = 'sent'").get(funnelLead.id).n;
+    check('roomNurture stopped on purchase (1 sent, 4 cancelled)', nurtureSent === 1 && nurtureCancelled === 4, `sent=${nurtureSent} cancelled=${nurtureCancelled}`);
     const cartClosed = db.prepare('SELECT purchased FROM carts WHERE id = ?').get(roomCartRow.id).purchased;
     check('room cart closed on purchase', cartClosed === 1, `purchased=${cartClosed}`);
     const payEv = db.prepare("SELECT COUNT(*) n FROM events WHERE lead_id = ? AND type = 'payment_success'").get(funnelLead.id).n;
     const memEv = db.prepare("SELECT COUNT(*) n FROM events WHERE lead_id = ? AND type = 'membership_created'").get(funnelLead.id).n;
     check('payment_success + membership_created events recorded', payEv === 1 && memEv === 1, `payment_success=${payEv} membership_created=${memEv}`);
+    check('pipeline: PAID after $49 purchase', hasStageTag(funnelLead.id, 'PAID'), '');
+    check('pipeline: stages never move backward (PAID kept, one STAGE tag)',
+      db.prepare("SELECT COUNT(*) n FROM tags WHERE lead_id = ? AND tag LIKE 'STAGE\\_%' ESCAPE '\\'").get(funnelLead.id).n === 1 &&
+      hasStageTag(funnelLead.id, 'PAID'), '');
+
+    // Needs-follow-up list: the dispatch-intent lead is early-stage, no purchase.
+    res = await req(`${BASE}/admin/leads?token=${ADMIN_TOKEN}`, {});
+    const leadsHtml = await res.text();
+    check('admin leads page shows needs-follow-up section', res.status === 200 && /Needs personal follow-up/i.test(leadsHtml),
+      `status=${res.status}`);
+    const tableCutoff = leadsHtml.indexOf('lead(s)</p>'); // follow-up section sits above the full table
+    check('follow-up section includes the non-converted lead',
+      leadsHtml.indexOf(dispEmail) !== -1 && leadsHtml.indexOf(dispEmail) < tableCutoff,
+      `found=${leadsHtml.includes(dispEmail)}`);
+    check('follow-up section excludes the converted (PAID) lead',
+      tableCutoff !== -1 && leadsHtml.indexOf(funnelEmail) > tableCutoff,
+      `firstFoundAt=${leadsHtml.indexOf(funnelEmail)} cutoff=${tableCutoff}`);
+
+    // No-progress nudge: stalled member gets one, recent checker-in does not.
+    // Driven through the admin scheduler with a fixed Monday timestamp.
+    const mondayNoon = new Date('2026-09-21T17:00:00Z').getTime(); // a Monday
+    const stalledEmail = `e2e-stalled-${ts}@example.com`;
+    const freshEmail = `e2e-fresh-${ts}@example.com`;
+    for (const em of [stalledEmail, freshEmail]) {
+      db.prepare(`DELETE FROM room_members WHERE email = ?`).run(em);
+      db.prepare(`DELETE FROM room_checkins WHERE email = ?`).run(em);
+      db.prepare(`DELETE FROM email_queue WHERE email = ? AND sequence = 'room-noprogress-nudge'`).run(em);
+    }
+    db.prepare(`INSERT INTO room_members (email, name, joined_at, status, phone, password_hash) VALUES (?, 'Stalled', ?, 'active', NULL, 'x')`).run(stalledEmail, mondayNoon - 30 * 86400000);
+    db.prepare(`INSERT INTO room_members (email, name, joined_at, status, phone, password_hash) VALUES (?, 'Fresh', ?, 'active', NULL, 'x')`).run(freshEmail, mondayNoon - 30 * 86400000);
+    db.prepare(`INSERT INTO room_checkins (email, week, created_at, accomplishment, next_commitment) VALUES (?, 9, ?, 'did things', 'do more')`).run(freshEmail, mondayNoon - 2 * 86400000);
+    res = await req(`${BASE}/admin/run-scheduler?token=${ADMIN_TOKEN}`, { method: 'POST', form: { now: String(mondayNoon) } });
+    const schedBody = await res.json().catch(() => ({}));
+    const nudgeRes = schedBody.noProgressNudges || {};
+    const noProgCount = (em) => db.prepare(`SELECT COUNT(*) n FROM email_queue WHERE email = ? AND sequence = 'room-noprogress-nudge'`).get(em).n;
+    check('no-progress nudge runs on Monday',
+      res.status === 200 && nudgeRes.ran === true, `status=${res.status} res=${JSON.stringify(nudgeRes)}`);
+    check('stalled member (no check-in) gets the nudge', noProgCount(stalledEmail) === 1, `count=${noProgCount(stalledEmail)}`);
+    check('member with a recent check-in is skipped', noProgCount(freshEmail) === 0, `count=${noProgCount(freshEmail)}`);
+    const nudgeRow = db.prepare(`SELECT subject, body_html FROM email_queue WHERE email = ? AND sequence = 'room-noprogress-nudge' ORDER BY id DESC LIMIT 1`).get(stalledEmail);
+    check('stalled member gets the what-did-you-work-on / what-is-next nudge',
+      !!nudgeRow && /What did you work on/i.test(nudgeRow.body_html) && /What will you complete next/i.test(nudgeRow.body_html) && /\/room\/checkin/.test(nudgeRow.body_html),
+      `subject=${nudgeRow && nudgeRow.subject}`);
+    const nudgeRes2 = await (await req(`${BASE}/admin/run-scheduler?token=${ADMIN_TOKEN}`, { method: 'POST', form: { now: String(mondayNoon) } })).json().catch(() => ({}));
+    check('no-progress nudge is idempotent per week', noProgCount(stalledEmail) === 1, `count=${noProgCount(stalledEmail)}`);
+    for (const em of [stalledEmail, freshEmail]) {
+      db.prepare(`DELETE FROM room_members WHERE email = ?`).run(em);
+      db.prepare(`DELETE FROM room_checkins WHERE email = ?`).run(em);
+      db.prepare(`DELETE FROM email_queue WHERE email = ? AND sequence = 'room-noprogress-nudge'`).run(em);
+    }
 
     // Admin: new dashboard sections, lead detail, config env status.
     res = await req(`${BASE}/admin?token=${ADMIN_TOKEN}`, {});
@@ -1900,6 +1994,9 @@ async function main() {
     check('admin dashboard renders grouped Room sections',
       res.status === 200 && dashHtml.includes('Wealth Builder') && dashHtml.includes('New leads (last 7 days)'),
       `status=${res.status}`);
+    check('dashboard shows Follow-ups due / Offers sent / Room revenue cards',
+      dashHtml.includes('Follow-ups due') && dashHtml.includes('Offers sent') && dashHtml.includes('Room revenue'),
+      `hasCards=${dashHtml.includes('Follow-ups due')},${dashHtml.includes('Offers sent')},${dashHtml.includes('Room revenue')}`);
     res = await req(`${BASE}/admin/leads/${funnelLead.id}?token=${ADMIN_TOKEN}`, {});
     check('GET /admin/leads/:id renders lead detail',
       res.status === 200 && (await res.text()).includes(funnelEmail),

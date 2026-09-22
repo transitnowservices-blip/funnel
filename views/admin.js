@@ -146,6 +146,24 @@ function leadsTableHtml(leads, query) {
     table(['ID', 'First name', 'Email', 'Phone', 'Source', 'Campaign', 'Consent', 'Created'], rows);
 }
 
+function followUpTableHtml(items) {
+  const list = Array.isArray(items) ? items : [];
+  if (!list.length) return '';
+  const stageName = (r) => ({ 1: 'NEW', 2: 'CONTACTED', 3: 'INTERESTED' }[r] || '');
+  const rows = list.map(l => {
+    const waitingDays = Math.max(0, Math.floor((Date.now() - Number(l.date_captured || Date.now())) / 86400000));
+    return [l.first_name, l.email, l.phone, l.goal, stageName(Number(l.stage_rank)), `${waitingDays}d`, l.last_touch ? fmtTsLocal(l.last_touch) : '—'];
+  });
+  return `<h2>Needs personal follow-up</h2>` +
+    `<p>Room leads who have not responded or moved forward yet — oldest first. Reach out personally.</p>` +
+    table(['Name', 'Email', 'Phone', 'Building', 'Stage', 'Waiting', 'Last email'], rows);
+}
+
+function fmtTsLocal(ts) {
+  try { return new Date(Number(ts)).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }); }
+  catch (e) { return ''; }
+}
+
 function cartsTableHtml(carts) {
   const list = Array.isArray(carts) ? carts : [];
   const rows = list.map(c => [
@@ -310,6 +328,8 @@ function dashboardSectionsHtml(m) {
 ${sectionCards('Leads', [
   ['Total leads', mm.totalLeads],
   ['New leads (last 7 days)', mm.newLeads7d],
+  ['Follow-ups due', mm.followUpsDue],
+  ['Offers sent', mm.offersSent],
   ['Converted leads', mm.convertedLeads],
   ['Conversion rate', pct(mm.conversionRate)],
 ])}
@@ -335,6 +355,7 @@ ${sectionCards('Wealth Builder\u2019s Room', [
   ['Active members', mm.roomActiveMembers],
   ['Claimed members', mm.roomClaimedMembers],
   ['Unclaimed members', mm.roomUnclaimedMembers],
+  ['Room revenue', money(mm.roomRevenue)],
   ['Posts', mm.roomPosts],
 ])}`;
 }
@@ -460,6 +481,7 @@ module.exports = {
   adminLayout,
   dashboardHtml,
   leadsTableHtml,
+  followUpTableHtml,
   cartsTableHtml,
   emailsTableHtml,
   outboxHtml,
