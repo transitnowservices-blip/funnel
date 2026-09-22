@@ -309,6 +309,10 @@ async function main() {
 
     if (!fs.existsSync(DB_PATH)) failFast(`DB not found at ${DB_PATH} — app did not create data/funnel.db`);
     db = new DatabaseSync(DB_PATH);
+    // The app under test runs its scheduler (writes) on its own timer while
+    // this script also writes via its own handle — same as lib/db.js, wait
+    // briefly on transient locks instead of failing instantly.
+    db.exec('PRAGMA busy_timeout = 10000;');
     const S = discover(db);
     check('schema discovery found leads/tags/carts/queue/purchases tables', true);
 
@@ -4467,22 +4471,41 @@ async function main() {
     const p6drvB = await p6Onboard('P6 Driver B', p6('drvB'));
     check('phase6: two test drivers created', !!p6drvA && !!p6drvB, 'missing driver rows');
 
+    // Paid referral program: code auto-issued at signup, announced in the
+    // onboarding confirmation email.
+    const p6AutoCode = db.prepare(
+      "SELECT * FROM referral_codes WHERE issued_to_type = 'driver' AND issued_to_id = ? AND status = 'active' ORDER BY issued_at DESC, id DESC LIMIT 1"
+    ).get(p6drvB.id);
+    check('phase6: referral code auto-issued at driver signup',
+      !!p6AutoCode && /^TN-[A-Z0-9]{6}$/.test(p6AutoCode.code),
+      `code=${p6AutoCode && p6AutoCode.code}`);
+    const p6OnboardEmail = db.prepare(
+      "SELECT body_html FROM email_queue WHERE sequence = 'driver-ops' AND step = 'onboarding-confirmation' AND email = ? ORDER BY id DESC LIMIT 1"
+    ).get(p6('drvB'));
+    check('phase6: onboarding email announces the paid referral program with link',
+      !!p6OnboardEmail && p6OnboardEmail.body_html.includes('$50') &&
+      p6OnboardEmail.body_html.includes('/grow/apply?ref=' + (p6AutoCode && p6AutoCode.code)),
+      'onboarding email missing referral block');
+
     // --- Referrals ---
     res = await req(`${BASE}/admin/referrals/issue?token=${ADMIN_TOKEN}`, { method: 'POST', form: [
       ['issued_to_type', 'driver'], ['issued_to_id', String(p6drvA.id)],
       ['name', 'P6 Driver A'], ['email', p6('drvA')],
     ]});
-    const p6Code = db.prepare('SELECT * FROM referral_codes WHERE issued_to_id = ?').get(p6drvA.id);
+    const p6Code = db.prepare(
+      "SELECT * FROM referral_codes WHERE issued_to_type = 'driver' AND issued_to_id = ? AND status = 'active' ORDER BY issued_at DESC, id DESC LIMIT 1"
+    ).get(p6drvA.id);
     check('phase6: referral code issued to driver with TN-XXXXXX format',
       res.status === 302 && !!p6Code && /^TN-[A-Z0-9]{6}$/.test(p6Code.code) && p6Code.status === 'active',
       `status=${res.status} code=${p6Code && p6Code.code}`);
 
     res = await req(`${BASE}/d/${p6drvA.access_token}/referral`, {});
     const p6RefHtml = await res.text();
-    check('phase6: driver referral page shows code, share link, no-payment copy, mobile viewport',
+    check('phase6: driver referral page shows code, share link, paid-program copy, earnings, mobile viewport',
       res.status === 200 && p6RefHtml.includes(p6Code.code) &&
       p6RefHtml.includes('/grow/apply?ref=' + p6Code.code) &&
-      p6RefHtml.includes('No referral payment program') &&
+      p6RefHtml.includes('$50') && p6RefHtml.includes('$25') &&
+      p6RefHtml.includes('Your earnings') && p6RefHtml.includes('Your referrals') &&
       p6RefHtml.includes('name="viewport"'),
       `status=${res.status}`);
 
@@ -4528,15 +4551,132 @@ async function main() {
 
     res = await req(`${BASE}/admin/referrals?token=${ADMIN_TOKEN}`, {});
     const p6RefsHtml = await res.text();
-    check('phase6: admin referrals page lists code + no-payment-program copy',
+    check('phase6: admin referrals page lists code + payout ledger',
       res.status === 200 && p6RefsHtml.includes(p6Code.code) &&
-      p6RefsHtml.includes('No referral payment program'),
+      p6RefsHtml.includes('Payout ledger'),
       `status=${res.status}`);
 
     res = await req(`${BASE}/admin/referrals/${p6Code.id}/revoke?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
     check('phase6: referral code revoked',
       res.status === 302 && db.prepare('SELECT status FROM referral_codes WHERE id = ?').get(p6Code.id).status === 'revoked',
       `status=${res.status}`);
+
+    /* ---- Paid referral program: milestones, payouts, ledger, mark-paid ---- */
+    // Covers: 31-day active paid subscriber -> $50 referrer + $25 referred
+    // rows flip pending -> earned; pending row for a fresh subscriber; lapse
+    // before day 30 -> void; test subscriptions never earn; mark-paid flow;
+    // driver tab earnings; admin ledger totals.
+    const rpts = Date.now();
+    const rp = (n) => `rp-${String(n).toLowerCase()}-${rpts}@example.com`;
+    const p7ref = await p6Onboard('P7 Referrer', rp('referrer'));
+    const p7Code = db.prepare(
+      "SELECT * FROM referral_codes WHERE issued_to_type = 'driver' AND issued_to_id = ? AND status = 'active' ORDER BY issued_at DESC, id DESC LIMIT 1"
+    ).get(p7ref.id);
+    check('referral-paid: referrer auto-issued a code at signup', !!p7Code, 'no code');
+
+    async function p7ReferralLead(name, email, codeStr) {
+      const lid = db.prepare(
+        "INSERT INTO opportunity_leads (lead_type, status, first_name, last_name, email, phone, city, state, created_at, updated_at) VALUES ('GROW','NEW',?,?, ?, '4145550100','Milwaukee','WI', ?, ?)"
+      ).run('P7', name, email, rpts, rpts).lastInsertRowid;
+      db.prepare('INSERT INTO lead_sources (lead_id, source, referral_code) VALUES (?, ?, ?)').run(lid, 'referral', codeStr);
+      return lid;
+    }
+    async function p7Subscribe(email, { daysAgo = 0, status = 'active', isTest = 0 } = {}) {
+      const start = rpts - daysAgo * 86400000;
+      db.prepare(
+        'INSERT INTO dispatch_subscriptions (email, plan, status, stripe_customer_id, stripe_subscription_id, is_test, created_at, updated_at) VALUES (?, \'basic\', ?, ?, ?, ?, ?, ?)'
+      ).run(email.toLowerCase(), status, 'cus_' + email, 'sub_' + email, isTest, start, rpts);
+    }
+    async function p7Scan() {
+      let r = await req(`${BASE}/admin/referrals/attribute?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+      if (r.status !== 302) failFast('referral-paid: attribution scan failed: ' + r.status);
+      r = await req(`${BASE}/admin/referrals/milestones?token=${ADMIN_TOKEN}`, { method: 'POST', form: [] });
+      if (r.status !== 302) failFast('referral-paid: milestone scan failed: ' + r.status);
+    }
+
+    // Case 1: referred driver active + paid for 31 days -> both sides earned.
+    const p7e1 = rp('earned1');
+    await p7ReferralLead('Earned1', p7e1, p7Code.code);
+    await p7Subscribe(p7e1, { daysAgo: 31 });
+    await p7Scan();
+    const p7e1Rows = db.prepare('SELECT * FROM referral_payouts WHERE referred_email = ? ORDER BY side').all(p7e1);
+    check('referral-paid: 31-day active subscriber earns $50 referrer + $25 referred',
+      p7e1Rows.length === 2 &&
+      p7e1Rows.find((r) => r.side === 'referrer').amount_cents === 5000 &&
+      p7e1Rows.find((r) => r.side === 'referred').amount_cents === 2500 &&
+      p7e1Rows.every((r) => r.status === 'earned' && r.earned_at != null),
+      `rows=${JSON.stringify(p7e1Rows.map((r) => ({ side: r.side, cents: r.amount_cents, status: r.status })))}`);
+
+    // Case 2: fresh subscriber -> pending rows, shown in progress on the tab.
+    const p7e2 = rp('pending1');
+    await p7ReferralLead('Pending1', p7e2, p7Code.code);
+    await p7Subscribe(p7e2, { daysAgo: 5 });
+    await p7Scan();
+    const p7e2Rows = db.prepare('SELECT * FROM referral_payouts WHERE referred_email = ?').all(p7e2);
+    check('referral-paid: 5-day subscriber gets pending (not earned) rows',
+      p7e2Rows.length === 2 && p7e2Rows.every((r) => r.status === 'pending'),
+      `rows=${JSON.stringify(p7e2Rows.map((r) => r.status))}`);
+    res = await req(`${BASE}/d/${p7ref.access_token}/referral`, {});
+    const p7TabHtml = await res.text();
+    check('referral-paid: driver tab shows earned + pending earnings and referral progress',
+      res.status === 200 && p7TabHtml.includes('$50.00') && p7TabHtml.includes('Day 5 of 30') &&
+      p7TabHtml.includes('Earned1') && p7TabHtml.includes('Pending1'),
+      `status=${res.status}`);
+
+    // Case 3: subscription lapses before day 30 -> pending rows void.
+    db.prepare("UPDATE dispatch_subscriptions SET status = 'canceled', updated_at = ? WHERE email = ?").run(rpts, p7e2);
+    await p7Scan();
+    const p7e2After = db.prepare('SELECT status FROM referral_payouts WHERE referred_email = ?').all(p7e2);
+    check('referral-paid: lapsed subscription voids pending rows (no payout)',
+      p7e2After.length === 2 && p7e2After.every((r) => r.status === 'void'),
+      `rows=${JSON.stringify(p7e2After.map((r) => r.status))}`);
+
+    // Case 4: admin test-access subscription never earns.
+    const p7e3 = rp('testsub');
+    await p7ReferralLead('TestSub', p7e3, p7Code.code);
+    await p7Subscribe(p7e3, { daysAgo: 60, isTest: 1 });
+    await p7Scan();
+    check('referral-paid: test subscription creates no payout rows',
+      db.prepare('SELECT COUNT(*) c FROM referral_payouts WHERE referred_email = ?').get(p7e3).c === 0,
+      'test subscription earned');
+
+    // Case 5: mark-paid flow with note; pending rows cannot be marked paid.
+    const p7PayRow = db.prepare("SELECT id FROM referral_payouts WHERE referred_email = ? AND side = 'referrer'").get(p7e1);
+    res = await req(`${BASE}/admin/referrals/payouts/${p7PayRow.id}/paid?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['note', 'Cash App 9/22']] });
+    const p7PaidRow = db.prepare('SELECT status s, paid_at p, paid_note n FROM referral_payouts WHERE id = ?').get(p7PayRow.id);
+    check('referral-paid: earned row marked paid with note + timestamp',
+      res.status === 302 && p7PaidRow.s === 'paid' && p7PaidRow.p != null && p7PaidRow.n === 'Cash App 9/22',
+      `status=${res.status} row=${JSON.stringify(p7PaidRow)}`);
+    const p7Totals = await req(`${BASE}/admin/referrals?token=${ADMIN_TOKEN}`, {});
+    const p7LedgerHtml = await p7Totals.text();
+    check('referral-paid: admin ledger shows owed/paid totals and the paid note',
+      p7Totals.status === 200 && p7LedgerHtml.includes('Cash App 9/22') && p7LedgerHtml.includes('Payout ledger'),
+      `status=${p7Totals.status}`);
+
+    // Case 6: milestone scan is idempotent (no duplicate payout rows).
+    await p7Scan();
+    check('referral-paid: re-running the scan creates no duplicate rows',
+      db.prepare('SELECT COUNT(*) c FROM referral_payouts WHERE referred_email = ?').get(p7e1).c === 2,
+      'duplicates created');
+
+    // Case 7: a pending row cannot be marked paid.
+    const p7e4 = rp('pending2');
+    await p7ReferralLead('Pending2', p7e4, p7Code.code);
+    await p7Subscribe(p7e4, { daysAgo: 2 });
+    await p7Scan();
+    const p7PendRow = db.prepare("SELECT id FROM referral_payouts WHERE referred_email = ? AND side = 'referrer'").get(p7e4);
+    res = await req(`${BASE}/admin/referrals/payouts/${p7PendRow.id}/paid?token=${ADMIN_TOKEN}`, { method: 'POST', form: [['note', 'too early']] });
+    check('referral-paid: pending row cannot be marked paid',
+      res.status === 302 &&
+      db.prepare('SELECT status FROM referral_payouts WHERE id = ?').get(p7PendRow.id).status === 'pending',
+      `status=${res.status}`);
+
+    // Cleanup: cancel this block's subscription fixtures so later tests
+    // (e.g. the pipeline test-grant count) see a clean slate.
+    db.prepare("UPDATE dispatch_subscriptions SET status = 'canceled', updated_at = ? WHERE email LIKE 'rp-%@example.com'").run(rpts);
+    check('referral-paid: fixtures cleaned up',
+      db.prepare("SELECT COUNT(*) c FROM dispatch_subscriptions WHERE email LIKE 'rp-%@example.com' AND status = 'active'").get().c === 0,
+      'leftover active subscriptions');
 
     // --- Follow-ups ---
     const p6Tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10); // YYYY-MM-DD

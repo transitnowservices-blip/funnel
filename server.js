@@ -1445,11 +1445,28 @@ app.post('/drivers/onboard', ah(async (req, res) => {
   const driver = await drivers.createOrUpdateDriver(clean);
   const dashUrl = drivers.driverDashUrl(driver.access_token);
 
+  // Referral awareness: their code was auto-issued at signup — make sure
+  // they know the paid program is live the moment they sign up.
+  let referralInfo = null;
+  try {
+    const code = await referralsLib.getActiveCodeForUser('driver', driver.id);
+    if (code) {
+      const base = drivers.baseUrl().replace(/\/$/, '');
+      referralInfo = {
+        code: code.code,
+        link: `${base}/grow/apply?ref=${encodeURIComponent(code.code)}`,
+        referrerBonus: '$' + (referralsLib.PROGRAM.referrerBonusCents / 100).toFixed(0),
+        referredBonus: '$' + (referralsLib.PROGRAM.referredBonusCents / 100).toFixed(0),
+        milestoneDays: referralsLib.PROGRAM.milestoneDays,
+      };
+    }
+  } catch (e) { /* non-blocking */ }
+
   // Notifications via the existing outbox queue (Phase 19).
   await drivers.queueDriverEmail({
     to: driver.email,
     subject: 'TransitNow — we received your driver onboarding',
-    html: drivers.onboardDriverEmail(driver, dashUrl),
+    html: drivers.onboardDriverEmail(driver, dashUrl, referralInfo),
     sequence: 'driver-ops',
     step: 'onboarding-confirmation',
   });
@@ -2523,17 +2540,36 @@ app.get('/admin/audit', adminAuth, ah(async (req, res) => {
 
 // --- Referrals ---
 app.get('/admin/referrals', adminAuth, ah(async (req, res) => {
-  const [codes, attributions, opportunities] = await Promise.all([
+  const [codes, attributions, opportunities, payouts, totals] = await Promise.all([
     referralsLib.listCodes(),
     referralsLib.listAttributions(),
     opps.listOpportunities({}),
+    referralsLib.listPayouts(),
+    referralsLib.payoutTotals(),
   ]);
   res.send(adminViews.adminLayout('Referrals',
     phase6Views.referralsAdminHtml({
       codes, attributions, opportunities,
+      payouts, payoutTotals: totals,
       error: req.query.error || '',
+      payoutMsg: req.query.payoutMsg || '',
       attributed: req.query.attributed ? JSON.parse(req.query.attributed) : null,
     })));
+}));
+
+app.post('/admin/referrals/milestones', adminAuth, ah(async (req, res) => {
+  const r = await referralsLib.checkMilestones();
+  const msg = `Milestone scan: ${r.created} new payout rows, ${r.earned} earned, ${r.voided} voided.`;
+  res.redirect('/admin/referrals?payoutMsg=' + encodeURIComponent(msg));
+}));
+
+app.post('/admin/referrals/payouts/:id/paid', adminAuth, ah(async (req, res) => {
+  try {
+    await referralsLib.markPaid(Number(req.params.id), req.body.note || '');
+    res.redirect('/admin/referrals?payoutMsg=' + encodeURIComponent('Marked paid.'));
+  } catch (err) {
+    res.redirect('/admin/referrals?error=' + encodeURIComponent(err.message));
+  }
 }));
 
 app.post('/admin/referrals/issue', adminAuth, ah(async (req, res) => {
@@ -2725,7 +2761,8 @@ app.get('/d/:token/referral', requireDriver, ah(async (req, res) => {
   const driver = req.driver;
   const code = await referralsLib.getActiveCodeForUser('driver', driver.id);
   const baseUrl = (site.baseUrl || 'http://localhost:3000').replace(/\/$/, '');
-  page(res, 'My referral code', phase6Views.driverReferralHtml({ driver, code, baseUrl }), site);
+  const progress = await referralsLib.referrerProgress(driver.id);
+  page(res, 'My referral code', phase6Views.driverReferralHtml({ driver, code, baseUrl, progress, program: referralsLib.PROGRAM }), site);
 }));
 
 // --- Driver: documents (own, non-sensitive only) ---

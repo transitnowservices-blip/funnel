@@ -25,7 +25,25 @@ function fmtDate(ts) {
 }
 
 // --- Referrals (admin) ----------------------------------------------------------
-function referralsAdminHtml({ codes = [], attributions = [], opportunities = [], error = '', attributed = null }) {
+function referralsAdminHtml({ codes = [], attributions = [], opportunities = [], error = '', attributed = null, payouts = [], payoutTotals = null, payoutMsg = '' }) {
+  const pt = payoutTotals || { earnedCents: 0, paidCents: 0, pendingCents: 0 };
+  const payoutRows = (payouts || []).map((p) => {
+    const who = p.side === 'referrer'
+      ? `Referrer: ${esc(p.referrer_name || '—')}`
+      : `Referred: ${esc(p.referred_name || p.referred_email || '—')}`;
+    return `<tr>
+      <td>${who}<br><span class="muted">code ${esc(p.code || '—')}</span></td>
+      <td><strong>${fmtMoney(p.amount_cents)}</strong></td>
+      <td>${payoutBadge(p.status)}</td>
+      <td>${p.earned_at ? fmtDate(p.earned_at) : '—'}</td>
+      <td>${p.paid_at ? fmtDate(p.paid_at) + (p.paid_note ? `<br><span class="muted">${esc(p.paid_note)}</span>` : '') : '—'}</td>
+      <td>${p.status === 'earned' ? `
+        <form method="POST" action="/admin/referrals/payouts/${p.id}/paid" style="display:inline">
+          <input type="text" name="note" placeholder="Payment note (e.g. Cash App 9/22)" style="min-height:40px;min-width:180px">
+          <button type="submit" class="btn btn-small">Mark paid</button>
+        </form>` : ''}</td>
+    </tr>`;
+  }).join('');
   const codeRows = (codes || []).map((c) => `
     <tr>
       <td><strong>${esc(c.code)}</strong></td>
@@ -65,7 +83,7 @@ ${attributed ? `<div class="card"><p>Attribution scan complete: ${attributed.cre
 <div class="card" style="border-left:4px solid #b7791f">
   <h3>Referral program status</h3>
   <p><strong>${esc(referrals.NO_PAYMENT_COPY)}</strong></p>
-  <p class="microcopy">Codes exist for tracking only. Do not promise payments, bonuses, or compensation when sharing codes.</p>
+  <p class="microcopy">Codes are issued automatically to every onboarded driver. Bonuses are tracked in the payout ledger below.</p>
 </div>
 
 <h3>Issue a referral code</h3>
@@ -94,7 +112,21 @@ ${attributed ? `<div class="card"><p>Attribution scan complete: ${attributed.cre
 </form>
 <p class="microcopy">Matches applications carrying a referral code (from the grow application) to issued codes. Tracks: referral source, referred person, application, status, opportunity, outcome.</p>
 <table class="admin-table"><thead><tr><th>Code</th><th>Referred person</th><th>Application</th><th>Status</th><th>Outcome</th><th>Update</th></tr></thead>
-<tbody>${attrRows || '<tr><td colspan="6">No attributions yet. Run the scan after codes have been shared.</td></tr>'}</tbody></table>`;
+<tbody>${attrRows || '<tr><td colspan="6">No attributions yet. Run the scan after codes have been shared.</td></tr>'}</tbody></table>
+
+<h3>Payout ledger</h3>
+${payoutMsg ? `<div class="card"><p>${esc(payoutMsg)}</p></div>` : ''}
+<div class="card">
+  <p><strong>Owed right now (earned):</strong> ${fmtMoney(pt.earnedCents)} ·
+  <strong>In progress (pending):</strong> ${fmtMoney(pt.pendingCents)} ·
+  <strong>Paid out total:</strong> ${fmtMoney(pt.paidCents)}</p>
+  <form method="POST" action="/admin/referrals/milestones" style="display:inline">
+    <button type="submit" class="btn btn-small">Run milestone scan</button>
+  </form>
+  <p class="microcopy">The milestone scan also runs automatically every day. A referral earns when the referred driver stays an active paid dispatch subscriber for 30 continuous days (test subscriptions never earn). Pay each earned bonus your usual way, then mark it paid with a note — that note is your receipt.</p>
+</div>
+<table class="admin-table"><thead><tr><th>Who</th><th>Amount</th><th>Status</th><th>Earned</th><th>Paid</th><th></th></tr></thead>
+<tbody>${payoutRows || '<tr><td colspan="6">No payouts yet. They appear here automatically once referred drivers subscribe.</td></tr>'}</tbody></table>`;
 }
 
 // --- Alerts (admin) --------------------------------------------------------------
@@ -259,25 +291,74 @@ ${histRows ? `<table class="admin-table"><thead><tr><th>Logged</th><th>Status</t
 }
 
 // --- Driver referral page ---------------------------------------------------------
-function driverReferralHtml({ driver, code, baseUrl }) {
+function fmtMoney(cents) { return '$' + ((Number(cents) || 0) / 100).toFixed(2); }
+
+function payoutBadge(status) {
+  const map = {
+    earned: ['#1b7f3c', 'Earned — payout coming'],
+    paid: ['#1f6feb', 'Paid'],
+    pending: ['#b7791f', 'In progress'],
+    void: ['#6b7280', 'Void'],
+    none: ['#6b7280', 'Not subscribed yet'],
+  };
+  const [color, label] = map[status] || map.none;
+  return `<span style="display:inline-block;padding:2px 10px;border-radius:999px;font-size:12px;font-weight:600;color:#fff;background:${color}">${esc(label)}</span>`;
+}
+
+function driverReferralHtml({ driver, code, baseUrl, progress = null, program = null }) {
+  const pg = progress || { code: null, referrals: [], earnings: { pendingCents: 0, earnedCents: 0, paidCents: 0 } };
+  const prog = program || { referrerBonusCents: 5000, referredBonusCents: 2500, milestoneDays: 30 };
   const shareLink = code ? `${baseUrl}/grow/apply?ref=${encodeURIComponent(code.code)}` : '';
+  const earn = pg.earnings || {};
+  const referralRows = (pg.referrals || []).map((r) => {
+    const pct = Math.round((r.daysActive / r.milestoneDays) * 100);
+    const stage = r.payoutStatus === 'earned' || r.payoutStatus === 'paid'
+      ? `${r.milestoneDays} / ${r.milestoneDays} days — milestone met`
+      : r.hasActiveSub
+        ? `Day ${r.daysActive} of ${r.milestoneDays} as an active subscriber`
+        : (r.subStatus === 'past_due' || r.subStatus === 'canceled'
+          ? 'Subscription lapsed — bonus void'
+          : 'Application received — waiting on their dispatch subscription');
+    return `<tr>
+      <td>${esc(r.referredName)}</td>
+      <td>${payoutBadge(r.payoutStatus)}</td>
+      <td style="min-width:180px">
+        <div style="background:#e5e7eb;border-radius:999px;height:10px;overflow:hidden">
+          <div style="width:${pct}%;height:10px;background:#b7791f"></div>
+        </div>
+        <span class="microcopy">${esc(stage)}</span>
+      </td>
+      <td><strong>${fmtMoney(r.amountCents)}</strong></td>
+    </tr>`;
+  }).join('');
   return `
 <section>
-  <h1>Referrals</h1>
-  <div class="card" style="border-left:4px solid #b7791f">
-    <p><strong>${esc(referrals.NO_PAYMENT_COPY)}</strong></p>
+  <h1>Refer drivers, earn ${fmtMoney(prog.referrerBonusCents)}</h1>
+  <div class="card highlight-card" style="border-left:4px solid #1b7f3c">
+    <p><strong>How it works:</strong> share your link. When someone you refer becomes a paid TransitNow dispatch client and stays active ${prog.milestoneDays} days, you earn <strong>${fmtMoney(prog.referrerBonusCents)}</strong> and they earn <strong>${fmtMoney(prog.referredBonusCents)}</strong>. Bonuses are tracked here and paid out by TransitNow operations after the milestone is met. No guaranteed routes, loads, work, or income — the dispatch subscription itself is separate.</p>
   </div>
   ${code ? `
-  <div class="card highlight-card">
-    <h3>Your referral code</h3>
+  <div class="card">
+    <h3>Your referral link</h3>
     <p class="dash-link"><strong style="font-size:28px;letter-spacing:2px">${esc(code.code)}</strong></p>
-    <p>Share this link — it carries your code into the application:</p>
     <p class="dash-link"><a href="${esc(shareLink)}">${esc(shareLink)}</a></p>
-    <p class="microcopy">When someone applies using your code, operations can see the attribution. This is tracking only — see the note above about payments.</p>
+    <p><button class="btn btn-small" onclick="navigator.clipboard.writeText('${esc(shareLink)}').then(()=>{this.textContent='Copied!'});">Copy link</button></p>
+    <p class="microcopy">Anyone who applies through this link is credited to you automatically.</p>
   </div>` : `
   <div class="card">
-    <p>No referral code has been issued to you yet. If you'd like one, contact TransitNow operations.</p>
+    <p>Your referral code is being set up — check back shortly.</p>
   </div>`}
+  <div class="card">
+    <h3>Your earnings</h3>
+    <div style="display:flex;gap:16px;flex-wrap:wrap">
+      <div><div class="microcopy">In progress</div><div style="font-size:24px;font-weight:700">${fmtMoney(earn.pendingCents)}</div></div>
+      <div><div class="microcopy">Earned — payout coming</div><div style="font-size:24px;font-weight:700;color:#1b7f3c">${fmtMoney(earn.earnedCents)}</div></div>
+      <div><div class="microcopy">Paid to you</div><div style="font-size:24px;font-weight:700;color:#1f6feb">${fmtMoney(earn.paidCents)}</div></div>
+    </div>
+  </div>
+  <h2>Your referrals</h2>
+  <table class="admin-table"><thead><tr><th>Driver</th><th>Status</th><th>Progress</th><th>Your bonus</th></tr></thead>
+  <tbody>${referralRows || '<tr><td colspan="4">No referrals yet — share your link to get moving.</td></tr>'}</tbody></table>
   <p><a href="/d/${esc(driver.access_token)}">&larr; Back to dashboard</a></p>
 </section>`;
 }
