@@ -158,11 +158,11 @@ const PUBLIC_NAV = [
   { href: '/support', label: 'SUPPORT' },
   { href: '/contact', label: 'CONTACT' },
 ];
-function page(res, title, bodyHtml, site) {
+function page(res, title, bodyHtml, site, opts) {
   const s = site && site.businessName !== "Wealth Builder's Room"
     ? { ...site, publicNav: PUBLIC_NAV }
     : site;
-  res.send(layoutFn({ title, body: bodyHtml, site: s }));
+  res.send(layoutFn({ title, body: bodyHtml, site: s, installBanner: !!(opts && opts.installBanner) }));
 }
 
 /**
@@ -562,7 +562,7 @@ app.get('/', ah(async (req, res) => {
     await tags.addTag(lead.id, 'VIEWED_OFFER');
     await tags.addTag(lead.id, `OFFER_${product.id}_VIEWED`);
   }
-  page(res, product.name, pages.landingPage(site, product), site);
+  page(res, product.name, pages.landingPage(site, product), site, { installBanner: true });
 }));
 
 app.get('/lead', (req, res) => {
@@ -1530,7 +1530,7 @@ const liveLimiter = publicRateLimit({ windowMs: 10 * 60 * 1000, max: 30 });
 
 // --- /grow landing + 13-step application ---
 app.get('/grow', (req, res) => {
-  page(res, 'Grow With TransitNow', growViews.growLandingPage(), config.getSite());
+  page(res, 'Grow With TransitNow', growViews.growLandingPage(), config.getSite(), { installBanner: true });
 });
 
 app.get('/grow/apply', (req, res) => {

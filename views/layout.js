@@ -10,7 +10,7 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
-function layout({ title, body, site }) {
+function layout({ title, body, site, installBanner }) {
   const siteTitle = esc(site.businessName || 'TransitNow');
   const pageTitle = title ? `${esc(title)} | ${siteTitle}` : siteTitle;
   const year = new Date().getFullYear();
@@ -54,6 +54,33 @@ ${body}
     <p class="footer-copy">&copy; ${year} ${siteTitle}. All rights reserved.</p>
   </div>
 </footer>
+${installBanner ? `
+<div id="tn-install-banner" class="tn-install-banner" hidden>
+  <span class="tn-install-icon">📲</span>
+  <span class="tn-install-text"><strong>Get the TransitNow app</strong><br><span id="tn-install-how">Tap Share, then Add to Home Screen.</span></span>
+  <button id="tn-install-close" class="tn-install-close" aria-label="Dismiss">&times;</button>
+</div>
+<script>
+(function () {
+  try {
+    if (localStorage.getItem('tn-install-dismissed')) return;
+    var isStandalone = window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone;
+    if (isStandalone) return;
+    var ua = navigator.userAgent || '';
+    var isIOS = /iPhone|iPad|iPod/.test(ua) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    var isAndroid = /Android/.test(ua);
+    if (!isIOS && !isAndroid) return;
+    var banner = document.getElementById('tn-install-banner');
+    var how = document.getElementById('tn-install-how');
+    if (isAndroid && how) how.textContent = 'Tap the menu (⋮), then Add to Home Screen.';
+    banner.hidden = false;
+    document.getElementById('tn-install-close').addEventListener('click', function () {
+      banner.hidden = true;
+      try { localStorage.setItem('tn-install-dismissed', '1'); } catch (e) {}
+    });
+  } catch (e) {}
+})();
+</script>` : ''}
 </body>
 </html>`;
 }
