@@ -450,3 +450,4 @@ a.stat-card:hover { border-color: #1F3A5F; }
   cursor: pointer;
   padding: 4px 8px;
 }
+.tn-install-link { color: #F5B301; font-weight: bold; white-space: nowrap; }

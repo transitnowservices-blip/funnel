@@ -418,6 +418,33 @@ function contactPage(site) {
 </section>`;
 }
 
+function installPage(site) {
+  return `
+<section>
+  <h1>Get the TransitNow App on Your Phone</h1>
+  <p>No app store. No download. Put TransitNow on your home screen in under a minute — tap the icon and it opens like a real app.</p>
+  <div class="card">
+    <h2>📱 iPhone (Safari)</h2>
+    <ol>
+      <li>Open this page in <strong>Safari</strong>.</li>
+      <li>Tap the <strong>Share</strong> button — the square with the arrow at the bottom of the screen.</li>
+      <li>Scroll down and tap <strong>Add to Home Screen</strong>.</li>
+      <li>Tap <strong>Add</strong> in the top right. Done — the TransitNow icon is on your home screen.</li>
+    </ol>
+  </div>
+  <div class="card">
+    <h2>🤖 Android (Chrome)</h2>
+    <ol>
+      <li>Open this page in <strong>Chrome</strong>.</li>
+      <li>Tap the <strong>menu</strong> — the three dots (⋮) in the top right corner.</li>
+      <li>Tap <strong>Add to Home screen</strong> (or <strong>Install app</strong>).</li>
+      <li>Tap <strong>Add</strong>. Done — the TransitNow icon is on your home screen.</li>
+    </ol>
+  </div>
+  <p class="microcopy">Tip: the icon opens whichever page you installed it from. Install it from the <a href="/grow/apply">driver application</a> to jump straight there, or from <a href="/grow">Grow With TransitNow</a> for the full picture.</p>
+</section>`;
+}
+
 module.exports = {
   landingPage,
   leadPage,
@@ -436,4 +463,5 @@ module.exports = {
   termsPage,
   refundPage,
   contactPage,
+  installPage,
 };

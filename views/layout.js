@@ -50,14 +50,14 @@ ${body}
   <div class="container">
     <p class="footer-note">${esc(site.footerNote || '')}</p>
     <p class="footer-contact">${esc(site.businessName || '')} &middot; ${esc(site.phone || '')} &middot; ${esc(site.email || '')}</p>
-    <p class="footer-links"><a href="/privacy">Privacy</a> &middot; <a href="/terms">Terms</a> &middot; <a href="/refund">Refund &amp; Cancellation</a> &middot; <a href="/contact">Contact</a> &middot; <a href="/unsubscribe">Unsubscribe</a></p>
+    <p class="footer-links"><a href="/privacy">Privacy</a> &middot; <a href="/terms">Terms</a> &middot; <a href="/refund">Refund &amp; Cancellation</a> &middot; <a href="/contact">Contact</a> &middot; <a href="/install">Get the App</a> &middot; <a href="/unsubscribe">Unsubscribe</a></p>
     <p class="footer-copy">&copy; ${year} ${siteTitle}. All rights reserved.</p>
   </div>
 </footer>
 ${installBanner ? `
 <div id="tn-install-banner" class="tn-install-banner" hidden>
   <span class="tn-install-icon">📲</span>
-  <span class="tn-install-text"><strong>Get the TransitNow app</strong><br><span id="tn-install-how">Tap Share, then Add to Home Screen.</span></span>
+  <span class="tn-install-text"><strong>Get the TransitNow app</strong><br><span id="tn-install-how">Tap Share, then Add to Home Screen.</span> <a href="/install" class="tn-install-link">Show me how &rarr;</a></span>
   <button id="tn-install-close" class="tn-install-close" aria-label="Dismiss">&times;</button>
 </div>
 <script>

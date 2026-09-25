@@ -847,6 +847,7 @@ app.get('/payment-success', ah(async (req, res) => {
 app.get('/terms', (req, res) => page(res, 'Terms of Service', pages.termsPage(config.getSite()), config.getSite()));
 app.get('/refund', (req, res) => page(res, 'Refund & Cancellation Policy', pages.refundPage(config.getSite()), config.getSite()));
 app.get('/contact', (req, res) => page(res, 'Contact', pages.contactPage(config.getSite()), config.getSite()));
+app.get('/install', (req, res) => page(res, 'Get the App', pages.installPage(config.getSite()), config.getSite()));
 
 // --- Order bump -----------------------------------------------------------------------
 async function orderBumpAccept(lead, product) {
