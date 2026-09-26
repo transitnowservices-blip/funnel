@@ -193,6 +193,16 @@ ${dispatchPricingSection()}
   <p><strong>I'm not ready to subscribe — can I still talk to you?</strong><br>Yes. <a href="/grow/apply">Tell us about you here</a> — when a route or opportunity fits your profile, we will reach out.</p>
 </section>
 <section>
+  <h2>Dispatch service built for Milwaukee drivers</h2>
+  <p class="lede">TransitNow Logistics Services is a Milwaukee-based dispatch service for independent couriers, owner-operators, and carriers. Most dispatchers only work with semis — we find work for anything with wheels: cars, SUVs, cargo vans, sprinter vans, box trucks, and hotshot trailers. We work your pipeline so you can work the road.</p>
+  <ul class="bullets" style="text-align:left;max-width:34rem;margin:0 auto">
+    <li><strong>Courier routes in Milwaukee</strong> — weekly route matches picked for your city, your vehicle, and your lanes.</li>
+    <li><strong>Dispatch for every vehicle</strong> — car, SUV, cargo van, sprinter van, box truck, or hotshot trailer: load-search prep, broker verification guidance, and rate paperwork handled with you.</li>
+    <li><strong>Owner-operator support</strong> — onboarding, carrier and vehicle review, lane preferences, and ongoing dispatch support.</li>
+  </ul>
+  <p class="lede">Drivers across Milwaukee use TransitNow to spend less time chasing loads and more time driving them. <a href="/dispatch">See how our dispatch services work</a> or <a href="/grow/apply">apply here</a>.</p>
+</section>
+<section>
   <h2>Ready to stop chasing loads?</h2>
   <p class="lede">Join the drivers who let TransitNow work the phones while they work the road.</p>
   <p>

@@ -45,6 +45,7 @@ const driverAdminViews = require('./views/driver-admin');
 // (additive; existing routes untouched).
 const grow = require('./lib/grow');
 const growViews = require('./views/grow');
+const seo = require('./lib/seo');
 // Phase 2: extended driver onboarding, opportunity database, matching
 // (additive; existing routes untouched).
 const opps = require('./lib/opportunities');
@@ -162,7 +163,7 @@ function page(res, title, bodyHtml, site, opts) {
   const s = site && site.businessName !== "Wealth Builder's Room"
     ? { ...site, publicNav: PUBLIC_NAV }
     : site;
-  res.send(layoutFn({ title, body: bodyHtml, site: s, installBanner: !!(opts && opts.installBanner) }));
+  res.send(layoutFn({ title, body: bodyHtml, site: s, installBanner: !!(opts && opts.installBanner), seo: (opts && opts.seo) || null }));
 }
 
 /**
@@ -554,6 +555,10 @@ app.use(ah(tracking.middleware));
 // --- Funnel pages -------------------------------------------------------------------
 app.get('/healthz', (req, res) => res.type('text').send('ok'));
 
+// SEO: robots.txt + sitemap.xml for search crawlers.
+app.get('/robots.txt', (req, res) => res.type('text/plain').send(seo.robotsTxt()));
+app.get('/sitemap.xml', (req, res) => res.type('application/xml').send(seo.sitemapXml()));
+
 app.get('/', ah(async (req, res) => {
   const site = config.getSite();
   const product = productFromReq(req);
@@ -562,12 +567,12 @@ app.get('/', ah(async (req, res) => {
     await tags.addTag(lead.id, 'VIEWED_OFFER');
     await tags.addTag(lead.id, `OFFER_${product.id}_VIEWED`);
   }
-  page(res, product.name, pages.landingPage(site, product), site, { installBanner: true });
+  page(res, product.name, pages.landingPage(site, product), site, { installBanner: true, seo: seo.seoFor('/') });
 }));
 
 app.get('/lead', (req, res) => {
   const site = config.getSite();
-  page(res, 'Free download', pages.leadPage(site, productFromReq(req), req.query), site);
+  page(res, 'Free download', pages.leadPage(site, productFromReq(req), req.query), site, { seo: seo.seoFor('/lead') });
 });
 
 app.post('/lead', ah(async (req, res) => {
@@ -618,7 +623,7 @@ app.post('/lead', ah(async (req, res) => {
 app.get('/free-value', ah(async (req, res) => {
   const site = config.getSite();
   const product = productFromReq(req);
-  page(res, 'Your free download', pages.freeValuePage(site, product, await leadFromReq(req)), site);
+  page(res, 'Your free download', pages.freeValuePage(site, product, await leadFromReq(req)), site, { seo: seo.seoFor('/free-value') });
 }));
 
 app.get('/sales', ah(async (req, res) => {
@@ -629,13 +634,13 @@ app.get('/sales', ah(async (req, res) => {
     await tags.addTag(lead.id, 'VIEWED_OFFER');
     await tags.addTag(lead.id, `OFFER_${product.id}_VIEWED`);
   }
-  page(res, product.name, pages.salesPage(site, product), site);
+  page(res, product.name, pages.salesPage(site, product), site, { seo: seo.seoFor('/sales') });
 }));
 
 app.get('/checkout', ah(async (req, res) => {
   const site = config.getSite();
   const product = productFromReq(req);
-  page(res, 'Checkout', pages.checkoutPage(site, product, await leadFromReq(req), site.paymentMode), site);
+  page(res, 'Checkout', pages.checkoutPage(site, product, await leadFromReq(req), site.paymentMode), site, { seo: seo.seoFor('/checkout') });
 }));
 
 app.post('/checkout', ah(async (req, res) => {
@@ -647,7 +652,7 @@ app.post('/checkout', ah(async (req, res) => {
   if (!firstName || !EMAIL_RE.test(emailAddr)) {
     const body = `<section><h1>Checkout</h1><p class="error">Please provide your first name and a valid email address to continue.</p><p><a class="btn" href="/checkout?p=${esc(product.id)}">Back to checkout</a></p></section>`;
     res.status(400);
-    return page(res, 'Checkout', body, site);
+    return page(res, 'Checkout', body, site, { seo: seo.seoFor('/checkout') });
   }
 
   const lead = await identifyLead(
@@ -683,7 +688,7 @@ app.post('/checkout', ah(async (req, res) => {
     </form>
     <p class="microcopy">Ordering as ${esc(lead.email || '')}. <a href="/checkout?p=${esc(product.id)}">Back</a></p>
   </section>`;
-  page(res, 'Confirm your order', body, site);
+  page(res, 'Confirm your order', body, site, { seo: seo.seoFor('/checkout') });
 }));
 
 app.post('/checkout/complete-demo', ah(async (req, res) => {
@@ -704,7 +709,7 @@ function roomCheckoutRedirect(req, res) {
   const product = config.getProduct('room');
   if (product && product.stripeLink) return res.redirect(302, product.stripeLink);
   const site = config.getSite();
-  return page(res, 'Checkout', pages.checkoutPage(site, product, null, site.paymentMode), site);
+  return page(res, 'Checkout', pages.checkoutPage(site, product, null, site.paymentMode), site, { seo: seo.seoFor('/checkout') });
 }
 app.get('/checkout/room', (req, res) => roomCheckoutRedirect(req, res));
 app.post('/checkout/room', (req, res) => roomCheckoutRedirect(req, res));
@@ -717,12 +722,12 @@ app.post('/checkout/room', (req, res) => roomCheckoutRedirect(req, res));
 app.get('/room/join', ah(async (req, res) => {
   const site = roomSite();
   await db.recordEvent({ visitor_id: req.vid, type: 'landing_page_view', product_id: 'room', meta: { path: '/room/join' } });
-  page(res, "Join the Wealth Builder's Room", pages.roomJoinPage(site), site);
+  page(res, "Join the Wealth Builder's Room", pages.roomJoinPage(site), site, { seo: seo.seoFor('/room/join') });
 }));
 
 app.get('/room/start', (req, res) => {
   const site = roomSite();
-  page(res, 'Start building', pages.roomStartPage(site, req.query, null), site);
+  page(res, 'Start building', pages.roomStartPage(site, req.query, null), site, { seo: seo.seoFor('/room/start') });
 });
 
 app.post('/room/start', ah(async (req, res) => {
@@ -786,7 +791,7 @@ app.get('/room/offer', ah(async (req, res) => {
     visitor_id: req.vid, lead_id: lead ? lead.id : null,
     type: 'offer_viewed', product_id: 'room', meta: { path: '/room/offer' },
   });
-  page(res, "Wealth Builder's Room", pages.roomOfferPage(site), site);
+  page(res, "Wealth Builder's Room", pages.roomOfferPage(site), site, { seo: seo.seoFor('/room/offer') });
 }));
 
 app.get('/room/checkout', ah(async (req, res) => {
@@ -794,7 +799,7 @@ app.get('/room/checkout', ah(async (req, res) => {
   const lead = await leadFromReq(req);
   if (lead) await pipeline.setStage(lead.id, 'QUALIFIED');
   const product = config.getProduct('room');
-  page(res, 'Checkout', roomFunnelViews.roomCheckoutPage({ product, site }), site);
+  page(res, 'Checkout', roomFunnelViews.roomCheckoutPage({ product, site }), site, { seo: seo.seoFor('/room/checkout') });
 }));
 
 app.post('/room/checkout', ah(async (req, res) => {
@@ -840,14 +845,14 @@ app.post('/room/checkout', ah(async (req, res) => {
 app.get('/payment-success', ah(async (req, res) => {
   const site = roomSite();
   const product = config.getProduct(req.query.p || 'room');
-  page(res, 'Payment successful', roomFunnelViews.paymentSuccessPage({ product }), site);
+  page(res, 'Payment successful', roomFunnelViews.paymentSuccessPage({ product }), site, { seo: seo.seoFor('/payment-success') });
 }));
 
 // Legal + contact pages (linked from the site footer).
-app.get('/terms', (req, res) => page(res, 'Terms of Service', pages.termsPage(config.getSite()), config.getSite()));
-app.get('/refund', (req, res) => page(res, 'Refund & Cancellation Policy', pages.refundPage(config.getSite()), config.getSite()));
-app.get('/contact', (req, res) => page(res, 'Contact', pages.contactPage(config.getSite()), config.getSite()));
-app.get('/install', (req, res) => page(res, 'Get the App', pages.installPage(config.getSite()), config.getSite()));
+app.get('/terms', (req, res) => page(res, 'Terms of Service', pages.termsPage(config.getSite()), config.getSite(), { seo: seo.seoFor('/terms') }));
+app.get('/refund', (req, res) => page(res, 'Refund & Cancellation Policy', pages.refundPage(config.getSite()), config.getSite(), { seo: seo.seoFor('/refund') }));
+app.get('/contact', (req, res) => page(res, 'Contact', pages.contactPage(config.getSite()), config.getSite(), { seo: seo.seoFor('/contact') }));
+app.get('/install', (req, res) => page(res, 'Get the App', pages.installPage(config.getSite()), config.getSite(), { seo: seo.seoFor('/install') }));
 
 // --- Order bump -----------------------------------------------------------------------
 async function orderBumpAccept(lead, product) {
@@ -864,7 +869,7 @@ app.get('/order-bump', ah(async (req, res) => {
   if (!lead) return res.redirect(`/checkout?p=${encodeURIComponent(product.id)}`);
   if (!product.orderBump || !product.orderBump.enabled) return res.redirect(await nextFunnelUrl(lead.id, product));
   await db.recordEvent({ lead_id: lead.id, type: 'ORDER_BUMP_SHOWN', product_id: product.id });
-  page(res, 'Add to your order', pages.orderBumpPage(site, product), site);
+  page(res, 'Add to your order', pages.orderBumpPage(site, product), site, { seo: seo.seoFor('/order-bump') });
 }));
 
 // Form shape used by views/pages.js: POST /order-bump with accept=yes|no
@@ -905,7 +910,7 @@ function upsellGetHandler(which) {
       return res.redirect(await nextFunnelUrl(lead.id, product));
     }
     await db.recordEvent({ lead_id: lead.id, type: `${which.toUpperCase()}_SHOWN`, product_id: product.id });
-    page(res, 'Special offer', pages.upsellPage(site, product, upsell, which), site);
+    page(res, 'Special offer', pages.upsellPage(site, product, upsell, which), site, { seo: seo.seoFor('/upsell1') });
   });
 }
 
@@ -943,7 +948,7 @@ app.post('/upsell2/decline', upsellDecide('upsell2', false));
 app.get('/thank-you', ah(async (req, res) => {
   const site = config.getSite();
   const product = productFromReq(req);
-  page(res, 'Thank you', pages.thankYouPage(site, product, await leadFromReq(req)), site);
+  page(res, 'Thank you', pages.thankYouPage(site, product, await leadFromReq(req)), site, { seo: seo.seoFor('/thank-you') });
 }));
 
 // --- The Wealth Builder's Room (membership community) ----------------------------------------
@@ -1425,7 +1430,7 @@ async function resolveDriverSource(req) {
 app.get('/drivers/onboard', ah(async (req, res) => {
   const site = config.getSite();
   const source = await resolveDriverSource(req);
-  page(res, 'Driver Onboarding', driverViews.onboardPage({ site, source }), site);
+  page(res, 'Driver Onboarding', driverViews.onboardPage({ site, source }), site, { seo: seo.seoFor('/drivers/onboard') });
 }));
 
 app.post('/drivers/onboard', ah(async (req, res) => {
@@ -1531,13 +1536,14 @@ const liveLimiter = publicRateLimit({ windowMs: 10 * 60 * 1000, max: 30 });
 
 // --- /grow landing + 13-step application ---
 app.get('/grow', (req, res) => {
-  page(res, 'Grow With TransitNow', growViews.growLandingPage(), config.getSite(), { installBanner: true });
+  page(res, 'Grow With TransitNow', growViews.growLandingPage(), config.getSite(), { installBanner: true, seo: seo.seoFor('/grow') });
 });
 
 app.get('/grow/apply', (req, res) => {
   page(
     res, 'Grow With TransitNow — Application',
-    growViews.growApplyPage({ query: req.query }), config.getSite()
+    growViews.growApplyPage({ query: req.query }), config.getSite(),
+    { seo: seo.seoFor('/grow/apply') }
   );
 });
 
@@ -1611,12 +1617,13 @@ app.post('/grow/apply', growLimiter, ah(async (req, res) => {
 
 app.get('/grow/thank-you', (req, res) => {
   page(res, 'Thank You',
-    growViews.growThankYouPage({ resubmission: req.query.updated === '1' }), config.getSite());
+    growViews.growThankYouPage({ resubmission: req.query.updated === '1' }), config.getSite(),
+    { seo: seo.seoFor('/thank-you') });
 });
 
 // --- /business funnel (spec section 29) ---
 app.get('/business', (req, res) => {
-  page(res, 'Businesses — TransitNow', growViews.businessPage({ query: req.query }), config.getSite());
+  page(res, 'Businesses — TransitNow', growViews.businessPage({ query: req.query }), config.getSite(), { seo: seo.seoFor('/business') });
 });
 
 app.post('/business', growLimiter, ah(async (req, res) => {
@@ -1653,12 +1660,12 @@ app.post('/business', growLimiter, ah(async (req, res) => {
 }));
 
 app.get('/business/thank-you', (req, res) => {
-  page(res, 'Thank You', growViews.businessThankYouPage(), config.getSite());
+  page(res, 'Thank You', growViews.businessThankYouPage(), config.getSite(), { seo: seo.seoFor('/business/thank-you') });
 });
 
 // --- /rsp funnel (spec section 18) ---
 app.get('/rsp', (req, res) => {
-  page(res, 'RSP Interest — TransitNow', growViews.rspPage({ query: req.query }), config.getSite());
+  page(res, 'RSP Interest — TransitNow', growViews.rspPage({ query: req.query }), config.getSite(), { seo: seo.seoFor('/rsp') });
 });
 
 app.post('/rsp', growLimiter, ah(async (req, res) => {
@@ -1696,12 +1703,12 @@ app.post('/rsp', growLimiter, ah(async (req, res) => {
 }));
 
 app.get('/rsp/thank-you', (req, res) => {
-  page(res, 'Thank You', growViews.rspThankYouPage(), config.getSite());
+  page(res, 'Thank You', growViews.rspThankYouPage(), config.getSite(), { seo: seo.seoFor('/rsp/thank-you') });
 });
 
 // --- /dispatch funnel (spec section 30) ---
 app.get('/dispatch', (req, res) => {
-  page(res, 'Dispatch Services — TransitNow', growViews.dispatchPage({ query: req.query }), config.getSite());
+  page(res, 'Dispatch Services — TransitNow', growViews.dispatchPage({ query: req.query }), config.getSite(), { seo: seo.seoFor('/dispatch') });
 });
 
 app.post('/dispatch', growLimiter, ah(async (req, res) => {
@@ -1737,12 +1744,12 @@ app.post('/dispatch', growLimiter, ah(async (req, res) => {
 }));
 
 app.get('/dispatch/thank-you', (req, res) => {
-  page(res, 'Thank You', growViews.dispatchThankYouPage(), config.getSite());
+  page(res, 'Thank You', growViews.dispatchThankYouPage(), config.getSite(), { seo: seo.seoFor('/dispatch/thank-you') });
 });
 
 // --- Public /support page (no 24/7 human-staff claim) ---
 app.get('/support', (req, res) => {
-  page(res, 'Support — TransitNow', growViews.supportPage(), config.getSite());
+  page(res, 'Support — TransitNow', growViews.supportPage(), config.getSite(), { seo: seo.seoFor('/support') });
 });
 
 // --- Admin CRM (spec sections 7-8) ----------------------------------------------

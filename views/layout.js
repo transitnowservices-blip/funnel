@@ -2,6 +2,8 @@
 // `body` is inner page markup produced by views/pages.js. `site` is config/site.json.
 'use strict';
 
+const { SITE_URL: SEO_URL, localBusinessJsonLd } = require('../lib/seo');
+
 function esc(s) {
   return String(s == null ? '' : s)
     .replace(/&/g, '&amp;')
@@ -10,9 +12,16 @@ function esc(s) {
     .replace(/"/g, '&quot;');
 }
 
-function layout({ title, body, site, installBanner }) {
+function layout({ title, body, site, installBanner, seo }) {
+  const s = seo || {};
   const siteTitle = esc(site.businessName || 'TransitNow');
-  const pageTitle = title ? `${esc(title)} | ${siteTitle}` : siteTitle;
+  // SEO: a per-page `seo.title` is used verbatim (already branded); otherwise
+  // fall back to the historic "Title | Brand" pattern.
+  const pageTitle = s.title ? esc(s.title) : (title ? `${esc(title)} | ${siteTitle}` : siteTitle);
+  const description = s.description || site.tagline || '';
+  const canonical = s.canonical || '';
+  const ogImage = `${SEO_URL}/apple-touch-icon.png`;
+  const jsonLd = s.jsonLd === 'localBusiness' ? localBusinessJsonLd() : (s.jsonLd || '');
   const year = new Date().getFullYear();
   // Public navigation (spec section 27). Only rendered when site.publicNav
   // is set — Room-branded pages never set it, so their look is unchanged.
@@ -28,7 +37,19 @@ function layout({ title, body, site, installBanner }) {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${pageTitle}</title>
-<meta name="description" content="${esc(site.tagline || '')}">
+<meta name="description" content="${esc(description)}">
+${s.noindex ? '<meta name="robots" content="noindex,nofollow">' : ''}
+${canonical ? `<link rel="canonical" href="${esc(canonical)}">` : ''}
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="${siteTitle}">
+<meta property="og:title" content="${pageTitle}">
+<meta property="og:description" content="${esc(description)}">
+${canonical ? `<meta property="og:url" content="${esc(canonical)}">` : ''}
+<meta property="og:image" content="${esc(ogImage)}">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="${pageTitle}">
+<meta name="twitter:description" content="${esc(description)}">
+${jsonLd ? `<script type="application/ld+json">${jsonLd}</script>` : ''}
 <link rel="stylesheet" href="/style.css">
 <link rel="icon" type="image/png" href="/apple-touch-icon.png">
 <link rel="apple-touch-icon" href="/apple-touch-icon.png">

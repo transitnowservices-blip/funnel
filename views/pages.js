@@ -31,6 +31,10 @@ function landingPage(site, product) {
   ${cta('/lead', 'Get the Free Checklist', 'btn-large')}
   <p class="microcopy">Free. No card required. Unsubscribe anytime.</p>
 </section>
+<section>
+  <h2>Milwaukee dispatch support for independent couriers</h2>
+  <p>TransitNow Logistics Services helps independent couriers, owner-operators, and carriers in Milwaukee — running anything from cars and cargo vans to box trucks and hotshot trailers — stay organized and keep their pipeline full: lane research, load-search prep, broker verification guidance, paperwork, and route planning. Start with the free checklist above, or <a href="/grow">see our dispatch plans</a> when you're ready for a dispatcher in your corner.</p>
+</section>
 <footer class="page-footer"><p>${esc(site.footerNote || '')}</p></footer>`;
 }
 
