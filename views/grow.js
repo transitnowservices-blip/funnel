@@ -139,7 +139,7 @@ function growLandingPage() {
 <section class="hero">
   <p class="eyebrow">TRANSITNOW DISPATCH</p>
   <h1>YOU DRIVE. WE FIND THE WORK.</h1>
-  <p class="subhead">Stop burning hours chasing brokers and deadheading between loads. TransitNow Dispatch puts a dispatcher in your corner — fresh route matches in your city, delivered to your phone every Monday. From $50/month. Cancel anytime.</p>
+  <p class="subhead">Medical courier companies in Milwaukee are hiring right now. TransitNow gives you the live hiring list — verified fresh when you join — plus the certification checklist and coaching to get you hired. From $50/month. Cancel anytime.</p>
   <p>
     <a class="btn btn-large" href="#dispatch-plans">START DISPATCH — $50/MO</a>
     <a class="btn btn-secondary btn-large" href="#how-it-works">HOW IT WORKS</a>
@@ -148,21 +148,21 @@ function growLandingPage() {
 <section>
   <h2>Sound familiar?</h2>
   <ul class="bullets" style="text-align:left;max-width:34rem;margin:0 auto">
-    <li>You spend more time calling brokers than driving.</li>
-    <li>Deadhead miles eat your profit between loads.</li>
-    <li>The good freight goes to whoever answers first — and you're still on hold.</li>
-    <li>Paperwork, check calls, and rate games steal your evenings.</li>
+    <li>You see courier and delivery jobs posted but can't tell which ones are real.</li>
+    <li>You apply and hear nothing back — and never find out why.</li>
+    <li>You don't know what certifications or paperwork you actually need.</li>
+    <li>The good openings go to whoever's ready first — and you're still on step one.</li>
   </ul>
-  <p class="lede">Now imagine opening your phone Monday morning to route matches picked for your city, your vehicle, and your lanes — and just driving.</p>
+  <p class="lede">Now imagine knowing exactly which companies are hiring this week — and knowing how to follow up until you're hired, with the tools to do it.</p>
 </section>
 <section id="how-it-works">
   <h2>How it works</h2>
   <ol class="steps" style="text-align:left;max-width:34rem;margin:0 auto">
     <li><strong>Subscribe.</strong> Basic $50/month or Complete $100/month. Secure Stripe checkout. Cancel anytime — no contract.</li>
-    <li><strong>Get set up.</strong> We review your carrier/business and vehicle information and lock in your freight and lane preferences.</li>
-    <li><strong>Get matched.</strong> Fresh route matches land in your email and text every Monday. You drive — we keep your pipeline full.</li>
+    <li><strong>Get verified.</strong> We re-check the hiring list for your vehicle and city, review your documents and insurance, and run the certification and readiness checklist with you.</li>
+    <li><strong>Get hired.</strong> Basic: you apply using the live directory and our coaching. Complete: follow-up training and the toolkit — we teach you how to chase every application until you're hired.</li>
   </ol>
-  <p class="lede">Basic is $50 a month. That is less than $2 a day for a dispatcher working your pipeline every single week.</p>
+  <p class="lede">Basic is $50 a month. That is less than $2 a day for the live hiring list and a coach in your corner.</p>
   <p>
     <a class="btn btn-large" href="#dispatch-plans">SEE THE PLANS</a>
   </p>
@@ -170,7 +170,7 @@ function growLandingPage() {
 ${dispatchPricingSection()}
 <section id="learn-the-play">
   <h2>Or learn the play yourself</h2>
-  <p class="lede">Two paths, one goal. <strong>Run the play</strong> with TransitNow Dispatch above — or <strong>learn the play</strong> in the Wealth Builder's Room: daily accountability, a 90-day goal, and the training to build it yourself.</p>
+  <p class="lede">Two paths, one goal. <strong>Run the play</strong> with TransitNow Dispatch above — or <strong>learn the play</strong> yourself: daily accountability in the Wealth Builder's Room, or the step-by-step book.</p>
   <div class="card price-box">
     <h3>Wealth Builder's Room — Learn the play</h3>
     <p class="price">$49<span class="billing">/month</span></p>
@@ -183,33 +183,48 @@ ${dispatchPricingSection()}
     <p><a class="btn btn-secondary btn-large" href="${STRIPE_ROOM_URL}">JOIN THE ROOM — $49/MO</a></p>
     <p class="honest-note">Secure checkout via Stripe. Cancel anytime.</p>
   </div>
+  <div class="card price-box">
+    <h3>Courier Income Starter Kit — The book</h3>
+    <p><img src="/content/courier-income-starter-kit-icon.webp" alt="Courier Income Starter Kit" style="width:120px;height:120px;border-radius:24px" /></p>
+    <p class="price">$47<span class="billing"> one-time</span></p>
+    <ul class="bullets" style="text-align:left">
+      <li>Step-by-step ebook: become a medical courier the right way</li>
+      <li>Worksheets, checklists &amp; trackers</li>
+      <li>10 must-have courier apps</li>
+      <li>Starter equipment &amp; expense examples</li>
+      <li>Email templates &amp; local opportunity leads</li>
+      <li>Profit formulas so you don't undercharge yourself</li>
+    </ul>
+    <p><a class="btn btn-secondary btn-large" href="https://shop.beacons.ai/digitaldreamdepot/f384f9fe-fc2a-4683-9cb9-13fc4ded6deb">GET THE BOOK — $47</a></p>
+    <p class="honest-note">Instant download via our Beacons store.</p>
+  </div>
 </section>
 <section>
   <h2>Straight answers</h2>
-  <p><strong>Is work guaranteed?</strong><br>No — and anyone who guarantees it is lying to you. Matches are real opportunities from our pipeline. What you book depends on your qualifications, availability, and territory.</p>
+  <p><strong>Is a job guaranteed?</strong><br>No — and anyone who guarantees it is lying to you. We give you current hiring intel and coach your applications. Whether a company says yes depends on your qualifications and their needs.</p>
   <p><strong>Can I cancel?</strong><br>Anytime. Both plans are month-to-month subscriptions with no contract.</p>
-  <p><strong>What do you need from me?</strong><br>Your carrier/business information, your vehicle details, and where you like to run. We review it all during onboarding.</p>
-  <p><strong>When do matches start?</strong><br>Complete starts with 5 matches on day one. Basic joins the next Monday match cycle.</p>
+  <p><strong>What do you need from me?</strong><br>Your vehicle details, your documents and insurance, and where you want to run. We review it all during onboarding — and re-verify the hiring list for you.</p>
+  <p><strong>When do I get the hiring list?</strong><br>Day one. It's verified fresh when you join, and Complete starts follow-up training immediately.</p>
   <p><strong>I'm not ready to subscribe — can I still talk to you?</strong><br>Yes. <a href="/grow/apply">Tell us about you here</a> — when a route or opportunity fits your profile, we will reach out.</p>
 </section>
 <section>
   <h2>Dispatch service built for Milwaukee drivers</h2>
-  <p class="lede">TransitNow Logistics Services is a Milwaukee-based dispatch service for independent couriers, owner-operators, and carriers. Most dispatchers only work with semis — we find work for anything with wheels: cars, SUVs, cargo vans, sprinter vans, box trucks, and hotshot trailers. We work your pipeline so you can work the road.</p>
+  <p class="lede">TransitNow Logistics Services is a Milwaukee-based dispatch service for independent couriers, owner-operators, and carriers. Most dispatchers only work with semis — we find work for anything with wheels: cars, SUVs, cargo vans, sprinter vans, box trucks, and hotshot trailers. We work your applications so you can work the road.</p>
   <ul class="bullets" style="text-align:left;max-width:34rem;margin:0 auto">
-    <li><strong>Courier routes in Milwaukee</strong> — weekly route matches picked for your city, your vehicle, and your lanes.</li>
-    <li><strong>Dispatch for every vehicle</strong> — car, SUV, cargo van, sprinter van, box truck, or hotshot trailer: load-search prep, broker verification guidance, and rate paperwork handled with you.</li>
-    <li><strong>Owner-operator support</strong> — onboarding, carrier and vehicle review, lane preferences, and ongoing dispatch support.</li>
+    <li><strong>Medical courier hiring intel</strong> — companies hiring drivers in Milwaukee right now, verified fresh when you join.</li>
+    <li><strong>Dispatch for every vehicle</strong> — car, SUV, cargo van, sprinter van, box truck, or hotshot trailer: application coaching, document review, and certification guidance handled with you.</li>
+    <li><strong>Follow-up training that doesn't quit</strong> — we teach you how to follow up until you're hired, and give you the tools to do it.</li>
   </ul>
-  <p class="lede">Drivers across Milwaukee use TransitNow to spend less time chasing loads and more time driving them. <a href="/dispatch">See how our dispatch services work</a> or <a href="/grow/apply">apply here</a>.</p>
+  <p class="lede">Drivers across Milwaukee use TransitNow to spend less time chasing dead listings and more time on applications that count. <a href="/dispatch">See how our dispatch services work</a> or <a href="/grow/apply">apply here</a>.</p>
 </section>
 <section>
-  <h2>Ready to stop chasing loads?</h2>
-  <p class="lede">Join the drivers who let TransitNow work the phones while they work the road.</p>
+  <h2>Ready to stop applying into the void?</h2>
+  <p class="lede">Join the drivers getting current hiring intel and real application coaching.</p>
   <p>
-    <a class="btn btn-large" href="https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n">START BASIC — $50/MO</a>
-    <a class="btn btn-secondary btn-large" href="https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o">GO COMPLETE — $100/MO</a>
+    <a class="btn btn-large" href="https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o">GO COMPLETE — $100/MO</a>
+    <a class="btn btn-secondary btn-large" href="https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n">START BASIC — $50/MO</a>
   </p>
-  <p class="disclosure">Dispatch plans are a support service. Route matches are potential opportunities only — TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income. Actual opportunities depend on territory, client demand, your qualifications, and availability.</p>
+  <p class="disclosure">Dispatch plans are a support service. Hiring intel and application coaching are guidance only — TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income. Whether a company hires you depends on your qualifications, availability, and their needs.</p>
 </section>`;
 }
 
@@ -228,38 +243,38 @@ function dispatchPricingSection() {
   <h2>Start your dispatch plan</h2>
   <p class="lede">Two ways to grow with TransitNow Dispatch. Both plans are monthly subscriptions — cancel anytime. Dispatch work is performed for paid subscribers only.</p>
   <div class="card price-box">
-    <h3>Basic — Start steady</h3>
-    <p class="price">$50<span class="billing">/month</span></p>
-    <ul class="bullets" style="text-align:left">
-      <li>Full onboarding: carrier/business and vehicle information review</li>
-      <li><strong>2 fresh route matches every Monday</strong> from opportunities in your city/state</li>
-      <li>Your pipeline builds week by week</li>
-      <li>Weekly goal tracker</li>
-      <li>Matches delivered by email and text</li>
-      <li>Ongoing dispatch support</li>
-    </ul>
-    <p><a class="btn btn-large" href="${STRIPE_BASIC_URL}">SUBSCRIBE — BASIC $50/MO</a></p>
-    <p class="honest-note">Secure checkout via Stripe.</p>
-  </div>
-  <div class="card price-box">
-    <h3>Complete — Grow faster</h3>
+    <h3>Complete — Get hired faster</h3>
     <p class="price">$100<span class="billing">/month</span></p>
+    <p class="for-who">For drivers who want every application followed up until it's answered.</p>
     <ul class="bullets" style="text-align:left">
       <li><strong>Everything in Basic</strong>, plus:</li>
-      <li><strong>5 matches on day one</strong> — a full board from the start</li>
-      <li><strong>Refilled back to 5 every Monday</strong></li>
-      <li><strong>Matched first</strong> — ahead of Basic in every cycle</li>
-      <li>Freight and lane preferences applied to your matches</li>
+      <li><strong>Follow-up training from day one</strong> — we teach you how to follow up until you're hired. Nobody chases your applications harder than you will.</li>
+      <li><strong>The follow-up toolkit</strong> — scripts, templates, and checklists for every application</li>
+      <li>Resume tweaked for each opportunity</li>
+      <li><strong>"Why wasn't I picked" script</strong> — a no educates you</li>
+      <li><strong>Drivers-only community</strong> — ask questions, share intel, grow together</li>
+      <li>Contract and dedicated-route opportunity intelligence</li>
       <li><strong>Private AI operations assistant</strong> — your unseen advantage, working behind the scenes</li>
-      <li>Load-search prep</li>
-      <li>Broker verification guidance</li>
-      <li>Paperwork and route planning support</li>
     </ul>
     <p><a class="btn btn-large" href="${STRIPE_COMPLETE_URL}">SUBSCRIBE — COMPLETE $100/MO</a></p>
     <p class="honest-note">Secure checkout via Stripe.</p>
   </div>
-  <p class="lede">Drivers set their own weekly goal — most aim for $750 to $1,000 — and we track assigned routes against it.</p>
-  <p class="disclosure">Dispatch plans are a support service. Route matches are potential opportunities only — TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income. Actual opportunities depend on territory, client demand, your qualifications, and availability.</p>
+  <div class="card price-box">
+    <h3>Basic — Start steady</h3>
+    <p class="price">$50<span class="billing">/month</span></p>
+    <ul class="bullets" style="text-align:left">
+      <li>Full onboarding: carrier/business and vehicle information review</li>
+      <li><strong>The live hiring directory</strong> — medical courier companies, labs, and delivery services hiring now, 150+ companies tracked</li>
+      <li><strong>Re-verified fresh when YOU join</strong> — no stale postings</li>
+      <li><strong>Certification & readiness checklist</strong> — HIPAA course completion, bloodborne-pathogen training guidance, documents, insurance</li>
+      <li>Coaching on applications, paperwork, and becoming medical-courier ready</li>
+      <li>You apply — we guide you at every step</li>
+    </ul>
+    <p><a class="btn btn-large" href="${STRIPE_BASIC_URL}">SUBSCRIBE — BASIC $50/MO</a></p>
+    <p class="honest-note">Secure checkout via Stripe.</p>
+  </div>
+  <p class="lede">New companies are added as they're verified — your hiring list never goes stale.</p>
+  <p class="disclosure">Dispatch plans are a support service. Hiring intel and application coaching are guidance only — TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income. Whether a company hires you depends on your qualifications, availability, and their needs.</p>
 </section>`;
 }
 
