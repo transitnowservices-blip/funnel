@@ -1100,11 +1100,12 @@ async function main() {
         res.status === 200 && growHtml.includes(COMPLETE_LINK), `status=${res.status}`);
       check('GET /grow pricing section carries no-guarantee language',
         /does not promise or guarantee routes, loads, contracts, work, earnings, or income/i.test(growHtml));
-      check('GET /grow frames tiers around growth (Start steady / Grow faster)',
-        /Start steady/i.test(growHtml) && /Grow faster/i.test(growHtml) &&
-          /a full board from the start/i.test(growHtml), `status=${res.status}`);
-      check('GET /grow shows the driver-set weekly goal line',
-        /Drivers set their own weekly goal/i.test(growHtml));
+      check('GET /grow frames tiers around growth (Start steady / Get hired faster)',
+        /Start steady/i.test(growHtml) && /Get hired faster/i.test(growHtml) &&
+          /Follow-up training from day one/i.test(growHtml) &&
+          /Nobody chases your applications harder than you will/i.test(growHtml), `status=${res.status}`);
+      check('GET /grow shows the never-goes-stale hiring list line',
+        /your hiring list never goes stale/i.test(growHtml));
       res = await req(`${BASE}/dispatch`, {});
       const dispHtml = await res.text();
       check('GET /dispatch renders both Stripe subscribe links',
@@ -1119,10 +1120,10 @@ async function main() {
       const hookDriver = db.prepare('SELECT id FROM drivers WHERE email = ?').get(hookEmail);
       check('POST /drivers/onboard still completes (200)',
         res.status === 200 && !!hookDriver, `status=${res.status}`);
-      check('paid driver gets 5 day-one matches via the onboarding hook',
-        activeCount(hookDriver.id) === 5, `active=${activeCount(hookDriver.id)}`);
+      check('onboarding no longer auto-assigns day-one matches (new model)',
+        activeCount(hookDriver.id) === 0, `active=${activeCount(hookDriver.id)}`);
 
-      // 10f-13. Driver dashboard shows route matches + weekly goal.
+      // 10f-13. Driver dashboard shows hiring list + follow-up training (new model).
       const dashDrv = mkDriver('dash', 'Milwaukee', 'WI');
       makePaid(db, dashDrv.email, 'complete');
       const dashTok = `e2e-routematch-dashtok-${'a'.repeat(40)}`;
@@ -1132,12 +1133,14 @@ async function main() {
       await rmLib.setWeeklyGoal(dashDrv.id, 80000);
       res = await req(`${BASE}/d/${dashTok}`, {});
       const dashHtml = await res.text();
-      check('driver dashboard shows route matches, quota, and weekly goal',
-        res.status === 200 && /Route matches — Complete plan/i.test(dashHtml) &&
-          /5 of 5 matches/i.test(dashHtml) && /\$800\.00/.test(dashHtml),
+      check('driver dashboard shows hiring list card for Complete plan',
+        res.status === 200 && /Your hiring list — Complete plan/i.test(dashHtml) &&
+          /companies tracked/i.test(dashHtml),
         `status=${res.status}`);
-      check('driver dashboard match card carries no-guarantee language',
+      check('driver dashboard hiring card carries no-guarantee language',
         /does not promise or guarantee routes, loads, contracts, work, earnings, or income/i.test(dashHtml));
+      check('driver dashboard shows follow-up training card for Complete',
+        /Follow-up training/i.test(dashHtml) && /until you're hired/i.test(dashHtml));
     }
 
     /* ---- 10g. Private operations assistant (Complete tier) --------------- */
@@ -1260,11 +1263,12 @@ async function main() {
         `status=${r.status}`);
 
       // 10g-9. Complete tier card on /grow and /dispatch advertises the assistant (Basic does not).
+      // Cards run highest-to-lowest: Complete first, then Basic.
       for (const p of ['/grow', '/dispatch']) {
         r = await req(`${BASE}${p}`, {});
         const ph = await r.text();
-        const completeCard = ph.split('Complete — Grow faster')[1] || '';
-        const basicCard = (ph.split('Complete — Grow faster')[0] || '').split('Basic — Start steady')[1] || '';
+        const completeCard = (ph.split('Complete — Get hired faster')[1] || '').split('Basic — Start steady')[0];
+        const basicCard = (ph.split('Basic — Start steady')[1] || '').split('id="learn-the-play"')[0];
         check(`${p}: Complete card advertises private AI operations assistant`,
           /Private AI operations assistant/i.test(completeCard) &&
             /unseen advantage/i.test(completeCard) &&
@@ -5014,6 +5018,20 @@ async function main() {
     const p7 = (n) => `p7-${String(n).toLowerCase()}-${p7ts}@example.com`;
     const p7qBefore = (db.prepare('SELECT MAX(id) m FROM email_queue').get().m || 0);
     const p7OutboxBefore = outboxFiles();
+
+    // --- fixture hygiene (BEFORE baselines): the suite reuses data/funnel.db
+    // across runs, so stale fixture rows from older runs would pollute both
+    // the seeded-delta checks and the 7d/30d window assertions below.
+    // Clear fixtures older than 7 days. The current run's fixtures are
+    // created "now"; real data never uses @example.com emails or p7-/e2e-
+    // prefixed visitor ids.
+    const p7cutoff = p7ts - 7 * 86400e3;
+    db.prepare("DELETE FROM opportunity_leads WHERE email LIKE '%@example.com' AND created_at < ?").run(p7cutoff);
+    db.prepare("DELETE FROM opportunity_lead_drafts WHERE email LIKE '%@example.com' AND created_at < ?").run(p7cutoff);
+    // All page_views: this is the dev/test DB (zero real leads on file) and
+    // old test-run page views use real-looking UUID visitor ids, so prefix
+    // filtering can't isolate them. Window assertions need clean bands.
+    db.prepare("DELETE FROM page_views WHERE ts < ?").run(p7cutoff);
 
     // --- auth + page render ---
     res = await req(`${BASE}/admin/analytics`, {});

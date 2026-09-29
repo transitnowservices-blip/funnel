@@ -503,6 +503,10 @@ async function recordPurchase(leadId, productId, mode, opts = {}) {
   await tags.addTag(leadId, `OFFER_${product.id}_PURCHASED`);
   await db.run("UPDATE leads SET status = 'customer' WHERE id = ?", [leadId]);
   await automation.scheduleSequence(leadId, product.id, 'postPurchase');
+  // Basic buyers get the Complete upgrade pitch at day 7 — the natural upsell.
+  if (product.id === 'transitnow-basic') {
+    await automation.scheduleSequence(leadId, product.id, 'upgradeToComplete');
+  }
   await db.recordEvent({
     lead_id: leadId, type: 'PURCHASED', product_id: product.id, meta: { mode, amount_cents: amountCents },
   });
@@ -1489,20 +1493,9 @@ app.post('/drivers/onboard', ah(async (req, res) => {
     meta: { driver_id: driver.id, source: driver.source },
   });
 
-  // Tier-based route matching: paid subscribers (ACTIVE dispatch
-  // subscription) get their day-one matches immediately — 5 for Complete,
-  // 2 for Basic. Free applicants get none; past-due/canceled get none.
-  // Best-effort: onboarding never fails because matching did.
-  try {
-    const rm = require('./lib/route_matching');
-    const sub = await subscriptions.getByEmail(String(driver.email || '').trim().toLowerCase());
-    if (sub && sub.status === 'active') {
-      const r = await rm.runMatchForDriver(driver, { kind: 'onboarding' });
-      console.log(`[onboard] day-one route match: driver=${driver.id} plan=${r.plan} created=${r.created}`);
-    }
-  } catch (err) {
-    console.error('[onboard] day-one route match failed:', err.message);
-  }
+  // New model (2026-09-29): no day-one route matches. Paid subscribers get
+  // the verified-fresh hiring list + certification checklist at onboarding,
+  // not auto-assigned match quotas.
 
   page(res, 'Onboarding complete', driverViews.onboardDonePage({ site, driver, dashUrl }), site);
 }));
@@ -1999,17 +1992,19 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   const site = config.getSite();
   const driver = req.driver;
   const dashUrl = drivers.driverDashUrl(driver.access_token);
-  // Tier route matches + weekly goal for the driver's own dashboard.
-  let matchInfo = null;
+  // Hiring list + certification checklist (new model) for the driver's
+  // own dashboard. Paid subscribers see the live directory status.
+  let hiringInfo = null;
   try {
-    const rm = require('./lib/route_matching');
-    const [matches, prog] = await Promise.all([
-      rm.activeMatches(driver.id),
-      rm.goalProgress(driver.id),
-    ]);
-    matchInfo = { matches, prog };
+    const sub = await subscriptions.getByEmail(String(driver.email || '').trim().toLowerCase());
+    const openRow = await db.get("SELECT COUNT(*) AS c FROM opportunities WHERE status = 'OPEN'");
+    hiringInfo = {
+      plan: sub && sub.status === 'active' ? sub.plan : null,
+      openOpps: openRow ? Number(openRow.c) || 0 : 0,
+      since: sub && sub.created_at ? sub.created_at : null,
+    };
   } catch (err) {
-    console.error('[dashboard] route match info failed:', err.message);
+    console.error('[dashboard] hiring info failed:', err.message);
   }
   // Private operations assistant (Complete tier only — hidden from everyone
   // else, including Basic and unpaid drivers).
@@ -2047,7 +2042,7 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   } catch (err) {
     console.error('[dashboard] dispatch live check failed:', err.message);
   }
-  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, matchInfo, assistantInfo, dispatchInbox, dispatchLive }), site);
+  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, hiringInfo, assistantInfo, dispatchInbox, dispatchLive }), site);
   if (dispatchInbox && dispatchInbox.length) {
     try {
       await require('./lib/field_comms').markInboxRead(driver.id);
@@ -3851,14 +3846,19 @@ app.post('/d/:token/assistant', requireDriver, ah(async (req, res) => {
       capCount: caps400.DRIVER_CAPABILITIES.length,
       spotlight: caps400.weeklySpotlight(caps400.DRIVER_CAPABILITIES, wk400) };
     const rm = require('./lib/route_matching');
-    let matchInfo = null;
+    let hiringInfo = null;
     try {
-      const [matches, prog] = await Promise.all([rm.activeMatches(driver.id), rm.goalProgress(driver.id)]);
-      matchInfo = { matches, prog };
-    } catch (e2) { /* dashboard still renders without match info */ }
+      const sub = await subscriptions.getByEmail(String(driver.email || '').trim().toLowerCase());
+      const openRow = await db.get("SELECT COUNT(*) AS c FROM opportunities WHERE status = 'OPEN'");
+      hiringInfo = {
+        plan: sub && sub.status === 'active' ? sub.plan : null,
+        openOpps: openRow ? Number(openRow.c) || 0 : 0,
+        since: sub && sub.created_at ? sub.created_at : null,
+      };
+    } catch (e2) { /* dashboard still renders without hiring info */ }
     return page(res, 'My dashboard',
       `<section><p class="error">${esc(req.body.question ? err.message : 'Enter your question first.')}</p></section>` +
-      driverViews.dashboardPage({ site, driver, dashUrl: drivers.driverDashUrl(driver.access_token), matchInfo, assistantInfo }), site);
+      driverViews.dashboardPage({ site, driver, dashUrl: drivers.driverDashUrl(driver.access_token), hiringInfo, assistantInfo }), site);
   }
 }));
 
