@@ -132,9 +132,9 @@ function onboardDonePage({ site, driver, dashUrl }) {
   <div class="card">
     <h2>What happens next</h2>
     <ol>
-      <li><strong>Review.</strong> We review your profile and documents.</li>
-      <li><strong>Ready.</strong> When you're marked Ready, we start matching you with routes.</li>
-      <li><strong>Roll.</strong> Your route, packages, and progress appear on your dashboard.</li>
+      <li><strong>Verify.</strong> We re-check the hiring list for your vehicle and city — no stale postings.</li>
+      <li><strong>Certify.</strong> We run the certification &amp; readiness checklist with you (HIPAA course completion, documents, insurance).</li>
+      <li><strong>Get hired.</strong> You apply with our coaching — Complete members get follow-up training and the toolkit.</li>
     </ol>
   </div>
   <a class="btn btn-large" href="${esc(dashUrl)}">OPEN MY DASHBOARD &rarr;</a>
@@ -142,34 +142,42 @@ function onboardDonePage({ site, driver, dashUrl }) {
 </section>`;
 }
 
-// --- Phase C: private driver dashboard (token link, no login) -------------------
-// --- Tier route matches + weekly goal (driver-facing) ----------------------------
-// matchInfo: { matches: activeMatches[], prog: goalProgress() } or null.
-// A match is a potential opportunity, never promised work — copy says so.
-function routeMatchDashCard(matchInfo) {
-  if (!matchInfo || !matchInfo.prog) return '';
-  const { matches, prog } = matchInfo;
-  if (!prog.plan) {
-    return `<div class="card"><h3>Route matches</h3>
-      <p>Route matching is included with a TransitNow dispatch plan (Basic $50/month or Complete $100/month).</p>
+// --- Hiring list + follow-up training (new model, driver-facing) ----------------
+// hiringInfo: { plan: 'basic'|'complete'|null, openOpps: number, since: ms|null }.
+// Paid subscribers see the live directory status + certification checklist;
+// Complete also sees follow-up training. Unpaid drivers get the upsell.
+// Copy carries the no-guarantee line; nothing here promises a hire.
+function hiringListDashCard(hiringInfo) {
+  const plan = hiringInfo && hiringInfo.plan;
+  const openOpps = hiringInfo ? Number(hiringInfo.openOpps) || 0 : 0;
+  const since = hiringInfo && hiringInfo.since
+    ? new Date(hiringInfo.since).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+    : null;
+  const guarantee = `<p class="microcopy">Hiring intel and coaching only. TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income.</p>`;
+  if (!plan) {
+    return `<div class="card"><h3>Your hiring list</h3>
+      <p>The live hiring list — medical courier companies, labs, and delivery services hiring now — is included with a TransitNow dispatch plan (Basic $50/month or Complete $100/month).</p>
       <p><a class="btn" href="/dispatch">See dispatch plans</a></p>
-      <p class="microcopy">Matches are potential opportunities only — never promised routes, loads, contracts, or income.</p>
-    </div>`;
+      ${guarantee}</div>`;
   }
-  const tierName = prog.plan === 'complete' ? 'Complete' : 'Basic';
-  const items = (matches || []).map((m) =>
-    `<li><strong>${esc(m.opportunity_name || 'Route opportunity')}</strong>` +
-    (m.opportunity_location ? ` — ${esc(m.opportunity_location)}` : '') + ` <span class="microcopy">(potential match)</span></li>`
-  ).join('');
-  const goalLine = prog.goalCents > 0
-    ? `<p><strong>Your weekly goal:</strong> $${(prog.goalCents / 100).toFixed(2)} — set by you, tracked toward, never promised.</p>`
-    : '';
-  return `<div class="card"><h3>Route matches — ${esc(tierName)} plan</h3>
-    <p><strong>${prog.assignedCount} of ${prog.quota} matches</strong> this week (${esc(prog.weekKey)}).</p>
-    ${goalLine}
-    <ul>${items || '<li>No active matches right now. New opportunities are added as they come in.</li>'}</ul>
-    <p class="microcopy">Route matches are potential opportunities only. TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income.</p>
-  </div>`;
+  const tierName = plan === 'complete' ? 'Complete' : 'Basic';
+  return `<div class="card"><h3>Your hiring list — ${esc(tierName)} plan</h3>
+    <p><strong>${openOpps} companies tracked</strong>${since ? ` — verified fresh when you joined (${esc(since)})` : ''}.</p>
+    <p>Your coach re-verifies the list for your vehicle and city, and runs the certification &amp; readiness checklist with you: HIPAA course completion, bloodborne-pathogen training guidance, documents, insurance.</p>
+    ${guarantee}</div>`;
+}
+
+function followupTrainingDashCard(hiringInfo) {
+  const plan = hiringInfo && hiringInfo.plan;
+  if (plan !== 'complete') return '';
+  return `<div class="card highlight-card"><h3>Follow-up training</h3>
+    <p>We teach you how to follow up until you're hired — and give you the tools to do it:</p>
+    <ul>
+      <li>Follow-up scripts, email templates, and checklists for every application</li>
+      <li>Resume tweaked for each opportunity</li>
+      <li>The "why wasn't I picked" script — a no educates you</li>
+    </ul>
+    <p class="microcopy">Training and tools only — whether a company hires you depends on your qualifications and their needs.</p></div>`;
 }
 
 // --- Private operations assistant (Complete tier) ---------------------------------
@@ -243,15 +251,15 @@ function dispatchInboxCard(driver, messages) {
   return `<div class="card"><h3>Dispatch messages</h3>\n    ${items}\n    <p class="microcopy">Messages from TransitNow dispatch — broadcasts and direct notes. Newest first.</p>\n  </div>`;
 }
 
-function dashboardPage({ site, driver, dashUrl, matchInfo = null, assistantInfo = null, dispatchInbox = null, dispatchLive = false }) {
+function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo = null, dispatchInbox = null, dispatchLive = false }) {
   const stage = drivers.STATUS_LABELS[driver.status] || driver.status;
   const nextSteps = {
     new: 'We are reviewing your onboarding information. No action needed right now.',
     reviewing: 'Our team is reviewing your profile and documents. We will contact you soon.',
     contacted: 'We reached out — please check your email/texts and respond so we can keep moving.',
     documents_needed: 'We need additional documents from you. Please check your email for details.',
-    ready: 'You are marked Ready. We will start matching you with routes shortly.',
-    placement: 'We are actively searching for loads and route opportunities for you.',
+    ready: 'You are marked Ready. Your hiring list is verified fresh — open your dashboard and start applying with coaching.',
+    placement: 'We are lining up your hiring list and certification checklist.',
     active: 'You are active. Your current route and packages appear below.',
     inactive: 'Your driver profile is currently inactive. Contact us if this is a mistake.',
   };
@@ -282,7 +290,8 @@ function dashboardPage({ site, driver, dashUrl, matchInfo = null, assistantInfo 
   <p class="subhead">Status: ${esc(stage)}</p>
   <div class="card highlight-card"><p><strong>What happens next:</strong> ${esc(step)}</p></div>
   ${dispatchLiveCard(dispatchLive)}
-  ${routeMatchDashCard(matchInfo)}
+  ${hiringListDashCard(hiringInfo)}
+  ${followupTrainingDashCard(hiringInfo)}
   ${assistantDashCard(driver, assistantInfo)}
   ${dispatchInboxCard(driver, dispatchInbox)}
   <h2>Your hub</h2>
