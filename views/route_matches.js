@@ -83,7 +83,7 @@ function adminPageHtml({ cycles, matches, driversList, opportunities, driverFilt
   return `
 <p><a href="/admin/opportunities">&larr; Opportunities</a> · <a href="/admin/drivers">&larr; Driver pipeline</a></p>
 <h2>Route matching (dispatch tiers)</h2>
-<p class="muted">Basic $50/mo: 2 route matches every Monday. Complete $100/mo: 5 matches on day one, refilled to 5 every Monday, matched first. Only ACTIVE subscribers are matched. Matches come only from real OPEN opportunities — never fabricated. Matches are potential opportunities, never promised routes, loads, contracts, or income.</p>
+<p class="muted">Automatic Monday matching is retired under the current model (hiring intel + coaching, not weekly match quotas). Manual assign below remains for admin use. Matches are potential opportunities, never promised routes, loads, contracts, or income.</p>
 ${error ? `<p class="error">${esc(error)}</p>` : ''}
 ${cycleLogHtml(cycles)}
 <div class="card">
