@@ -16,5 +16,7 @@ services:
         sync: false
       - key: EMAIL_PROVIDER
         value: local
+      - key: APP_URL
+        value: https://funnel-qdx9.onrender.com
       - key: RESEND_API_KEY
         sync: false
