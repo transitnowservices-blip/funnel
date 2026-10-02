@@ -24,8 +24,35 @@ function fmtDate(ts) {
   return new Date(Number(ts)).toLocaleDateString();
 }
 
+// --- Referral email gate (public) --------------------------------------------
+function refGateHtml({ code, error = '', email = '' }) {
+  const referrer = code.issued_to_name ? ` from ${esc(code.issued_to_name)}` : '';
+  return `
+<section>
+  <p class="eyebrow">TransitNow Logistics Services — Milwaukee</p>
+  <h1>You've been invited to apply</h1>
+  <div class="card">
+    <p class="lede">Someone who runs with TransitNow${referrer} shared their personal link with you. Drop your email to unlock it and start your driver application.</p>
+    ${error ? `<p class="form-error" role="alert">${esc(error)}</p>` : ''}
+    <form method="POST" action="/r/${escAttr(code.code)}" class="form">
+      <div class="grow-field">
+        <label for="rg-email">Email address</label>
+        <input id="rg-email" type="email" name="email" required maxlength="254"
+          value="${escAttr(email)}" placeholder="you@example.com" autocomplete="email">
+      </div>
+      <label class="marketing-consent checkbox">
+        <input type="checkbox" name="marketing_consent" value="1">
+        <span>Also email me when new bids and routes post (optional).</span>
+      </label>
+      <button type="submit" class="btn btn-large">Unlock my link</button>
+    </form>
+    <p class="microcopy">We only email about TransitNow. No spam, ever. No guaranteed routes, loads, work, or income — the dispatch subscription is separate.</p>
+  </div>
+</section>`;
+}
+
 // --- Referrals (admin) ----------------------------------------------------------
-function referralsAdminHtml({ codes = [], attributions = [], opportunities = [], error = '', attributed = null, payouts = [], payoutTotals = null, payoutMsg = '' }) {
+function referralsAdminHtml({ codes = [], attributions = [], opportunities = [], error = '', attributed = null, payouts = [], payoutTotals = null, payoutMsg = '', codeStats = {} }) {
   const pt = payoutTotals || { earnedCents: 0, paidCents: 0, pendingCents: 0 };
   const payoutRows = (payouts || []).map((p) => {
     const who = p.side === 'referrer'
@@ -77,6 +104,20 @@ function referralsAdminHtml({ codes = [], attributions = [], opportunities = [],
       </td>
     </tr>`).join('');
 
+  const liveRows = (codes || []).map((c) => {
+    const s = (codeStats || {})[c.code] || { clicks: 0, emails: 0, signups: 0 };
+    const ce = s.clicks ? Math.round((s.emails / s.clicks) * 100) : 0;
+    const es = s.emails ? Math.round((s.signups / s.emails) * 100) : 0;
+    return `<tr>
+      <td><strong>${esc(c.code)}</strong>${c.status !== 'active' ? ` <span class="muted">(${esc(c.status)})</span>` : ''}</td>
+      <td>${s.clicks}</td>
+      <td>${s.emails}</td>
+      <td>${s.signups}</td>
+      <td>${ce}%</td>
+      <td>${es}%</td>
+    </tr>`;
+  }).join('');
+
   return `
 ${error ? `<div class="grow-errors" role="alert">${esc(error)}</div>` : ''}
 ${attributed ? `<div class="card"><p>Attribution scan complete: ${attributed.created} new, ${attributed.updated} updated.</p></div>` : ''}
@@ -105,6 +146,11 @@ ${attributed ? `<div class="card"><p>Attribution scan complete: ${attributed.cre
 <h3>Referral codes (${(codes || []).length})</h3>
 <table class="admin-table"><thead><tr><th>Code</th><th>Issued to</th><th>Issued</th><th>Status</th><th></th></tr></thead>
 <tbody>${codeRows || '<tr><td colspan="5">No codes issued yet.</td></tr>'}</tbody></table>
+
+<h3>Live link stats</h3>
+<p class="microcopy">Clicks are logged on every visit carrying ?ref= (one per visitor per day). Emails are captured at the /r/ gate. Signups are attributed applications.</p>
+<table class="admin-table"><thead><tr><th>Code</th><th>Clicks</th><th>Emails captured</th><th>Signups</th><th>Click→email</th><th>Email→signup</th></tr></thead>
+<tbody>${liveRows || '<tr><td colspan="6">No codes issued yet.</td></tr>'}</tbody></table>
 
 <h3>Attributions (${(attributions || []).length})</h3>
 <form method="POST" action="/admin/referrals/attribute" style="margin-bottom:12px">
@@ -308,7 +354,7 @@ function payoutBadge(status) {
 function driverReferralHtml({ driver, code, baseUrl, progress = null, program = null }) {
   const pg = progress || { code: null, referrals: [], earnings: { pendingCents: 0, earnedCents: 0, paidCents: 0 } };
   const prog = program || { referrerBonusCents: 5000, referredBonusCents: 2500, milestoneDays: 30 };
-  const shareLink = code ? `${baseUrl}/grow/apply?ref=${encodeURIComponent(code.code)}` : '';
+  const shareLink = code ? `${baseUrl}/r/${encodeURIComponent(code.code)}` : '';
   const earn = pg.earnings || {};
   const referralRows = (pg.referrals || []).map((r) => {
     const pct = Math.round((r.daysActive / r.milestoneDays) * 100);
@@ -408,6 +454,7 @@ function driverDocumentsHtml({ driver, docs = [], error = '' }) {
 
 module.exports = {
   referralsAdminHtml,
+  refGateHtml,
   alertsAdminHtml,
   documentsAdminHtml,
   leadFollowupHtml,

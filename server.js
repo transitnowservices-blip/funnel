@@ -1464,7 +1464,7 @@ app.post('/drivers/onboard', ah(async (req, res) => {
       const base = drivers.baseUrl().replace(/\/$/, '');
       referralInfo = {
         code: code.code,
-        link: `${base}/grow/apply?ref=${encodeURIComponent(code.code)}`,
+        link: `${base}/r/${encodeURIComponent(code.code)}`,
         referrerBonus: '$' + (referralsLib.PROGRAM.referrerBonusCents / 100).toFixed(0),
         referredBonus: '$' + (referralsLib.PROGRAM.referredBonusCents / 100).toFixed(0),
         milestoneDays: referralsLib.PROGRAM.milestoneDays,
@@ -1528,11 +1528,28 @@ const growLimiter = publicRateLimit();
 const liveLimiter = publicRateLimit({ windowMs: 10 * 60 * 1000, max: 30 });
 
 // --- /grow landing + 13-step application ---
+// --- Referral click tracking (additive) -------------------------------------
+// Logs one row per visitor per code per day on any visit carrying ?ref=.
+// Fire-and-forget: it never blocks or breaks the page render.
+function trackRefClick(req) {
+  try {
+    const ref = String((req.query && req.query.ref) || '').trim().toUpperCase();
+    if (!ref) return;
+    const fwd = String((req.headers && req.headers['x-forwarded-for']) || '').split(',')[0].trim();
+    const ip = fwd || req.ip || (req.connection && req.connection.remoteAddress) || '';
+    const ipHash = crypto.createHash('sha256').update('refclick:' + ip).digest('hex').slice(0, 32);
+    const ua = String((req.headers && req.headers['user-agent']) || '');
+    Promise.resolve(referralsLib.logClick(ref, ipHash, ua)).catch(() => {});
+  } catch (e) { /* never break render */ }
+}
+
 app.get('/grow', (req, res) => {
+  trackRefClick(req);
   page(res, 'Grow With TransitNow', growViews.growLandingPage(), config.getSite(), { installBanner: true, seo: seo.seoFor('/grow') });
 });
 
 app.get('/grow/apply', (req, res) => {
+  trackRefClick(req);
   page(
     res, 'Grow With TransitNow — Application',
     growViews.growApplyPage({ query: req.query }), config.getSite(),
@@ -1613,6 +1630,71 @@ app.get('/grow/thank-you', (req, res) => {
     growViews.growThankYouPage({ resubmission: req.query.updated === '1' }), config.getSite(),
     { seo: seo.seoFor('/thank-you') });
 });
+
+// --- Referral email gate: /r/:code (additive) --------------------------------
+// Tapping a referral link lands here first. The visitor drops an email to
+// unlock the link; the email becomes a funnel lead (source 'referral-gate')
+// so Davena builds her list from every tap. Repeat visitors who already
+// gave an email skip the gate via cookie. The old /grow/apply?ref=CODE
+// links keep working directly — the gate never breaks them.
+app.get('/r/:code', ah(async (req, res) => {
+  const code = await referralsLib.getCode(req.params.code);
+  if (!code || code.status !== 'active') return res.redirect('/grow');
+  trackRefClick({ query: { ref: code.code }, headers: req.headers, ip: req.ip, connection: req.connection });
+  try {
+    const prev = String((tracking.getCookies(req) || {}).tn_ref_email || '').trim().toLowerCase();
+    if (prev && await grow.findLeadByEmail(prev, 'GROW')) {
+      return res.redirect(`/grow/apply?ref=${encodeURIComponent(code.code)}`);
+    }
+  } catch (e) { /* fall through to the gate */ }
+  page(res, 'Unlock your referral link',
+    phase6Views.refGateHtml({ code }), config.getSite());
+}));
+
+app.post('/r/:code', growLimiter, ah(async (req, res) => {
+  const code = await referralsLib.getCode(req.params.code);
+  if (!code || code.status !== 'active') return res.redirect('/grow');
+  const rawEmail = String((req.body && req.body.email) || '').trim().toLowerCase().slice(0, 254);
+  const consent = !!((req.body && (req.body.marketing_consent === '1' || req.body.marketing_consent === 'on')));
+  if (!grow.EMAIL_RE.test(rawEmail)) {
+    res.status(400);
+    return page(res, 'Unlock your referral link',
+      phase6Views.refGateHtml({ code, error: 'Please enter a valid email address.', email: String((req.body && req.body.email) || '').slice(0, 254) }),
+      config.getSite());
+  }
+  // Reuse the existing lead path. For existing leads we do NOT call
+  // upsertLead with a bare email — its update branch would blank out the
+  // applicant's name/phone/vehicle fields. Just link the referral instead.
+  let lead = await grow.findLeadByEmail(rawEmail, 'GROW');
+  if (!lead) {
+    const r = await grow.upsertLead('GROW', {
+      email: rawEmail, source: 'referral-gate',
+      referral_code: code.code, marketing_consent: consent,
+    });
+    lead = r.lead;
+  } else if (consent && !lead.marketing_consent) {
+    // They opted in on the gate — record it without touching anything else.
+    try {
+      await db.run('UPDATE opportunity_leads SET marketing_consent = 1, marketing_consent_ts = ? WHERE id = ?',
+        [Date.now(), lead.id]);
+    } catch (e) { /* non-blocking */ }
+  }
+  try {
+    const src = await db.get('SELECT * FROM lead_sources WHERE lead_id = ? ORDER BY id DESC LIMIT 1', [lead.id]);
+    const now = Date.now();
+    if (!src) {
+      await db.run(
+        'INSERT INTO lead_sources (lead_id, source, referral_code, created_at) VALUES (?, ?, ?, ?)',
+        [lead.id, 'referral-gate', code.code, now]
+      );
+    } else if (!src.referral_code) {
+      await db.run('UPDATE lead_sources SET referral_code = ?, source = ? WHERE id = ?',
+        [code.code, 'referral-gate', src.id]);
+    }
+  } catch (e) { /* attribution link is best-effort here */ }
+  tracking.setCookie(res, 'tn_ref_email', rawEmail, { maxAge: 365 * 24 * 3600 });
+  res.redirect(`/grow/apply?ref=${encodeURIComponent(code.code)}`);
+}));
 
 // --- /business funnel (spec section 29) ---
 app.get('/business', (req, res) => {
@@ -2561,17 +2643,18 @@ app.get('/admin/audit', adminAuth, ah(async (req, res) => {
 
 // --- Referrals ---
 app.get('/admin/referrals', adminAuth, ah(async (req, res) => {
-  const [codes, attributions, opportunities, payouts, totals] = await Promise.all([
+  const [codes, attributions, opportunities, payouts, totals, codeStats] = await Promise.all([
     referralsLib.listCodes(),
     referralsLib.listAttributions(),
     opps.listOpportunities({}),
     referralsLib.listPayouts(),
     referralsLib.payoutTotals(),
+    referralsLib.codeStats(),
   ]);
   res.send(adminViews.adminLayout('Referrals',
     phase6Views.referralsAdminHtml({
       codes, attributions, opportunities,
-      payouts, payoutTotals: totals,
+      payouts, payoutTotals: totals, codeStats,
       error: req.query.error || '',
       payoutMsg: req.query.payoutMsg || '',
       attributed: req.query.attributed ? JSON.parse(req.query.attributed) : null,
