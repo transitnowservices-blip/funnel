@@ -2042,7 +2042,25 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   } catch (err) {
     console.error('[dashboard] dispatch live check failed:', err.message);
   }
-  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, hiringInfo, assistantInfo, dispatchInbox, dispatchLive }), site);
+  // Live Bid Board: OPEN + admin-flagged opportunities, newest first.
+  // Rendered only for paid subscribers (locked teaser for everyone else).
+  let boardOpps = [];
+  try {
+    boardOpps = await opps.listBoardOpportunities();
+  } catch (err) {
+    console.error('[dashboard] bid board failed:', err.message);
+  }
+  // Bid-board view tracking: one row per driver per opportunity per day.
+  // Only for paid subscribers actually rendering the board; failures never
+  // break the dashboard.
+  if (hiringInfo && hiringInfo.plan && boardOpps.length) {
+    try {
+      await opps.logBoardViews(driver.id, boardOpps);
+    } catch (err) {
+      console.error('[dashboard] board view log failed:', err.message);
+    }
+  }
+  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, hiringInfo, assistantInfo, dispatchInbox, dispatchLive, boardOpps }), site);
   if (dispatchInbox && dispatchInbox.length) {
     try {
       await require('./lib/field_comms').markInboxRead(driver.id);
@@ -2952,6 +2970,7 @@ async function renderOpportunityDetail(req, res) {
   res.send(adminViews.adminLayout(`Opportunity — ${o.name}`,
     oppViews.opportunityDetailHtml({
       opportunity: o, matches, people, leads, driversList, compare, compareLabel,
+      boardStats: await opps.getBoardViewStats(o.id),
       error: req.query.error || '',
     })));
 }

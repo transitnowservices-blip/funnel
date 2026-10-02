@@ -32,7 +32,7 @@ function opportunityListHtml({ list, counts, statusFilter }) {
   const total = Object.values(counts).reduce((a, b) => a + b, 0);
   const rows = list.map((o) => `
     <tr>
-      <td><a href="/admin/opportunities/${o.id}"><strong>${esc(o.name)}</strong></a><br><span class="muted">${esc(o.opportunity_type || '')}</span></td>
+      <td><a href="/admin/opportunities/${o.id}"><strong>${esc(o.name)}</strong></a>${o.is_board_visible ? ' <span class="status-badge">BOARD</span>' : ''}<br><span class="muted">${esc(o.opportunity_type || '')}</span></td>
       <td>${esc(o.client_contract || '—')}</td>
       <td>${esc([o.location, o.territory].filter(Boolean).join(' · ') || '—')}</td>
       <td>${o.drivers_needed || 0} driver(s)<br><span class="muted">${o.vehicles_needed || 0} vehicle(s)</span></td>
@@ -92,6 +92,23 @@ ${errHtml}
     <label>Vehicles needed <input type="number" name="vehicles_needed" min="0" step="1" value="${o.vehicles_needed || 0}"></label>
   </div>
   <div class="card">
+    <h3>Live Bid Board (paid driver dashboard)</h3>
+    <label>Listing type
+      <select name="listing_type">
+        <option value="">— not a board listing —</option>
+        ${opps.BOARD_LISTING_TYPES.map((t) => `<option value="${t}"${(o.listing_type || '') === t ? ' selected' : ''}>${t}</option>`).join('')}
+      </select>
+      <span class="hint">BID, DEDICATED, or STAT. Leave empty if this is not a board listing.</span>
+    </label>
+    ${optField('bid_amount_text', 'Bid amount', o.bid_amount_text, { hint: 'e.g. $425.00 — shown on the bid card' })}
+    ${optField('origin', 'Origin', o.origin, { hint: 'e.g. Milwaukee, WI 53204' })}
+    ${optField('destination', 'Destination', o.destination, { hint: 'e.g. Chicago, IL 60607' })}
+    ${optField('stops_text', 'Stops', o.stops_text, { hint: 'e.g. 1 stop' })}
+    ${optField('pickup_eta_text', 'Pickup ETA', o.pickup_eta_text, { hint: 'e.g. 12 minutes (6.1 miles)' })}
+    <label><input type="checkbox" name="is_board_visible" value="1"${o.is_board_visible ? ' checked' : ''}> Show on the Live Bid Board</label>
+    <span class="hint">Only OPEN opportunities with this checked appear on paid drivers' dashboards.</span>
+  </div>
+  <div class="card">
     <h3>Requirements (used when comparing candidates)</h3>
     ${optField('vehicle_requirements', 'Vehicle requirements', o.vehicle_requirements, { type: 'textarea' })}
     ${optField('driver_requirements', 'Driver requirements', o.driver_requirements, { type: 'textarea' })}
@@ -136,7 +153,25 @@ function compareTableHtml(rows) {
 </div>`;
 }
 
-function opportunityDetailHtml({ opportunity: o, matches, people, leads, driversList, compare, compareLabel, error = '' }) {
+function boardViewsHtml(boardStats) {
+  if (!boardStats) return '';
+  const rows = (boardStats.viewers || []).map((v) => `
+    <tr>
+      <td>${esc(v.full_name || '—')}<br><span class="muted">${esc(v.email || '')}</span></td>
+      <td>${fmtTs(v.viewed_at)}</td>
+    </tr>`).join('');
+  return `
+<div class="card">
+  <h3>Bid board views (${boardStats.total || 0})</h3>
+  <p class="microcopy">Paid-driver dashboard renders of this bid — one counted per driver per day. Test-grant previews count too.</p>
+  <table class="admin-table">
+  <thead><tr><th>Viewer</th><th>Viewed</th></tr></thead>
+  <tbody>${rows || '<tr><td colspan="2">No views yet.</td></tr>'}</tbody>
+  </table>
+</div>`;
+}
+
+function opportunityDetailHtml({ opportunity: o, matches, people, leads, driversList, compare, compareLabel, boardStats = null, error = '' }) {
   const statusOpts = opps.OPPORTUNITY_STATUSES.map(
     (s) => `<option value="${s}"${o.status === s ? ' selected' : ''}>${esc(s)}</option>`
   ).join('');
@@ -171,6 +206,14 @@ ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
   ${kv('Start / end', [o.start_date, o.end_date].filter(Boolean).join(' → '))}
   ${kv('Drivers needed', o.drivers_needed)}
   ${kv('Vehicles needed', o.vehicles_needed)}
+  <h3>Live Bid Board</h3>
+  ${kv('Listing type', o.listing_type)}
+  ${kv('Bid amount', o.bid_amount_text)}
+  ${kv('Origin', o.origin)}
+  ${kv('Destination', o.destination)}
+  ${kv('Stops', o.stops_text)}
+  ${kv('Pickup ETA', o.pickup_eta_text)}
+  ${kv('On board', o.is_board_visible ? 'Yes — visible to paid drivers when OPEN' : 'No')}
   ${kv('Contact info', o.contact_info)}
   <h3>Requirements</h3>
   ${kv('Vehicle', o.vehicle_requirements)}
@@ -183,6 +226,8 @@ ${error ? `<div class="form-error" role="alert">${esc(error)}</div>` : ''}
   ${kv('Documents', o.documents)}
   <p><a class="btn btn-small" href="/admin/opportunities/${o.id}/edit">Edit opportunity</a></p>
 </div>
+
+${boardViewsHtml(boardStats)}
 
 <h2>Potential matches (${(matches || []).length})</h2>
 <div class="card">

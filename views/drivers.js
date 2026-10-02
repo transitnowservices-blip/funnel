@@ -251,7 +251,40 @@ function dispatchInboxCard(driver, messages) {
   return `<div class="card"><h3>Dispatch messages</h3>\n    ${items}\n    <p class="microcopy">Messages from TransitNow dispatch — broadcasts and direct notes. Newest first.</p>\n  </div>`;
 }
 
-function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo = null, dispatchInbox = null, dispatchLive = false }) {
+// --- Live Bid Board (paid subscribers only) --------------------------------------
+// boardOpps: rows from lib/opportunities.listBoardOpportunities() (OPEN +
+// admin-flagged as board-visible). Active Basic/Complete subscribers see the
+// bid cards; everyone else sees a locked teaser pointing at /grow. Copy is
+// honest: "Open bids shared by our team" — no promise of hires, routes, or
+// earnings.
+const BOARD_TYPE_LABELS = { BID: 'Bid', DEDICATED: 'Dedicated route', STAT: 'STAT run' };
+function bidBoardDashCard({ plan = null, boardOpps = [] } = {}) {
+  const guarantee = `<p class="microcopy">Open bids shared by our team. TransitNow does not promise or guarantee hires, routes, loads, contracts, work, earnings, or income.</p>`;
+  if (!plan) {
+    return `<div class="card highlight-card"><h3>🔒 Live Bid Board</h3>
+      <p>The full board is inside — open bids, dedicated routes, and STAT runs shared by our dispatch team.</p>
+      <p><a class="btn" href="/grow">Unlock with Basic $50/mo</a></p>
+      ${guarantee}</div>`;
+  }
+  const cards = (boardOpps || []).map((o) => {
+    const typeLabel = BOARD_TYPE_LABELS[o.listing_type] || o.listing_type || 'Bid';
+    const route = [o.origin, o.destination].filter(Boolean).join(' → ');
+    return `<div class="card" style="margin-bottom:12px">
+      <p><span class="status-badge">${esc(typeLabel)}</span></p>
+      <p><strong>${esc(o.name)}</strong></p>
+      ${o.bid_amount_text ? `<p style="font-size:1.4em;font-weight:bold;color:#12263f">${esc(o.bid_amount_text)}</p>` : ''}
+      ${route ? `<p>${esc(route)}</p>` : ''}
+      ${o.stops_text ? `<p class="microcopy">Stops: ${esc(o.stops_text)}</p>` : ''}
+      ${o.pickup_eta_text ? `<p class="microcopy">Pickup ETA: ${esc(o.pickup_eta_text)}</p>` : ''}
+    </div>`;
+  }).join('');
+  return `<div class="card highlight-card"><h3>Live Bid Board</h3>
+    <p class="microcopy">Open bids shared by our team — newest first.</p>
+    ${cards || '<p>No open bids on the board right now — check back soon.</p>'}
+    ${guarantee}</div>`;
+}
+
+function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo = null, dispatchInbox = null, dispatchLive = false, boardOpps = [] }) {
   const stage = drivers.STATUS_LABELS[driver.status] || driver.status;
   const nextSteps = {
     new: 'We are reviewing your onboarding information. No action needed right now.',
@@ -291,6 +324,7 @@ function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo
   <div class="card highlight-card"><p><strong>What happens next:</strong> ${esc(step)}</p></div>
   ${dispatchLiveCard(dispatchLive)}
   ${hiringListDashCard(hiringInfo)}
+  ${bidBoardDashCard({ plan: hiringInfo && hiringInfo.plan, boardOpps })}
   ${followupTrainingDashCard(hiringInfo)}
   ${assistantDashCard(driver, assistantInfo)}
   ${dispatchInboxCard(driver, dispatchInbox)}
