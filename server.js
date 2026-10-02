@@ -1711,7 +1711,7 @@ app.get('/free-bid', ah(async (req, res) => {
       return res.redirect('/free-bid/show');
     }
   } catch (e) { /* fall through to the gate */ }
-  page(res, 'Get a free Milwaukee bid alert',
+  page(res, 'Get a free bid alert',
     phase6Views.freeBidGateHtml({}), config.getSite());
 }));
 
@@ -1720,7 +1720,7 @@ app.post('/free-bid', growLimiter, ah(async (req, res) => {
   const consent = !!((req.body && (req.body.marketing_consent === '1' || req.body.marketing_consent === 'on')));
   if (!grow.EMAIL_RE.test(rawEmail)) {
     res.status(400);
-    return page(res, 'Get a free Milwaukee bid alert',
+    return page(res, 'Get a free bid alert',
       phase6Views.freeBidGateHtml({ error: 'Please enter a valid email address.', email: String((req.body && req.body.email) || '').slice(0, 254) }),
       config.getSite());
   }

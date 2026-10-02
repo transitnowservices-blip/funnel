@@ -460,10 +460,10 @@ function driverDocumentsHtml({ driver, docs = [], error = '' }) {
 function freeBidGateHtml({ error = '', email = '' }) {
   return `
 <section>
-  <p class="eyebrow">TransitNow Logistics Services — Milwaukee</p>
-  <h1>Get a free Milwaukee bid alert</h1>
+  <p class="eyebrow">TransitNow Logistics Services</p>
+  <h1>Get a free bid alert</h1>
   <div class="card">
-    <p class="lede">Drop your email and see one real bid from our board — the kind of bid that hits a TransitNow driver's phone. Free, no subscription.</p>
+    <p class="lede">Drop your email and see one real bid from our board — the kind of bid that hits a TransitNow driver's phone. Free, no subscription, no matter what city or state you're in.</p>
     ${error ? `<p class="form-error" role="alert">${esc(error)}</p>` : ''}
     <form method="POST" action="/free-bid" class="form">
       <div class="grow-field">
@@ -491,7 +491,7 @@ function freeBidShowHtml({ opp, isSample = false }) {
     ? `<p><span class="status-badge">SAMPLE BID — example only</span></p>` : '';
   return `
 <section>
-  <p class="eyebrow">TransitNow Logistics Services — Milwaukee</p>
+  <p class="eyebrow">TransitNow Logistics Services</p>
   <h1>Your free bid alert</h1>
   <div class="card" style="margin-bottom:12px">
     ${sampleBadge}

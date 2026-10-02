@@ -93,7 +93,7 @@ async function main() {
     // 2. Gate renders
     let r = await req(`${BASE}/free-bid`, { cookie: false });
     check('GET /free-bid -> 200', r.status === 200, `got ${r.status}`);
-    check('gate headline present', r.text.includes('Get a free Milwaukee bid alert'));
+    check('gate headline present', r.text.includes('Get a free bid alert'));
     check('gate email form present', r.text.includes('action="/free-bid"') && r.text.includes('name="email"'));
     check('consent unchecked by default', /name="marketing_consent"[^>]*>/.test(r.text) && !/name="marketing_consent"[^>]*checked/.test(r.text));
 
