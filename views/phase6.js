@@ -452,9 +452,73 @@ function driverDocumentsHtml({ driver, docs = [], error = '' }) {
 </section>`;
 }
 
+// --- Free bid-alert lead magnet (public) --------------------------------------
+// Free first yes before the $50/$100 ask: visitor drops an email, sees one
+// sample bid from the board, then gets the Basic/Complete pitch. Mirrors the
+// referral email-gate pattern (unchecked marketing consent, no-guarantee
+// microcopy).
+function freeBidGateHtml({ error = '', email = '' }) {
+  return `
+<section>
+  <p class="eyebrow">TransitNow Logistics Services — Milwaukee</p>
+  <h1>Get a free Milwaukee bid alert</h1>
+  <div class="card">
+    <p class="lede">Drop your email and see one real bid from our board — the kind of bid that hits a TransitNow driver's phone. Free, no subscription.</p>
+    ${error ? `<p class="form-error" role="alert">${esc(error)}</p>` : ''}
+    <form method="POST" action="/free-bid" class="form">
+      <div class="grow-field">
+        <label for="fb-email">Email address</label>
+        <input id="fb-email" type="email" name="email" required maxlength="254"
+          value="${escAttr(email)}" placeholder="you@example.com" autocomplete="email">
+      </div>
+      <label class="marketing-consent checkbox">
+        <input type="checkbox" name="marketing_consent" value="1">
+        <span>Also email me when new bids and routes post (optional).</span>
+      </label>
+      <button type="submit" class="btn btn-large">Show me the bid</button>
+    </form>
+    <p class="microcopy">We only email about TransitNow. No spam, ever. No guaranteed routes, loads, work, or income — the dispatch subscription is separate.</p>
+  </div>
+</section>`;
+}
+
+const FREEBID_TYPE_LABELS = { BID: 'Bid', DEDICATED: 'Dedicated route', STAT: 'STAT run' };
+function freeBidShowHtml({ opp, isSample = false }) {
+  const o = opp || {};
+  const typeLabel = FREEBID_TYPE_LABELS[o.listing_type] || o.listing_type || 'Bid';
+  const route = [o.origin, o.destination].filter(Boolean).join(' → ');
+  const sampleBadge = isSample
+    ? `<p><span class="status-badge">SAMPLE BID — example only</span></p>` : '';
+  return `
+<section>
+  <p class="eyebrow">TransitNow Logistics Services — Milwaukee</p>
+  <h1>Your free bid alert</h1>
+  <div class="card" style="margin-bottom:12px">
+    ${sampleBadge}
+    <p><span class="status-badge">${esc(typeLabel)}</span></p>
+    <p><strong>${esc(o.name || 'Milwaukee bid')}</strong></p>
+    ${o.bid_amount_text ? `<p style="font-size:1.4em;font-weight:bold;color:#12263f">${esc(o.bid_amount_text)}</p>` : ''}
+    ${route ? `<p>${esc(route)}</p>` : ''}
+    ${o.stops_text ? `<p class="microcopy">Stops: ${esc(o.stops_text)}</p>` : ''}
+    ${o.pickup_eta_text ? `<p class="microcopy">Pickup ETA: ${esc(o.pickup_eta_text)}</p>` : ''}
+  </div>
+  <div class="card highlight-card">
+    <h3>Want the full live board?</h3>
+    <p>Paid members see every open bid, dedicated route, and STAT run the moment our team posts it — plus the follow-up scripts that win the bids.</p>
+    <p><strong>Basic — $50/mo:</strong> the live bid board, live hiring list of companies hiring drivers, medical-courier readiness coaching, certification and readiness checklist.</p>
+    <p><strong>Complete — $100/mo:</strong> everything in Basic, plus guided step-by-step company applications, resume tweaks, follow-up scripts, and our team coaching you until you're hired.</p>
+    <p><a class="btn btn-large" href="/grow">Unlock with Basic $50/mo</a></p>
+    <p><a class="btn btn-large" href="/grow">Go Complete $100/mo</a></p>
+    <p class="microcopy">TransitNow does not promise or guarantee hires, routes, loads, contracts, work, earnings, or income.</p>
+  </div>
+</section>`;
+}
+
 module.exports = {
   referralsAdminHtml,
   refGateHtml,
+  freeBidGateHtml,
+  freeBidShowHtml,
   alertsAdminHtml,
   documentsAdminHtml,
   leadFollowupHtml,

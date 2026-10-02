@@ -1696,6 +1696,95 @@ app.post('/r/:code', growLimiter, ah(async (req, res) => {
   res.redirect(`/grow/apply?ref=${encodeURIComponent(code.code)}`);
 }));
 
+// --- Free bid-alert lead magnet: /free-bid (additive) ---------------------------
+// A free first yes before the $50/$100 ask. The visitor drops an email, sees
+// one sample bid from the board, then gets the Basic/Complete pitch. Leads are
+// tagged source 'free-bid' so they appear in the leads dashboard; existing
+// lead data is never overwritten. Repeat visitors who already gave an email
+// skip the gate via cookie.
+const FREEBID_COOKIE = 'tn_freebid_email';
+
+app.get('/free-bid', ah(async (req, res) => {
+  try {
+    const prev = String((tracking.getCookies(req) || {})[FREEBID_COOKIE] || '').trim().toLowerCase();
+    if (prev && await grow.findLeadByEmail(prev, 'GROW')) {
+      return res.redirect('/free-bid/show');
+    }
+  } catch (e) { /* fall through to the gate */ }
+  page(res, 'Get a free Milwaukee bid alert',
+    phase6Views.freeBidGateHtml({}), config.getSite());
+}));
+
+app.post('/free-bid', growLimiter, ah(async (req, res) => {
+  const rawEmail = String((req.body && req.body.email) || '').trim().toLowerCase().slice(0, 254);
+  const consent = !!((req.body && (req.body.marketing_consent === '1' || req.body.marketing_consent === 'on')));
+  if (!grow.EMAIL_RE.test(rawEmail)) {
+    res.status(400);
+    return page(res, 'Get a free Milwaukee bid alert',
+      phase6Views.freeBidGateHtml({ error: 'Please enter a valid email address.', email: String((req.body && req.body.email) || '').slice(0, 254) }),
+      config.getSite());
+  }
+  // Same pattern as the referral gate: never call upsertLead on an existing
+  // lead with a bare email — its update branch would blank out the
+  // applicant's name/phone/vehicle fields. Just link the touch instead.
+  let lead = await grow.findLeadByEmail(rawEmail, 'GROW');
+  if (!lead) {
+    const r = await grow.upsertLead('GROW', {
+      email: rawEmail, source: 'free-bid',
+      marketing_consent: consent,
+    });
+    lead = r.lead;
+  } else if (consent && !lead.marketing_consent) {
+    // They opted in on the gate — record it without touching anything else.
+    try {
+      await db.run('UPDATE opportunity_leads SET marketing_consent = 1, marketing_consent_ts = ? WHERE id = ?',
+        [Date.now(), lead.id]);
+    } catch (e) { /* non-blocking */ }
+  }
+  try {
+    const src = await db.get('SELECT * FROM lead_sources WHERE lead_id = ? ORDER BY id DESC LIMIT 1', [lead.id]);
+    if (!src) {
+      await db.run(
+        'INSERT INTO lead_sources (lead_id, source, created_at) VALUES (?, ?, ?)',
+        [lead.id, 'free-bid', Date.now()]
+      );
+    }
+    // Existing attribution rows are left alone — free-bid never overwrites
+    // where a lead originally came from.
+  } catch (e) { /* attribution link is best-effort here */ }
+  tracking.setCookie(res, FREEBID_COOKIE, rawEmail, { maxAge: 365 * 24 * 3600 });
+  res.redirect('/free-bid/show');
+}));
+
+app.get('/free-bid/show', ah(async (req, res) => {
+  let lead = null;
+  try {
+    const prev = String((tracking.getCookies(req) || {})[FREEBID_COOKIE] || '').trim().toLowerCase();
+    if (prev) lead = await grow.findLeadByEmail(prev, 'GROW');
+  } catch (e) { /* fall through */ }
+  if (!lead) return res.redirect('/free-bid');
+  let opp = null;
+  try {
+    const board = await opps.listBoardOpportunities();
+    opp = (board && board[0]) || null;
+  } catch (e) { opp = null; }
+  let isSample = false;
+  if (!opp) {
+    isSample = true;
+    opp = {
+      name: 'Milwaukee to Chicago — sample bid',
+      bid_amount_text: '$425',
+      origin: 'Milwaukee, WI',
+      destination: 'Chicago, IL',
+      listing_type: 'BID',
+      stops_text: '1 stop',
+      pickup_eta_text: 'Now',
+    };
+  }
+  page(res, 'Your free bid alert',
+    phase6Views.freeBidShowHtml({ opp, isSample }), config.getSite());
+}));
+
 // --- /business funnel (spec section 29) ---
 app.get('/business', (req, res) => {
   page(res, 'Businesses — TransitNow', growViews.businessPage({ query: req.query }), config.getSite(), { seo: seo.seoFor('/business') });
