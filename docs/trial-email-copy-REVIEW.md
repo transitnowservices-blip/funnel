@@ -187,3 +187,17 @@ Questions? Reply to this email or call {{business_phone}}.
 - [ ] Email 8 (nurture offer-step revision)
 - [ ] Flip `trialSequencesEnabled` to `true` in `config/emails.json`
 - [ ] Apply email 8 to `config/emails.json` → `sequences.nurture[4]`
+
+## Auto-convert update (2026-10-06 night, Davena-approved)
+
+The trial is now **"$X today, then $100/month unless you cancel"** — the
+checkout collects the card once and the subscription auto-converts at trial
+end. Before enabling the sequences, every trial email that mentions billing
+or cancellation MUST link the self-serve management page:
+
+- **Manage/cancel:** `{{site_base_url}}/subscription/manage` (Stripe customer
+  portal when configured, otherwise the "text Davena" fallback)
+- Required copy pattern: "$X today. Then $100/month starting [renewal date]
+  unless you cancel. Cancel anytime — you keep your full trial days."
+- The dashboard trial banner already shows the renewal date + manage link.
+- The `/trial` page and `/trial/success` page show the exact renewal date.

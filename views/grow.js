@@ -244,17 +244,15 @@ module.exports.growLandingPage = growLandingPage;
 const STRIPE_BASIC_URL = 'https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n';
 const STRIPE_COMPLETE_URL = 'https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o';
 const STRIPE_ROOM_URL = 'https://buy.stripe.com/5kQdRbfEp5Hrc8Yf38dIA00';
-// $1/day trial (Davena-designed 2026-10-06): one-time payments, full
-// Complete-level access for the purchased days. Davena's links — never change.
-const STRIPE_TRIAL_7_URL = 'https://buy.stripe.com/3cIfZi9PffsYcYV6oZ0480s';
-const STRIPE_TRIAL_14_URL = 'https://buy.stripe.com/cNi14o8LbbcIgb73cN0480q';
-const STRIPE_TRIAL_30_URL = 'https://buy.stripe.com/3cI28se5va8E1gdbJj0480t';
-
+// $1/day trial (Davena-designed 2026-10-06; auto-convert approved 2026-10-06):
+// "$X today, then $100/month unless you cancel." Buttons route through
+// /trial (email gate + cart tracking) which creates the Stripe Checkout
+// Session via API.
 function trialSection() {
   return `
 <section id="trial">
   <h2>Try it for $1/day</h2>
-  <p class="lede">Full Complete access. 7, 14, or 30 days. When your days run out, continue with Complete at $100/month.</p>
+  <p class="lede">Full Complete access. 7, 14, or 30 days. Then $100/month unless you cancel.</p>
   <div class="card price-box">
     <h3>$1/Day Trial — Complete Access</h3>
     <p class="price">$1<span class="billing">/day</span></p>
@@ -270,7 +268,7 @@ function trialSection() {
       <a class="btn" href="/trial?tier=14">14 DAYS — $14</a>
       <a class="btn" href="/trial?tier=30">30 DAYS — $30</a>
     </p>
-    <p class="honest-note">One-time payment. Secure checkout via Stripe. When your days run out, any paid action asks you to continue with Complete at $100/month.</p>
+    <p class="honest-note"><strong>How billing works:</strong> you pay $7, $14, or $30 today and put a card on file. If you do nothing, your plan continues at $100/month when your trial days end. Cancel anytime before then and you pay nothing more — you keep your full trial days either way. Secure checkout via Stripe.</p>
   </div>
   <p class="disclosure">The trial is application guidance and hiring intel only — TransitNow does not promise or guarantee routes, loads, contracts, work, hiring, earnings, or income. Whether a company approves you depends on your qualifications, availability, and their needs.</p>
 </section>`;

@@ -232,7 +232,7 @@ function trialBannerCard(trialBanner) {
   if (!trialBanner) return '';
   if (trialBanner.kind === 'active') {
     const n = Number(trialBanner.daysLeft) || 0;
-    return `<div class="card highlight-card"><p><strong>$1/day trial active</strong> — ${n} day${n === 1 ? '' : 's'} left of full Complete access: guided applications, follow-up coaching, the live hiring directory, and bid access.</p></div>`;
+    return `<div class="card highlight-card"><p><strong>$1/day trial active</strong> — ${n} day${n === 1 ? '' : 's'} left of full Complete access: guided applications, follow-up coaching, the live hiring directory, and bid access.</p><p class="microcopy">$${trialBanner.tierCents ? (trialBanner.tierCents / 100) : ''} paid today. Continues at $100/month from ${trialBanner.renewsOn || 'trial end'} unless you cancel. <a href="/subscription/manage">Manage or cancel</a> — cancel anytime, keep your full trial days.</p></div>`;
   }
   if (trialBanner.kind === 'expired') {
     return `<div class="card highlight-card"><h3>Your trial days have run out</h3>

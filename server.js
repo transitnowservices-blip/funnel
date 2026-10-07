@@ -33,6 +33,7 @@ const pipeline = require('./lib/pipeline');
 const content = require('./lib/content');
 const subscriptions = require('./lib/subscriptions');
 const trials = require('./lib/trials');
+const trialCheckout = require('./lib/trialCheckout');
 const tracking = require('./lib/tracking');
 const automation = require('./lib/automation');
 const room = require('./lib/room');
@@ -643,17 +644,20 @@ app.get('/sales', ah(async (req, res) => {
 }));
 
 /**
- * $1/day trial click-through (Davena-designed 2026-10-06). The /grow trial
- * buttons point here (/trial?tier=7|14|30) instead of straight at Stripe so
- * checkout starts are tracked: a cart row (product_id 'transitnow-trial') is
- * created for identified leads, feeding the trial abandoned-cart series.
- * Known leads go straight to Stripe; new visitors get a one-field email
+ * $1/day trial click-through (Davena-designed 2026-10-06; auto-convert approved
+ * 2026-10-06). The /grow trial buttons point here (/trial?tier=7|14|30) instead
+ * of straight at Stripe so checkout starts are tracked: a cart row (product_id
+ * 'transitnow-trial') is created for identified leads, feeding the trial
+ * abandoned-cart series.
+ * Known leads go straight to checkout; new visitors get a one-field email
  * gate first (email only — minimal friction, and it grows the list).
+ * Auto-convert: "$X today, then $100/month starting <date> unless you cancel."
  */
 app.get('/trial', ah(async (req, res) => {
   const site = config.getSite();
   const tier = ['7', '14', '30'].includes(String(req.query.tier)) ? String(req.query.tier) : '7';
-  const stripeUrl = trials.TRIAL_LINKS[Number(tier)];
+  const days = Number(tier);
+  const renewal = trialCheckout.fmtDate(trialCheckout.renewalDate(days));
   const lead = await leadFromReq(req);
   if (lead) {
     await db.run(
@@ -663,14 +667,15 @@ app.get('/trial', ah(async (req, res) => {
     await tags.addTag(lead.id, 'STARTED_CHECKOUT');
     await tags.addTag(lead.id, 'HIGH_INTENT');
     await db.recordEvent({ visitor_id: req.vid, lead_id: lead.id, type: 'CHECKOUT_STARTED', product_id: trials.TRIAL_PRODUCT_ID });
-    return res.redirect(302, stripeUrl); // cart stays open for abandonment tracking
+    return res.redirect(302, `/trial/checkout?tier=${tier}&email=${encodeURIComponent(lead.email || '')}`);
   }
   const body = `<section>
     <h1>Start your $1/day trial</h1>
     <div class="card">
       <h2>$1/Day Trial — Complete Access</h2>
-      <p class="price-line">${tier} days — $${tier}.00, one-time</p>
+      <p class="price-line">$${tier} today. Then $100/month starting ${renewal} unless you cancel.</p>
       <p>Full Complete access while your trial days are active: guided applications, follow-up coaching, the live hiring directory, and bid board access.</p>
+      <p class="microcopy"><strong>How billing works:</strong> you pay $${tier} today and put a card on file. If you do nothing, your plan continues at $100/month from ${renewal}. Cancel anytime before then and you pay nothing more — you keep your full ${tier} days either way.</p>
     </div>
     <form method="POST" action="/trial" class="form">
       <input type="hidden" name="tier" value="${esc(tier)}">
@@ -682,7 +687,7 @@ app.get('/trial', ah(async (req, res) => {
       </label>
       <button type="submit" class="btn btn-large">Continue to secure checkout</button>
     </form>
-    <p class="microcopy">One-time payment via Stripe. When your days run out, continue with Complete at $100/month if you want to keep going.</p>
+    <p class="microcopy">Secure checkout via Stripe. The trial is application guidance and hiring intel only — TransitNow does not promise or guarantee routes, loads, contracts, work, hiring, earnings, or income. Whether a company approves you depends on your qualifications, availability, and their needs.</p>
   </section>`;
   page(res, 'Start your $1/day trial', body, site, { seo: seo.seoFor('/trial') });
 }));
@@ -690,7 +695,6 @@ app.get('/trial', ah(async (req, res) => {
 app.post('/trial', ah(async (req, res) => {
   const site = config.getSite();
   const tier = ['7', '14', '30'].includes(String(req.body.tier)) ? String(req.body.tier) : '7';
-  const stripeUrl = trials.TRIAL_LINKS[Number(tier)];
   const emailAddr = (req.body.email || '').trim().toLowerCase();
   const firstName = (req.body.first_name || '').trim();
   if (!EMAIL_RE.test(emailAddr)) {
@@ -708,7 +712,101 @@ app.post('/trial', ah(async (req, res) => {
   await tags.addTag(lead.id, 'STARTED_CHECKOUT');
   await tags.addTag(lead.id, 'HIGH_INTENT');
   await db.recordEvent({ visitor_id: req.vid, lead_id: lead.id, type: 'CHECKOUT_STARTED', product_id: trials.TRIAL_PRODUCT_ID });
-  return res.redirect(302, stripeUrl); // cart stays open for abandonment tracking
+  return res.redirect(302, `/trial/checkout?tier=${tier}&email=${encodeURIComponent(emailAddr)}`); // cart stays open for abandonment tracking
+}));
+
+/**
+ * Auto-convert trial checkout (Davena-approved 2026-10-06). Creates a Stripe
+ * Checkout Session via API: $X one-time today + $100/mo Complete subscription
+ * with a trial period. Card collected once; first $100 bills at trial end
+ * unless cancelled. Falls back to the one-time payment link when the Stripe
+ * key is missing or the API call fails (loud log) so the trial still sells.
+ */
+app.get('/trial/checkout', ah(async (req, res) => {
+  const site = config.getSite();
+  const tier = ['7', '14', '30'].includes(String(req.query.tier)) ? String(req.query.tier) : '7';
+  const emailAddr = (req.query.email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(emailAddr)) {
+    return res.redirect(302, `/trial?tier=${esc(tier)}`);
+  }
+  const days = Number(tier);
+  const fallbackUrl = trials.TRIAL_LINKS[days];
+  try {
+    const baseUrl = (site.baseUrl || 'http://localhost:3000').replace(/\/$/, '');
+    const session = await trialCheckout.createTrialCheckoutSession({
+      email: emailAddr,
+      firstName: '',
+      tierDays: days,
+      siteUrl: baseUrl,
+    });
+    if (session && session.url) return res.redirect(302, session.url);
+    console.warn('[trial] API checkout unavailable — falling back to one-time payment link', { email: emailAddr, tier });
+  } catch (err) {
+    console.warn('[trial] API checkout failed — falling back to one-time payment link:', err.message);
+  }
+  return res.redirect(302, fallbackUrl);
+}));
+
+app.get('/trial/success', ah(async (req, res) => {
+  const site = config.getSite();
+  const tier = ['7', '14', '30'].includes(String(req.query.tier)) ? String(req.query.tier) : '7';
+  const days = Number(tier);
+  const renewal = trialCheckout.fmtDate(trialCheckout.renewalDate(days));
+  const body = `<section>
+    <h1>You're in — trial started</h1>
+    <div class="card">
+      <p class="price-line">$${tier} paid today. Full Complete access for ${days} days.</p>
+      <p>Your plan continues at <strong>$100/month starting ${renewal}</strong> unless you cancel. Cancel anytime before then and you pay nothing more.</p>
+      <p><a class="btn" href="/drivers/apply">Complete your driver profile</a></p>
+      <p class="microcopy"><a href="/subscription/manage">Manage or cancel your subscription</a></p>
+    </div>
+    <p class="microcopy">TransitNow provides application guidance and hiring intel only — we do not promise or guarantee routes, loads, contracts, work, hiring, earnings, or income.</p>
+  </section>`;
+  page(res, 'Trial started', body, site, { seo: seo.seoFor('/trial/success') });
+}));
+
+/**
+ * Self-serve subscription management. With a Stripe customer id on file and
+ * the API key configured, redirects to the Stripe customer portal (cancel /
+ * update card). Otherwise shows the "text Davena" fallback — never a dead end.
+ */
+app.get('/subscription/manage', ah(async (req, res) => {
+  const site = config.getSite();
+  const emailAddr = (req.query.email || req.body.email || '').trim().toLowerCase();
+  const smsHref = 'sms:+14143680711';
+  if (EMAIL_RE.test(emailAddr)) {
+    let customerId = null;
+    try {
+      const sub = await db.get('SELECT stripe_customer_id FROM dispatch_subscriptions WHERE LOWER(email) = ? ORDER BY updated_at DESC LIMIT 1', [emailAddr]);
+      if (sub && sub.stripe_customer_id) customerId = sub.stripe_customer_id;
+      if (!customerId) {
+        const tr = await db.get('SELECT stripe_customer_id FROM driver_trials WHERE email = ?', [emailAddr]);
+        if (tr && tr.stripe_customer_id) customerId = tr.stripe_customer_id;
+      }
+    } catch (err) { console.warn('[manage] customer lookup failed:', err.message); }
+    if (customerId) {
+      const baseUrl = (site.baseUrl || 'http://localhost:3000').replace(/\/$/, '');
+      const portalUrl = await trialCheckout.createPortalSession(customerId, baseUrl + '/');
+      if (portalUrl) return res.redirect(302, portalUrl);
+    }
+  }
+  const body = `<section>
+    <h1>Manage your subscription</h1>
+    <div class="card">
+      ${EMAIL_RE.test(emailAddr)
+        ? `<p>We couldn't open self-serve management for <strong>${esc(emailAddr)}</strong> right now.</p>`
+        : `<form method="GET" action="/subscription/manage" class="form">
+             <label>Email used at checkout
+               <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
+             </label>
+             <button type="submit" class="btn">Manage subscription</button>
+           </form>`}
+      <p>To cancel or change your plan, text Davena directly — it will be handled right away.</p>
+      <p><a class="btn btn-large" href="${smsHref}">TEXT DAVENA TO MANAGE — (414) 368-0711</a></p>
+      <p class="microcopy">Cancel anytime. If you cancel during your trial you keep your full trial days — you simply won't be charged $100/month.</p>
+    </div>
+  </section>`;
+  page(res, 'Manage your subscription', body, site, { seo: seo.seoFor('/subscription/manage') });
 }));
 
 app.get('/checkout', ah(async (req, res) => {  const site = config.getSite();
@@ -2251,7 +2349,8 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
       viaTrial: trialActive && !(sub && sub.status === 'active'),
     };
     if (trialActive) {
-      trialBanner = { kind: 'active', daysLeft: trial.daysLeft };
+      const renewsOn = trial.endsAt ? new Date(trial.endsAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' }) : null;
+      trialBanner = { kind: 'active', daysLeft: trial.daysLeft, tierCents: trial.amountCents, renewsOn };
     } else if (trial.hadTrial && !(sub && sub.status === 'active')) {
       trialBanner = { kind: 'expired' };
     }
@@ -4744,6 +4843,13 @@ async function handleStripeEvent(event) {
     return handleRoomSubscriptionEnded(obj);
   }
   if (event.type === 'customer.subscription.updated') {
+    if (isTrialingTrialSubscription(obj)) {
+      // Auto-convert trial still in its trial period: tracked in
+      // driver_trials, never as a dispatch_subscriptions row (the referral
+      // 30-day clock must not start until the first real $100 payment).
+      console.log('[webhook:stripe] trialing trial subscription update — no subscription row created', { id: obj.id });
+      return true;
+    }
     if (subscriptions.planFromSubscriptionObject(obj)) {
       return handleDispatchUpdated(event, obj);
     }
@@ -4762,6 +4868,12 @@ async function handleStripeEvent(event) {
     return false;
   }
   const product = config.getProducts().products.find((p) => Number(p.priceCents) === amountCents);
+  // Auto-convert trial subscription checkout (subscription mode, metadata
+  // source='transitnow-trial'): "$X today + $100/mo with trial period".
+  // Checked before the one-time trial branch.
+  if (session.mode === 'subscription' && session.metadata && session.metadata.source === 'transitnow-trial') {
+    return handleTrialSubscriptionCheckout(event, session);
+  }
   // $1/day trial checkout (one-time payment, NOT a subscription): grant
   // trial days by email. Checked before the product lookup because trial
   // amounts (700/1400/3000) are not config products. Subscription logic
@@ -4881,6 +4993,54 @@ async function handleTrialCheckout(event, session) {
   try { await automation.cancelTrialSequences(email, 'purchased'); } catch (err) { /* non-blocking */ }
   console.log('[webhook:stripe] trial started', { email, days, amountCents });
   return true;
+}
+
+/**
+ * Auto-convert trial subscription checkout (Davena-approved 2026-10-06):
+ * checkout.session.completed in SUBSCRIPTION mode with metadata
+ * source='transitnow-trial' — "$X today + $100/mo Complete with a trial
+ * period". Grants trial days in driver_trials AND stores the Stripe customer
+ * / subscription ids for the self-serve portal.
+ *
+ * Deliberately does NOT create a dispatch_subscriptions row here. That row
+ * appears only when the first real $100 invoice is paid (trial end), so the
+ * referral 30-day clock starts at the first real payment — never during the
+ * trial. Trial access gating reads driver_trials directly.
+ */
+async function handleTrialSubscriptionCheckout(event, session) {
+  const s = session || {};
+  const meta = s.metadata || {};
+  const email = ((s.customer_details && s.customer_details.email) || '').trim().toLowerCase();
+  const days = [7, 14, 30].includes(Number(meta.trial_days)) ? Number(meta.trial_days) : null;
+  const tierCents = Number(meta.trial_tier_cents) || ({ 7: 700, 14: 1400, 30: 3000 })[days] || null;
+  if (!email || !days) {
+    console.warn('[webhook:stripe] trial subscription checkout missing email/days — ignored', { sessionId: s.id });
+    return false;
+  }
+  if (await subscriptions.alreadyProcessed(event.id)) {
+    console.log('[webhook:stripe] duplicate trial subscription checkout ignored', { eventId: event.id });
+    return true;
+  }
+  await trials.recordTrialSubscription({
+    email,
+    days,
+    amountCents: tierCents,
+    stripeSessionId: s.id || null,
+    stripeCustomerId: s.customer || null,
+    stripeSubscriptionId: s.subscription || null,
+  });
+  await subscriptions.markProcessed(event.id, event.type);
+  // They bought — stop any queued trial abandoned-cart emails.
+  try { await automation.cancelTrialSequences(email, 'purchased'); } catch (err) { /* non-blocking */ }
+  console.log('[webhook:stripe] auto-convert trial subscription started', { email, days, subscriptionId: s.subscription || null });
+  return true;
+}
+
+/** True for a trialing auto-convert trial subscription: tracked in
+ * driver_trials, never as a dispatch_subscriptions row. */
+function isTrialingTrialSubscription(sub) {
+  const s = sub || {};
+  return s.status === 'trialing' && s.metadata && s.metadata.source === 'transitnow-trial';
 }
 
 async function handleDispatchRenewal(event, inv) {
