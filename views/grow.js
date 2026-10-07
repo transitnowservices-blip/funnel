@@ -138,12 +138,19 @@ function growLandingPage() {
   return `
 <section class="hero">
   <p class="eyebrow">TRANSITNOW DISPATCH</p>
+  <p><img src="/content/davena-business.webp" alt="Davena, founder of TransitNow Logistics Services" style="width:180px;height:180px;border-radius:50%;object-fit:cover" /></p>
   <h1>YOU DRIVE. WE FIND THE WORK.</h1>
-  <p class="subhead">Medical courier companies in Milwaukee are hiring right now. TransitNow gives you the live hiring list — verified fresh when you join — plus the certification checklist and coaching to get you hired. From $50/month. Cancel anytime.</p>
+  <p class="subhead">I'm Davena — Milwaukee born and raised. Medical courier companies here are hiring right now, and my team gives you the live hiring list — verified fresh when you join — plus the certification checklist and coaching to get you hired. From $50/month. Cancel anytime.</p>
   <p>
     <a class="btn btn-large" href="#dispatch-plans">START DISPATCH — $50/MO</a>
-    <a class="btn btn-secondary btn-large" href="#how-it-works">HOW IT WORKS</a>
+    <a class="btn btn-secondary btn-large" href="sms:+14143680711">TEXT DAVENA</a>
   </p>
+  <p class="honest-note">Not ready to commit? <a href="/free-bid">Grab a free bid alert first</a> — no subscription, no card.</p>
+</section>
+<section id="free-bid-door">
+  <h2>Start free: bid alerts</h2>
+  <p class="lede">Drop your email and get free bid alerts when courier opportunities post in your area. No card, no commitment — just the openings, straight to your inbox.</p>
+  <p><a class="btn btn-secondary btn-large" href="/free-bid">GET FREE BID ALERTS</a></p>
 </section>
 <section>
   <h2>Sound familiar?</h2>
@@ -224,6 +231,7 @@ ${dispatchPricingSection()}
     <a class="btn btn-large" href="https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o">GO COMPLETE — $100/MO</a>
     <a class="btn btn-secondary btn-large" href="https://buy.stripe.com/aFa00k4uVeoUaQN00B0480n">START BASIC — $50/MO</a>
   </p>
+  <p><a class="btn btn-secondary" href="sms:+14143680711">PREFER TO TALK FIRST? TEXT DAVENA</a></p>
   <p class="disclosure">Dispatch plans are a support service. Hiring intel and application coaching are guidance only — TransitNow does not promise or guarantee routes, loads, contracts, work, earnings, or income. Whether a company hires you depends on your qualifications, availability, and their needs.</p>
 </section>`;
 }
