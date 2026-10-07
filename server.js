@@ -642,8 +642,76 @@ app.get('/sales', ah(async (req, res) => {
   page(res, product.name, pages.salesPage(site, product), site, { seo: seo.seoFor('/sales') });
 }));
 
-app.get('/checkout', ah(async (req, res) => {
+/**
+ * $1/day trial click-through (Davena-designed 2026-10-06). The /grow trial
+ * buttons point here (/trial?tier=7|14|30) instead of straight at Stripe so
+ * checkout starts are tracked: a cart row (product_id 'transitnow-trial') is
+ * created for identified leads, feeding the trial abandoned-cart series.
+ * Known leads go straight to Stripe; new visitors get a one-field email
+ * gate first (email only — minimal friction, and it grows the list).
+ */
+app.get('/trial', ah(async (req, res) => {
   const site = config.getSite();
+  const tier = ['7', '14', '30'].includes(String(req.query.tier)) ? String(req.query.tier) : '7';
+  const stripeUrl = trials.TRIAL_LINKS[Number(tier)];
+  const lead = await leadFromReq(req);
+  if (lead) {
+    await db.run(
+      'INSERT INTO carts (lead_id, visitor_id, product_id, started_at, purchased, recovered) VALUES (?, ?, ?, ?, 0, 0)',
+      [lead.id, req.vid, trials.TRIAL_PRODUCT_ID, Date.now()]
+    );
+    await tags.addTag(lead.id, 'STARTED_CHECKOUT');
+    await tags.addTag(lead.id, 'HIGH_INTENT');
+    await db.recordEvent({ visitor_id: req.vid, lead_id: lead.id, type: 'CHECKOUT_STARTED', product_id: trials.TRIAL_PRODUCT_ID });
+    return res.redirect(302, stripeUrl); // cart stays open for abandonment tracking
+  }
+  const body = `<section>
+    <h1>Start your $1/day trial</h1>
+    <div class="card">
+      <h2>$1/Day Trial — Complete Access</h2>
+      <p class="price-line">${tier} days — $${tier}.00, one-time</p>
+      <p>Full Complete access while your trial days are active: guided applications, follow-up coaching, the live hiring directory, and bid board access.</p>
+    </div>
+    <form method="POST" action="/trial" class="form">
+      <input type="hidden" name="tier" value="${esc(tier)}">
+      <label>Email
+        <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
+      </label>
+      <label>First name (optional)
+        <input type="text" name="first_name" placeholder="First name" autocomplete="given-name">
+      </label>
+      <button type="submit" class="btn btn-large">Continue to secure checkout</button>
+    </form>
+    <p class="microcopy">One-time payment via Stripe. When your days run out, continue with Complete at $100/month if you want to keep going.</p>
+  </section>`;
+  page(res, 'Start your $1/day trial', body, site, { seo: seo.seoFor('/trial') });
+}));
+
+app.post('/trial', ah(async (req, res) => {
+  const site = config.getSite();
+  const tier = ['7', '14', '30'].includes(String(req.body.tier)) ? String(req.body.tier) : '7';
+  const stripeUrl = trials.TRIAL_LINKS[Number(tier)];
+  const emailAddr = (req.body.email || '').trim().toLowerCase();
+  const firstName = (req.body.first_name || '').trim();
+  if (!EMAIL_RE.test(emailAddr)) {
+    res.status(400);
+    return page(res, 'Start your $1/day trial',
+      `<section><h1>Start your $1/day trial</h1><p class="error">Please provide a valid email address to continue.</p><p><a class="btn" href="/trial?tier=${esc(tier)}">Back</a></p></section>`,
+      site);
+  }
+  const trialProduct = { id: trials.TRIAL_PRODUCT_ID, name: '$1/Day Trial' };
+  const lead = await identifyLead(req, res, { first_name: firstName, email: emailAddr }, trialProduct, null);
+  await db.run(
+    'INSERT INTO carts (lead_id, visitor_id, product_id, started_at, purchased, recovered) VALUES (?, ?, ?, ?, 0, 0)',
+    [lead.id, req.vid, trials.TRIAL_PRODUCT_ID, Date.now()]
+  );
+  await tags.addTag(lead.id, 'STARTED_CHECKOUT');
+  await tags.addTag(lead.id, 'HIGH_INTENT');
+  await db.recordEvent({ visitor_id: req.vid, lead_id: lead.id, type: 'CHECKOUT_STARTED', product_id: trials.TRIAL_PRODUCT_ID });
+  return res.redirect(302, stripeUrl); // cart stays open for abandonment tracking
+}));
+
+app.get('/checkout', ah(async (req, res) => {  const site = config.getSite();
   const product = productFromReq(req);
   page(res, 'Checkout', pages.checkoutPage(site, product, await leadFromReq(req), site.paymentMode), site, { seo: seo.seoFor('/checkout') });
 }));
@@ -4779,6 +4847,9 @@ async function handleDispatchCheckout(event, session, product) {
   if (lead && product) {
     await recordPurchase(lead.id, product.id, 'stripe', { amountCents });
   }
+  // Now a paying subscriber — stop any queued trial emails (abandoned cart
+  // and expiry/paywall series).
+  try { await automation.cancelTrialSequences(email, 'subscribed'); } catch (err) { /* non-blocking */ }
   console.log('[webhook:stripe] dispatch subscription started', { email, plan });
   return true;
 }
@@ -4806,6 +4877,8 @@ async function handleTrialCheckout(event, session) {
     purchasedAt: Date.now(),
   });
   await subscriptions.markProcessed(event.id, event.type);
+  // They bought — stop any queued trial abandoned-cart emails.
+  try { await automation.cancelTrialSequences(email, 'purchased'); } catch (err) { /* non-blocking */ }
   console.log('[webhook:stripe] trial started', { email, days, amountCents });
   return true;
 }

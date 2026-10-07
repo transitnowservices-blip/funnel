@@ -266,9 +266,9 @@ function trialSection() {
       <li>Bid board access</li>
     </ul>
     <p>
-      <a class="btn" href="${STRIPE_TRIAL_7_URL}">7 DAYS — $7</a>
-      <a class="btn" href="${STRIPE_TRIAL_14_URL}">14 DAYS — $14</a>
-      <a class="btn" href="${STRIPE_TRIAL_30_URL}">30 DAYS — $30</a>
+      <a class="btn" href="/trial?tier=7">7 DAYS — $7</a>
+      <a class="btn" href="/trial?tier=14">14 DAYS — $14</a>
+      <a class="btn" href="/trial?tier=30">30 DAYS — $30</a>
     </p>
     <p class="honest-note">One-time payment. Secure checkout via Stripe. When your days run out, any paid action asks you to continue with Complete at $100/month.</p>
   </div>

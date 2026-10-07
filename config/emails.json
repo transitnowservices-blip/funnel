@@ -189,6 +189,52 @@
         "subject": "Ready for the follow-up training, {{first_name}}?",
         "bodyHtml": "<p>Hi {{first_name}},</p><p>You've been on <strong>TransitNow Basic</strong> for a week — hiring list, readiness checklist, coaching. Here's what the next level adds:</p><p><strong>Complete — $100/month: get hired faster.</strong></p><ul><li><strong>Follow-up training from day one</strong> — we teach you how to follow up until you're hired. Nobody chases your applications harder than you will.</li><li><strong>The full toolkit</strong> — call scripts, email templates, application checklists. Never wonder what to say again.</li><li><strong>Resume adjustments</strong> for specific opportunities.</li><li><strong>The 'why wasn't I picked' script</strong> — turn every no into intel for the next yes.</li><li><strong>Drivers-only community</strong> plus contract and dedicated-route intelligence.</li></ul><p>Basic shows you where to apply. Complete makes sure every application gets chased until it's answered.</p><p>Want to move up? Just reply <strong>UPGRADE</strong> to this email and we'll switch you to Complete — no second checkout, no hassle.</p><p>— The TransitNow team, {{business_phone}}</p>"
       }
+    ],
+    "trialAbandonedCart": [
+      {
+        "id": "trial-cart-1",
+        "delayHours": 1,
+        "subject": "Your $1/day trial is waiting",
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>You were about to start your $1/day trial and didn't finish — that happens.</p><p>Quick reminder of what $7 gets you: <strong>7 days of full Complete access</strong> — guided applications, follow-up coaching until they answer, the live hiring directory re-verified fresh for you, the certification and readiness checklist, and bid board access.</p><p>Your link is still good:</p><p><a href='https://buy.stripe.com/3cIfZi9PffsYcYV6oZ0480s'>Start my trial — 7 days, $7</a></p><p>Want more runway? <a href='https://buy.stripe.com/cNi14o8LbbcIgb73cN0480q'>14 days for $14</a> or <a href='https://buy.stripe.com/3cI28se5va8E1gdbJj0480t'>30 days for $30</a>.</p><p>One-time payment. No subscription, no commitment.</p><p>— Davena, TransitNow, {{business_phone}}</p>"
+      },
+      {
+        "id": "trial-cart-2",
+        "delayHours": 24,
+        "subject": "What $1/day actually gets you",
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>Before you decide, here's exactly what's inside the trial:</p><ul><li><strong>Guided applications</strong> — we walk your applications in right, not just thrown at a portal.</li><li><strong>Follow-up coaching</strong> — the day-3 call script, the day-7 check-in template, what to say when they go quiet.</li><li><strong>The live hiring directory</strong> — 150+ companies tracked, re-verified fresh for your vehicle and city when you join.</li><li><strong>Certification &amp; readiness checklist</strong> — HIPAA course guidance, documents, insurance review.</li><li><strong>Bid board access</strong> — see what's moving while you're in.</li></ul><p>That's the full Complete experience — the same thing members pay $100/month for — at $1 a day.</p><p><a href='https://buy.stripe.com/3cIfZi9PffsYcYV6oZ0480s'>Start my trial — 7 days, $7</a></p><p>No guaranteed hires — anyone who promises that is lying to you. What you get is the intel, the coaching, and the tools. The hire is yours to win.</p><p>— Davena, TransitNow, {{business_phone}}</p>"
+      },
+      {
+        "id": "trial-cart-3",
+        "delayHours": 72,
+        "subject": "Last call on your $1/day trial",
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>Last note about your trial — no pressure.</p><p>If getting hired as a driver would change things for you, $7 is the cheapest way to see what we do: <a href='https://buy.stripe.com/3cIfZi9PffsYcYV6oZ0480s'>7 days for $7</a>.</p><p>If the timing isn't right, that's fine. We won't keep nudging you about this.</p><p>— Davena, TransitNow</p>"
+      }
+    ],
+    "trialExpiry": [
+      {
+        "id": "trial-expiry-3d",
+        "delayHours": 0,
+        "subject": "{{trial_days_left}} days left on your trial — finish strong",
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>You've got <strong>{{trial_days_left}} days left</strong> on your $1/day trial (ends {{trial_end_date}}).</p><p>Here's what to finish before it runs out:</p><ul><li>Get every application in — don't leave one sitting half-done.</li><li>Run the follow-up on anything you already applied to — day-3 call, day-7 check-in.</li><li>If a company told you no, use the 'why wasn't I picked' script — a no educates you.</li></ul><p>When your days run out, keep everything moving with Complete at $100/month — same full access, no starting over: <a href='https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o'>Continue with Complete</a></p><p>— Davena, TransitNow</p>"
+      },
+      {
+        "id": "trial-expiry-1d",
+        "delayHours": 0,
+        "subject": "Tomorrow your trial ends",
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>Tomorrow ({{trial_end_date}}) your trial days run out.</p><p>If you're mid-application with any company, get the follow-up in today — that's the part most drivers skip, and it's the part that gets people hired.</p><p>Want to keep going without missing a beat? <a href='https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o'>Continue with Complete — $100/month</a>. Everything stays exactly where it is.</p><p>— Davena, TransitNow</p>"
+      },
+      {
+        "id": "trial-expired",
+        "delayHours": 0,
+        "subject": "Your trial ended — here's how to keep going",
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>Your $1/day trial has ended. To keep your profile moving with these companies — guided applications, follow-up coaching, the live hiring directory, and bid access — continue with Complete:</p><p><a href='https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o'>Continue with Complete — $100/month</a></p><p>Monthly subscription, cancel anytime. No guaranteed hires — just the intel, the coaching, and the tools that keep you in front of companies instead of in a pile.</p><p>— Davena, TransitNow, {{business_phone}}</p>"
+      },
+      {
+        "id": "trial-expired-plus3d",
+        "delayHours": 0,
+        "subject": "Still thinking about it?",
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>Your trial ended a few days ago. If you're still thinking about it, the door's open: <a href='https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o'>Complete — $100/month</a>.</p><p>And if the timing isn't right, that's fine too. You know where to find me.</p><p>— Davena, TransitNow</p>"
+      }
     ]
   },
   "templates": {
@@ -213,6 +259,13 @@
     },
     "roomAbandonedCart": {
       "fromName": "Wealth Builder's Room"
+    },
+    "trialAbandonedCart": {
+      "fromName": "TransitNow Dispatch"
+    },
+    "trialExpiry": {
+      "fromName": "TransitNow Dispatch"
     }
-  }
+  },
+  "trialSequencesEnabled": false
 }
