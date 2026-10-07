@@ -671,10 +671,24 @@ app.get('/trial', ah(async (req, res) => {
   }
   const body = `<section>
     <h1>Start your $1/day trial</h1>
+    <p>Full Complete access — guided applications, follow-up coaching, the live hiring directory, and bid board access. Pick the runway that fits you:</p>
+    <div class="trial-tiers">
+      ${['7', '14', '30'].map(t => {
+        const d = Number(t);
+        const r = trialCheckout.fmtDate(trialCheckout.renewalDate(d));
+        const sel = t === tier ? ' trial-tier-selected' : '';
+        return `<div class="card trial-tier${sel}">
+          <h3>${t} days — $${t}</h3>
+          <p>$${t} today. Then $100/month starting ${r} unless you cancel.</p>
+          ${t === tier
+            ? `<p class="microcopy"><strong>Selected.</strong> Full Complete access while your trial days are active.</p>`
+            : `<p><a class="btn" href="/trial?tier=${t}">Choose ${t} days</a></p>`}
+        </div>`;
+      }).join('')}
+    </div>
     <div class="card">
-      <h2>$1/Day Trial — Complete Access</h2>
+      <h2>$1/Day Trial — Complete Access (${tier} days)</h2>
       <p class="price-line">$${tier} today. Then $100/month starting ${renewal} unless you cancel.</p>
-      <p>Full Complete access while your trial days are active: guided applications, follow-up coaching, the live hiring directory, and bid board access.</p>
       <p class="microcopy"><strong>How billing works:</strong> you pay $${tier} today and put a card on file. If you do nothing, your plan continues at $100/month from ${renewal}. Cancel anytime before then and you pay nothing more — you keep your full ${tier} days either way.</p>
     </div>
     <form method="POST" action="/trial" class="form">
