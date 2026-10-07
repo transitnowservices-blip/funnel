@@ -225,6 +225,24 @@ function assistantDashCard(driver, assistantInfo) {
 // number (single source of truth in lib/field_comms.js). Shown to ACTIVE
 // subscribers (Basic and Complete) only. Plainly labeled as a real call/text —
 // never presented as in-app chat.
+// $1/day trial banner: countdown while active, paywall CTA when expired.
+// Copy describes access only — never promises work, routes, or hiring.
+const TRIAL_CONTINUE_URL = 'https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o';
+function trialBannerCard(trialBanner) {
+  if (!trialBanner) return '';
+  if (trialBanner.kind === 'active') {
+    const n = Number(trialBanner.daysLeft) || 0;
+    return `<div class="card highlight-card"><p><strong>$1/day trial active</strong> — ${n} day${n === 1 ? '' : 's'} left of full Complete access: guided applications, follow-up coaching, the live hiring directory, and bid access.</p></div>`;
+  }
+  if (trialBanner.kind === 'expired') {
+    return `<div class="card highlight-card"><h3>Your trial days have run out</h3>
+    <p>Keep your profile moving with these companies — guided applications, follow-up coaching, the live hiring directory, and bid access.</p>
+    <p><a class="btn btn-large" href="${TRIAL_CONTINUE_URL}">CONTINUE WITH COMPLETE — $100/MONTH</a></p>
+    <p class="microcopy">Secure checkout via Stripe. Month-to-month, cancel anytime.</p></div>`;
+  }
+  return '';
+}
+
 function dispatchLiveCard(show) {
   if (!show) return '';
   const fc = require('../lib/field_comms');
@@ -284,7 +302,7 @@ function bidBoardDashCard({ plan = null, boardOpps = [] } = {}) {
     ${guarantee}</div>`;
 }
 
-function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo = null, dispatchInbox = null, dispatchLive = false, boardOpps = [] }) {
+function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo = null, dispatchInbox = null, dispatchLive = false, boardOpps = [], trialBanner = null }) {
   const stage = drivers.STATUS_LABELS[driver.status] || driver.status;
   const nextSteps = {
     new: 'We are reviewing your onboarding information. No action needed right now.',
@@ -322,6 +340,7 @@ function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo
   <h1>Hi, ${esc(driver.full_name)}.</h1>
   <p class="subhead">Status: ${esc(stage)}</p>
   <div class="card highlight-card"><p><strong>What happens next:</strong> ${esc(step)}</p></div>
+  ${trialBannerCard(trialBanner)}
   ${dispatchLiveCard(dispatchLive)}
   ${hiringListDashCard(hiringInfo)}
   ${bidBoardDashCard({ plan: hiringInfo && hiringInfo.plan, boardOpps })}

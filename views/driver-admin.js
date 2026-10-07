@@ -43,13 +43,29 @@ function subForEmail(subsByEmail, email) {
   return subsByEmail[String(email || '').toLowerCase()] || null;
 }
 
+// $1/day trial badge — distinct from PAID badges and TEST grants.
+// Blue = trial active (full Complete-level access); gray = trial expired.
+function trialBadge(trial) {
+  if (!trial || !trial.hadTrial) return '';
+  if (trial.active) {
+    const n = trial.daysLeft;
+    return ` <span class="status-badge" style="background:#2456a6;color:#fff">TRIAL · ${n} day${n === 1 ? '' : 's'} left</span>`;
+  }
+  return ` <span class="status-badge" style="background:#777;color:#fff">TRIAL EXPIRED</span>`;
+}
+
+function trialForEmail(trialsByEmail, email) {
+  if (!trialsByEmail) return null;
+  return trialsByEmail[String(email || '').toLowerCase()] || null;
+}
+
 function kv(label, value) {
   if (value == null || value === '') return '';
   return `<div><strong>${esc(label)}:</strong> ${esc(value)}</div>`;
 }
 
 // --- Pipeline list ------------------------------------------------------------
-function driverPipelineHtml({ list, counts, status, source, q, subsByEmail, paid, paidCounts }) {
+function driverPipelineHtml({ list, counts, status, source, q, subsByEmail, trialsByEmail, paid, paidCounts }) {
   const tabs = drivers.DRIVER_STATUSES.map((s) => {
     const active = status === s ? ' class="active"' : '';
     const href = `/admin/drivers?status=${s}${source ? `&source=${encodeURIComponent(source)}` : ''}${q ? `&q=${encodeURIComponent(q)}` : ''}`;
@@ -75,7 +91,7 @@ function driverPipelineHtml({ list, counts, status, source, q, subsByEmail, paid
       <td>${esc(work || '—')}</td>
       <td>${esc(drivers.SOURCE_LABELS[d.source] || d.source || '—')}</td>
       <td>${statusBadge(d.status)}</td>
-      <td>${subscriptionBadge(subForEmail(subsByEmail, d.email))}</td>
+      <td>${subscriptionBadge(subForEmail(subsByEmail, d.email))}${trialBadge(trialForEmail(trialsByEmail, d.email))}</td>
       <td>${fmtTs(d.submitted_at)}</td>
       <td>${fmtTs(d.last_contact)}</td>
     </tr>`;
@@ -131,7 +147,7 @@ function routeMatchCardHtml({ driver: d, subscription, routeMatches = [], goal =
   <p class="muted">Matches are potential opportunities only — never promised routes, loads, contracts, or income.</p>`;
 }
 
-function driverDetailHtml({ driver: d, history, subscription, routeMatches = [], goal = null, notice = '' }) {
+function driverDetailHtml({ driver: d, history, subscription, trial = null, routeMatches = [], goal = null, notice = '' }) {
   const statusOpts = drivers.DRIVER_STATUSES.map(
     (s) => `<option value="${s}"${d.status === s ? ' selected' : ''}>${esc(drivers.STATUS_LABELS[s])}</option>`
   ).join('');
@@ -204,6 +220,22 @@ ${notice ? (String(notice).startsWith('error:')
 <p class="muted">Onboarded ${fmtTs(d.submitted_at)} · Source: ${esc(drivers.SOURCE_LABELS[d.source] || d.source)} · <a href="${esc(drivers.driverDashUrl(d.access_token))}">Driver dashboard link</a></p>
 
 ${subCard}
+
+${(() => {
+  // $1/day trial card — shown whenever the driver ever bought a trial.
+  // Distinct from the subscription card; trial payments never count as
+  // subscription conversions (referral rewards, revenue).
+  if (!trial || !trial.hadTrial) return '';
+  const stateLine = trial.active
+    ? `<div><strong>Status:</strong> <span class="status-badge" style="background:#2456a6;color:#fff">TRIAL ACTIVE</span> — ${trial.daysLeft} day${trial.daysLeft === 1 ? '' : 's'} left (full Complete-level access)</div>`
+    : `<div><strong>Status:</strong> <span class="status-badge" style="background:#777;color:#fff">TRIAL EXPIRED</span> — paid actions now show the Complete $100/month paywall</div>`;
+  return `<div class="card">
+  <h3>$1/day trial</h3>
+  ${stateLine}
+  <div><strong>Trial ends:</strong> ${esc(fmtTs(trial.endsAt))}</div>
+  <p class="muted">One-time trial purchase — not a subscription. Does not count toward referral rewards or subscription revenue.</p>
+</div>`;
+})()}
 
 <div class="card">
   <h3>Message driver</h3>

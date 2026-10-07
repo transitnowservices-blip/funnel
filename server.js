@@ -32,6 +32,7 @@ const tags = require('./lib/tags');
 const pipeline = require('./lib/pipeline');
 const content = require('./lib/content');
 const subscriptions = require('./lib/subscriptions');
+const trials = require('./lib/trials');
 const tracking = require('./lib/tracking');
 const automation = require('./lib/automation');
 const room = require('./lib/room');
@@ -2051,6 +2052,7 @@ app.get('/admin/drivers', adminAuth, ah(async (req, res) => {
     drivers.countDriversByStatus(),
   ]);
   const subsByEmail = await subscriptions.mapForEmails(list.map((d) => d.email));
+  const trialsByEmail = await trials.mapForEmails(list.map((d) => d.email));
   const subOf = (d) => subsByEmail[String(d.email || '').toLowerCase()] || null;
   let shown = list;
   if (paid === 'paid') shown = list.filter((d) => { const s = subOf(d); return s && s.status === 'active'; });
@@ -2061,7 +2063,7 @@ app.get('/admin/drivers', adminAuth, ah(async (req, res) => {
   ]);
   res.send(adminViews.adminLayout('Driver Pipeline', driverAdminViews.driverPipelineHtml({
     list: shown, counts, status, source: req.query.source || '', q: req.query.q || '',
-    subsByEmail, paid, paidCounts: {
+    subsByEmail, trialsByEmail, paid, paidCounts: {
       active: activeSubs.filter((s) => !s.is_test).length,
       past_due: pastDueSubs.length,
       testActive: activeSubs.filter((s) => s.is_test).length,
@@ -2074,13 +2076,14 @@ app.get('/admin/drivers/:id', adminAuth, ah(async (req, res) => {
   if (!driver) return res.status(404).send(adminViews.adminLayout('Not found', '<p>Driver not found.</p>'));
   const history = await drivers.statusHistory(driver.id);
   const subscription = await subscriptions.getByEmail(driver.email);
+  const trial = await trials.trialInfo(driver.email);
   const rm = require('./lib/route_matching');
   const [routeMatches, goalCents] = await Promise.all([
     rm.matchesForDriver(driver.id, 25),
     rm.getWeeklyGoal(driver.id),
   ]);
   res.send(adminViews.adminLayout('Driver: ' + driver.full_name, driverAdminViews.driverDetailHtml({
-    driver, history, subscription, routeMatches,
+    driver, history, subscription, trial, routeMatches,
     goal: { goalCents, weekKey: rm.chicagoWeekKey() },
     notice: req.query.msg || '',
   })));
@@ -2166,14 +2169,24 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   // Hiring list + certification checklist (new model) for the driver's
   // own dashboard. Paid subscribers see the live directory status.
   let hiringInfo = null;
+  let trialBanner = null;
   try {
     const sub = await subscriptions.getByEmail(String(driver.email || '').trim().toLowerCase());
     const openRow = await db.get("SELECT COUNT(*) AS c FROM opportunities WHERE status = 'OPEN'");
+    // $1/day trial grants full Complete-level access while days remain.
+    const trial = await trials.trialInfo(String(driver.email || '').trim().toLowerCase());
+    const trialActive = trial.active;
     hiringInfo = {
-      plan: sub && sub.status === 'active' ? sub.plan : null,
+      plan: sub && sub.status === 'active' ? sub.plan : (trialActive ? 'complete' : null),
       openOpps: openRow ? Number(openRow.c) || 0 : 0,
       since: sub && sub.created_at ? sub.created_at : null,
+      viaTrial: trialActive && !(sub && sub.status === 'active'),
     };
+    if (trialActive) {
+      trialBanner = { kind: 'active', daysLeft: trial.daysLeft };
+    } else if (trial.hadTrial && !(sub && sub.status === 'active')) {
+      trialBanner = { kind: 'expired' };
+    }
   } catch (err) {
     console.error('[dashboard] hiring info failed:', err.message);
   }
@@ -2209,7 +2222,8 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
   // only. 100% real tel:/sms: links — no in-app chat claims.
   let dispatchLive = false;
   try {
-    dispatchLive = await subscriptions.isPaidActive(driver.email);
+    // $1/day trial counts as paid-active while days remain.
+    dispatchLive = (await subscriptions.isPaidActive(driver.email)) || (await trials.isTrialActive(driver.email));
   } catch (err) {
     console.error('[dashboard] dispatch live check failed:', err.message);
   }
@@ -2231,7 +2245,7 @@ app.get('/d/:token', requireDriver, ah(async (req, res) => {
       console.error('[dashboard] board view log failed:', err.message);
     }
   }
-  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, hiringInfo, assistantInfo, dispatchInbox, dispatchLive, boardOpps }), site);
+  page(res, 'My dashboard', driverViews.dashboardPage({ site, driver, dashUrl, hiringInfo, assistantInfo, dispatchInbox, dispatchLive, boardOpps, trialBanner }), site);
   if (dispatchInbox && dispatchInbox.length) {
     try {
       await require('./lib/field_comms').markInboxRead(driver.id);
@@ -4680,6 +4694,13 @@ async function handleStripeEvent(event) {
     return false;
   }
   const product = config.getProducts().products.find((p) => Number(p.priceCents) === amountCents);
+  // $1/day trial checkout (one-time payment, NOT a subscription): grant
+  // trial days by email. Checked before the product lookup because trial
+  // amounts (700/1400/3000) are not config products. Subscription logic
+  // below is untouched.
+  if (session.mode !== 'subscription' && trials.trialDaysForCents(amountCents)) {
+    return handleTrialCheckout(event, session);
+  }
   if (!product) {
     console.warn('[webhook:stripe] no configured product matches amount_total', amountCents);
     return false;
@@ -4762,6 +4783,33 @@ async function handleDispatchCheckout(event, session, product) {
   return true;
 }
 
+/**
+ * $1/day trial checkout handler (Davena-designed 2026-10-06). One-time
+ * payment links ($7/$14/$30) grant 7/14/30 days of FULL Complete-level
+ * access. Owns ONLY the trial amounts (700/1400/3000 cents) — never touches
+ * subscription logic. Idempotent on the Stripe event id.
+ */
+async function handleTrialCheckout(event, session) {
+  const s = session || {};
+  const email = ((s.customer_details && s.customer_details.email) || '').trim().toLowerCase();
+  const amountCents = Number(s.amount_total);
+  const days = trials.trialDaysForCents(amountCents);
+  if (!email || !days) return false;
+  if (await subscriptions.alreadyProcessed(event.id)) {
+    console.log('[webhook:stripe] duplicate trial checkout event ignored', { eventId: event.id });
+    return true;
+  }
+  await trials.recordTrialPurchase({
+    email,
+    amountCents,
+    stripeSessionId: s.id || null,
+    purchasedAt: Date.now(),
+  });
+  await subscriptions.markProcessed(event.id, event.type);
+  console.log('[webhook:stripe] trial started', { email, days, amountCents });
+  return true;
+}
+
 async function handleDispatchRenewal(event, inv) {
   const v = inv || {};
   const plan = subscriptions.planFromCents(Number(v.amount_paid));
@@ -4832,18 +4880,40 @@ async function handleDispatchUpdated(event, sub) {
 // The driver application stays FREE. Dispatch work (routes, service-plan
 // activation) requires an ACTIVE TransitNow dispatch subscription
 // (Basic $50/month or Complete $100/month), tracked in
-// dispatch_subscriptions from Stripe webhook events.
+// dispatch_subscriptions from Stripe webhook events — OR an active $1/day
+// trial (full Complete-level access while trial days remain), tracked in
+// driver_trials from one-time Stripe payment-link webhooks.
+const TRIAL_PAYWALL_COMPLETE_URL = 'https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o';
+
 async function paidDispatchGate(driverId) {
   const driver = await drivers.getDriverById(Number(driverId));
   if (!driver) return { ok: false, driver: null, sub: null, reason: 'not-found' };
   const sub = await subscriptions.getByEmail(driver.email);
   if (sub && sub.status === 'active') return { ok: true, driver, sub, reason: null };
+  // $1/day trial: full Complete-level access while days remain.
+  const trial = await trials.trialInfo(driver.email);
+  if (trial.active) return { ok: true, driver, sub, trial, viaTrial: true, reason: null };
+  // Trial ran out (and no active subscription): dedicated paywall reason so
+  // the driver sees "continue with Complete" instead of the generic page.
+  if (trial.hadTrial) return { ok: false, driver, sub: sub || null, trial, reason: 'trial-expired' };
   return { ok: false, driver, sub: sub || null, reason: sub ? sub.status : 'no-subscription' };
 }
 
 function paidGateHtml(gate) {
   const d = gate.driver;
   const name = d ? `${d.full_name} (${d.email})` : 'This driver';
+  // $1/day trial ran out: paywall pointing at Complete $100/month.
+  // Copy describes access only — never promises work, routes, or hiring.
+  if (gate.reason === 'trial-expired') {
+    return `
+<h2>Your trial days have run out</h2>
+<p><strong>${name}</strong> — your $1/day trial has ended. To keep your profile moving with these companies — guided applications, follow-up coaching, the live hiring directory, and bid access — continue with Complete.</p>
+<p><a class="btn btn-large" href="${TRIAL_PAYWALL_COMPLETE_URL}">CONTINUE WITH COMPLETE — $100/MONTH</a></p>
+<p class="muted">Secure checkout via Stripe. Month-to-month, cancel anytime.</p>
+<p>No action was taken. Once the driver's Complete subscription is active (Stripe notifies us automatically), this action will go through.</p>
+<p><a href="/admin/drivers">&larr; Back to driver pipeline</a></p>
+<p style="color:#888;font-size:12px">TransitNow dispatch is a support service: application guidance and hiring intel only. No guaranteed loads, routes, contracts, work, revenue, or earnings.</p>`;
+  }
   const statusLine = !d
     ? 'Driver not found.'
     : gate.reason === 'no-subscription'
