@@ -197,10 +197,10 @@ function cheatListPage({ site, driver }) {
 <section>
   <h1>Your start-here cheat list</h1>
   <p class="subhead">Work this top to bottom, on your own time. Every step tells you exactly what to do — no waiting on us.</p>
-  ${step(1, 'Upload your documents',
-    `<p>Go to <a href="${docsUrl}">My documents</a> and upload a photo or PDF of each:</p>
-     <ul><li>Driver license</li><li>Vehicle registration</li><li>Insurance (your current card or declarations page)</li></ul>`,
-    'all three show up under My documents.')}
+  ${step(1, 'Upload your verification documents',
+    `<p>Go to <a href="${docsUrl}">My documents</a> and upload a clear photo or PDF of each. The stronger your profile, the stronger your applications:</p>
+     <ul><li><strong>Driver license</strong> (your ID)</li><li><strong>Social Security card</strong> — stored admin-only, never visible in your dashboard</li><li><strong>Vehicle registration</strong></li><li><strong>Insurance card</strong> (or declarations page — you'll confirm 100/300/100 in Step 2)</li><li><strong>Certificates</strong> — your HIPAA and bloodborne-pathogens certificates from Steps 4–5, uploaded as training documents</li><li><strong>Vehicle photos</strong> — a few clear shots of your vehicle, inside and out</li><li><strong>Profile photo</strong> — a clear headshot</li><li><strong>Anything else</strong> that strengthens your profile — extra certifications, a clean driving record, references</li></ul>`,
+    'your document list shows ID, Social Security card (admin-only), registration, insurance, both certificates, vehicle photos, and a profile photo.')}
   ${step(2, 'Confirm your insurance is 100/300/100',
     `<p>Medical courier companies check this. Your auto policy's liability line must read <strong>100/300/100</strong> — $100k per person, $300k per accident, $100k property damage. Find it on your declarations page (the summary sheet from your insurer).</p>
      <p>If yours is lower, call your insurance agent and raise it <em>before</em> you apply — it's a routine change and companies will turn you away without it.</p>`,
