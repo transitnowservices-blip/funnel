@@ -3114,6 +3114,71 @@ app.post('/admin/documents/:id/verify', adminAuth, ah(async (req, res) => {
   res.redirect('/admin/documents');
 }));
 
+// --- Verification tracker (Davena-designed 2026-10-07) --------------------------
+// Live driver x document matrix + CSV export. Watches cheat-list verification
+// uploads as they come in.
+const VERIF_COLS = [
+  { key: 'driver_license', label: 'ID' },
+  { key: 'ssn_card', label: 'Social' },
+  { key: 'vehicle_registration', label: 'Registration' },
+  { key: 'insurance', label: 'Insurance' },
+  { key: 'training_cert', label: 'Certificates' },
+  { key: 'vehicle_photo', label: 'Vehicle photos' },
+  { key: 'profile_photo', label: 'Profile photo' },
+];
+const VERIF_CORE = ['driver_license', 'ssn_card', 'vehicle_registration', 'insurance', 'training_cert'];
+
+async function verificationRows() {
+  const list = await drivers.listDrivers({ limit: 200 });
+  const emails = list.map((d) => String(d.email || '').toLowerCase());
+  const [subsByEmail, trialsByEmail, allDocs] = await Promise.all([
+    subscriptions.mapForEmails(emails),
+    trials.mapForEmails(emails),
+    documentsLib.listDocuments({ ownerType: 'driver' }),
+  ]);
+  const docsByDriver = {};
+  for (const doc of allDocs) {
+    const k = Number(doc.owner_id);
+    if (!docsByDriver[k]) docsByDriver[k] = {};
+    docsByDriver[k][doc.doc_type] = (docsByDriver[k][doc.doc_type] || 0) + 1;
+  }
+  return list.map((d) => {
+    const email = String(d.email || '').toLowerCase();
+    const sub = subsByEmail[email];
+    const trial = trialsByEmail[email];
+    const trialActive = trial && trial.active;
+    const paidActive = sub && sub.status === 'active';
+    const docs = docsByDriver[Number(d.id)] || {};
+    const complete = VERIF_CORE.every((k) => (docs[k] || 0) > 0);
+    return {
+      id: d.id,
+      name: d.full_name || '—',
+      email: d.email || '',
+      planLabel: paidActive ? (sub.plan || 'paid') : (trialActive ? 'trial' : (d.status || '')),
+      docs,
+      complete,
+    };
+  });
+}
+
+app.get('/admin/verification', adminAuth, ah(async (req, res) => {
+  const rows = await verificationRows();
+  res.send(adminViews.adminLayout('Verification tracker', adminViews.verificationHtml({ rows, cols: VERIF_COLS })));
+}));
+
+app.get('/admin/verification.csv', adminAuth, ah(async (req, res) => {
+  const rows = await verificationRows();
+  const q = (v) => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`;
+  const header = ['Driver', 'Email', 'Plan', ...VERIF_COLS.map((c) => c.label), 'Complete'];
+  const lines = [header.map(q).join(',')];
+  for (const r of rows) {
+    lines.push([r.name, r.email, r.planLabel, ...VERIF_COLS.map((c) => r.docs[c.key] || 0), r.complete ? 'yes' : 'no'].map(q).join(','));
+  }
+  res.type('text/csv');
+  res.set('Content-Disposition', 'attachment; filename="verification-tracker.csv"');
+  res.send(lines.join('\n'));
+}));
+
 // --- Contract documents: real upload wired into document management ------------
 app.post('/admin/contracts/:id/documents/upload',
   adminAuth,

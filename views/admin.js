@@ -63,6 +63,7 @@ pre.config-view{background:#f4f4f4;padding:12px;border-radius:6px;overflow:auto;
   <a href="/admin/suppressions">Suppressions</a>
   <a href="/admin/room">Room</a>
   <a href="/admin/drivers">Drivers</a>
+  <a href="/admin/verification">Verification</a>
   <a href="/admin/opportunities">Opportunities</a>
   <a href="/admin/contracts">Contracts</a>
   <a href="/admin/territories">Territories</a>
@@ -588,6 +589,30 @@ function configEnvHtml(envStatus) {
   return `<p class="microcopy">Secret values are never shown in full here — only "set (hidden)" or a short non-secret hint.</p>` + body;
 }
 
+// --- Verification tracker (Davena-designed 2026-10-07) ---------------------------
+// Matrix of drivers x cheat-list verification documents. Updates live as
+// uploads come in. SSN cells show presence only — never a download link.
+function verificationHtml({ rows, cols }) {
+  const cell = (v) => {
+    if (v === 0 || v === null || v === undefined) return '<td class="missing">—</td>';
+    return `<td class="have">✓${v > 1 ? '×' + v : ''}</td>`;
+  };
+  const head = cols.map((c) => `<th>${esc(c.label)}</th>`).join('');
+  const body = rows
+    .map(
+      (r) =>
+        `<tr><td><a href="/admin/drivers/${r.id}">${esc(r.name)}</a><br><span class="microcopy">${esc(r.email || '')}</span></td>` +
+        `<td>${esc(r.planLabel)}</td>` +
+        cols.map((c) => cell(r.docs[c.key] || 0)).join('') +
+        `<td class="${r.complete ? 'have' : 'missing'}">${r.complete ? '✓' : '—'}</td></tr>`
+    )
+    .join('');
+  return `<style>.have{color:#1a7f37;font-weight:700;text-align:center}.missing{color:#cf222e;text-align:center}table.verif{border-collapse:collapse;width:100%}table.verif th,table.verif td{border:1px solid #d0d7de;padding:6px 8px;font-size:13px}table.verif th{background:#f6f8fa}</style>
+<p><a class="btn" href="/admin/verification.csv">Download CSV</a></p>
+<p class="microcopy">Live view — refreshes as members upload. Core set for "complete": ID, Social, Registration, Insurance, and at least one certificate. Social Security cards are admin-only and never linked here.</p>
+<table class="verif"><thead><tr><th>Driver</th><th>Plan</th>${head}<th>Complete</th></tr></thead><tbody>${body}</tbody></table>`;
+}
+
 module.exports = {
   adminLayout,
   dashboardHtml,
@@ -603,4 +628,5 @@ module.exports = {
   dashboardSectionsHtml,
   leadDetailHtml,
   configEnvHtml,
+  verificationHtml,
 };
