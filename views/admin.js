@@ -592,7 +592,7 @@ function configEnvHtml(envStatus) {
 // --- Verification tracker (Davena-designed 2026-10-07) ---------------------------
 // Matrix of drivers x cheat-list verification documents. Updates live as
 // uploads come in. SSN cells show presence only — never a download link.
-function verificationHtml({ rows, cols }) {
+function verificationHtml({ rows, cols, coreKeys, notice }) {
   const cell = (v) => {
     if (v === 0 || v === null || v === undefined) return '<td class="missing">—</td>';
     return `<td class="have">✓${v > 1 ? '×' + v : ''}</td>`;
@@ -604,13 +604,15 @@ function verificationHtml({ rows, cols }) {
         `<tr><td><a href="/admin/drivers/${r.id}">${esc(r.name)}</a><br><span class="microcopy">${esc(r.email || '')}</span></td>` +
         `<td>${esc(r.planLabel)}</td>` +
         cols.map((c) => cell(r.docs[c.key] || 0)).join('') +
-        `<td class="${r.complete ? 'have' : 'missing'}">${r.complete ? '✓' : '—'}</td></tr>`
+        `<td class="${r.complete ? 'have' : 'missing'}"><strong>${r.complete ? 'READY' : 'NEEDS'}</strong>${r.complete ? '' : '<br><span class="microcopy">' + esc(r.needsLabels.join(', ')) + '</span>'}</td>` +
+        `<td>${r.complete || !r.email ? '' : `<form method="POST" action="/admin/verification/remind" style="display:inline"><input type="hidden" name="driver_id" value="${r.id}"><button class="btn" type="submit">Remind</button></form>`}</td></tr>`
     )
     .join('');
   return `<style>.have{color:#1a7f37;font-weight:700;text-align:center}.missing{color:#cf222e;text-align:center}table.verif{border-collapse:collapse;width:100%}table.verif th,table.verif td{border:1px solid #d0d7de;padding:6px 8px;font-size:13px}table.verif th{background:#f6f8fa}</style>
-<p><a class="btn" href="/admin/verification.csv">Download CSV</a></p>
-<p class="microcopy">Live view — refreshes as members upload. Core set for "complete": ID, Social, Registration, Insurance, and at least one certificate. Social Security cards are admin-only and never linked here.</p>
-<table class="verif"><thead><tr><th>Driver</th><th>Plan</th>${head}<th>Complete</th></tr></thead><tbody>${body}</tbody></table>`;
+${notice ? `<div class="card highlight-card"><p>${esc(notice)}</p></div>` : ''}
+<p><a class="btn" href="/admin/verification.csv">Download CSV</a> <form method="POST" action="/admin/verification/remind-all" style="display:inline" onsubmit="return confirm('Email every incomplete member their missing list?')"><button class="btn" type="submit">Remind all incomplete</button></form></p>
+<p class="microcopy">Live view — refreshes as members upload. Core set for READY: ID, Social, Registration, Insurance, and at least one certificate. Social Security cards are admin-only and never linked here. Reminder emails list exactly what's missing with their upload link.</p>
+<table class="verif"><thead><tr><th>Driver</th><th>Plan</th>${head}<th>Status</th><th></th></tr></thead><tbody>${body}</tbody></table>`;
 }
 
 module.exports = {

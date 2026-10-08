@@ -3149,13 +3149,16 @@ async function verificationRows() {
     const trialActive = trial && trial.active;
     const paidActive = sub && sub.status === 'active';
     const docs = docsByDriver[Number(d.id)] || {};
-    const complete = VERIF_CORE.every((k) => (docs[k] || 0) > 0);
+    const needsLabels = VERIF_CORE.filter((k) => !(docs[k] > 0))
+      .map((k) => (VERIF_COLS.find((c) => c.key === k) || {}).label || k);
+    const complete = needsLabels.length === 0;
     return {
       id: d.id,
       name: d.full_name || '—',
       email: d.email || '',
       planLabel: paidActive ? (sub.plan || 'paid') : (trialActive ? 'trial' : (d.status || '')),
       docs,
+      needsLabels,
       complete,
     };
   });
@@ -3163,7 +3166,41 @@ async function verificationRows() {
 
 app.get('/admin/verification', adminAuth, ah(async (req, res) => {
   const rows = await verificationRows();
-  res.send(adminViews.adminLayout('Verification tracker', adminViews.verificationHtml({ rows, cols: VERIF_COLS })));
+  res.send(adminViews.adminLayout('Verification tracker',
+    adminViews.verificationHtml({ rows, cols: VERIF_COLS, coreKeys: VERIF_CORE, notice: req.query.msg || '' })));
+}));
+
+// Reminder emails: explicit admin action only. Nothing auto-sends.
+app.post('/admin/verification/remind', adminAuth, ah(async (req, res) => {
+  const id = Number(req.body.driver_id);
+  if (!id) return res.redirect('/admin/verification');
+  try {
+    const result = await require('./lib/verification').sendReminder(id);
+    const msg = result.sent
+      ? `Reminder sent to ${result.to} — missing: ${result.missing.join(', ')}.`
+      : `No email sent: ${result.reason}.`;
+    res.redirect('/admin/verification?msg=' + encodeURIComponent(msg));
+  } catch (err) {
+    res.redirect('/admin/verification?msg=' + encodeURIComponent('Failed: ' + err.message));
+  }
+}));
+
+app.post('/admin/verification/remind-all', adminAuth, ah(async (req, res) => {
+  const verification = require('./lib/verification');
+  const rows = await verificationRows();
+  let sent = 0;
+  const failed = [];
+  for (const r of rows) {
+    if (r.complete || !r.email) continue;
+    try {
+      const result = await verification.sendReminder(r.id);
+      if (result.sent) sent++;
+    } catch (err) {
+      failed.push(r.email);
+    }
+  }
+  const msg = `Reminders sent to ${sent} member${sent === 1 ? '' : 's'}.${failed.length ? ' Failed: ' + failed.join(', ') : ''}`;
+  res.redirect('/admin/verification?msg=' + encodeURIComponent(msg));
 }));
 
 app.get('/admin/verification.csv', adminAuth, ah(async (req, res) => {
