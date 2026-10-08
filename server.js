@@ -701,6 +701,7 @@ app.get('/trial', ah(async (req, res) => {
       </label>
       <button type="submit" class="btn btn-large">Continue to secure checkout</button>
     </form>
+    <p class="microcopy">Questions or stuck somewhere? Email us at <a href="mailto:transitnowservices@gmail.com">transitnowservices@gmail.com</a> — tell us what's going on and we'll help you get unstuck.</p>
     <p class="microcopy">Secure checkout via Stripe. The trial is application guidance and hiring intel only — TransitNow does not promise or guarantee routes, loads, contracts, work, hiring, earnings, or income. Whether a company approves you depends on your qualifications, availability, and their needs.</p>
   </section>`;
   page(res, 'Start your $1/day trial', body, site, { seo: seo.seoFor('/trial') });
