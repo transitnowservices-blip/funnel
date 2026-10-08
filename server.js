@@ -658,17 +658,8 @@ app.get('/trial', ah(async (req, res) => {
   const tier = ['7', '14', '30'].includes(String(req.query.tier)) ? String(req.query.tier) : '7';
   const days = Number(tier);
   const renewal = trialCheckout.fmtDate(trialCheckout.renewalDate(days));
-  const lead = await leadFromReq(req);
-  if (lead) {
-    await db.run(
-      'INSERT INTO carts (lead_id, visitor_id, product_id, started_at, purchased, recovered) VALUES (?, ?, ?, ?, 0, 0)',
-      [lead.id, req.vid, trials.TRIAL_PRODUCT_ID, Date.now()]
-    );
-    await tags.addTag(lead.id, 'STARTED_CHECKOUT');
-    await tags.addTag(lead.id, 'HIGH_INTENT');
-    await db.recordEvent({ visitor_id: req.vid, lead_id: lead.id, type: 'CHECKOUT_STARTED', product_id: trials.TRIAL_PRODUCT_ID });
-    return res.redirect(302, `/trial/checkout?tier=${tier}&email=${encodeURIComponent(lead.email || '')}`);
-  }
+  // Everyone sees the tier options — no auto-bounce to checkout for known
+  // leads. Lead/cart tracking happens on form submit (POST /trial).
   const body = `<section>
     <h1>Start your $1/day trial</h1>
     <p>Full Complete access — guided applications, follow-up coaching, the live hiring directory, and bid board access. Pick the runway that fits you:</p>
