@@ -3205,6 +3205,14 @@ app.post('/d/:token/documents/upload',
   })
 );
 
+// --- Self-serve onboarding cheat list (Davena-designed 2026-10-07) ----------------
+// Every step finishable alone; support email is the safety net, not the path.
+app.get('/d/:token/cheat-list', requireDriver, ah(async (req, res) => {
+  const site = config.getSite();
+  const driver = req.driver;
+  page(res, 'Start-here cheat list', driverViews.cheatListPage({ site, driver }), site);
+}));
+
 app.get('/d/:token/documents/:id/download', requireDriver, ah(async (req, res) => {
   const doc = await documentsLib.getDocument(req.params.id);
   // Drivers may only ever see/download their OWN non-sensitive documents.

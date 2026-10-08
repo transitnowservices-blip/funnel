@@ -180,6 +180,61 @@ function followupTrainingDashCard(hiringInfo) {
     <p class="microcopy">Training and tools only — whether a company hires you depends on your qualifications and their needs.</p></div>`;
 }
 
+// --- Self-serve onboarding cheat list -------------------------------------------
+// Davena-designed 2026-10-07: every step finishable alone, no dead ends, no
+// waiting on the team. Each step says what to do, where, and what "done"
+// looks like. Support email is the safety net at the bottom, not the path.
+function cheatListPage({ site, driver }) {
+  const docsUrl = '/d/' + driver.access_token + '/documents';
+  const dashUrl = '/d/' + driver.access_token;
+  const step = (n, title, body, done) => `
+    <div class="card">
+      <h3>Step ${n}: ${title}</h3>
+      ${body}
+      <p class="microcopy"><strong>Done looks like:</strong> ${done}</p>
+    </div>`;
+  return `
+<section>
+  <h1>Your start-here cheat list</h1>
+  <p class="subhead">Work this top to bottom, on your own time. Every step tells you exactly what to do — no waiting on us.</p>
+  ${step(1, 'Upload your documents',
+    `<p>Go to <a href="${docsUrl}">My documents</a> and upload a photo or PDF of each:</p>
+     <ul><li>Driver license</li><li>Vehicle registration</li><li>Insurance (your current card or declarations page)</li></ul>`,
+    'all three show up under My documents.')}
+  ${step(2, 'Confirm your insurance is 100/300/100',
+    `<p>Medical courier companies check this. Your auto policy's liability line must read <strong>100/300/100</strong> — $100k per person, $300k per accident, $100k property damage. Find it on your declarations page (the summary sheet from your insurer).</p>
+     <p>If yours is lower, call your insurance agent and raise it <em>before</em> you apply — it's a routine change and companies will turn you away without it.</p>`,
+    'your declarations page shows 100/300/100 and the card is uploaded.')}
+  ${step(3, 'Know this: bigger vehicle, bigger pay',
+    `<p>You can run with any vehicle — car, SUV, van, cargo van, sprinter, box truck. But the bigger the vehicle, the better the pay gets: you're moving more at a time. Keep this in mind when you look at the hiring list — and if you ever upgrade vehicles, tell us so we can re-verify your list.</p>`,
+    'you know where you stand and what an upgrade would unlock.')}
+  ${step(4, 'Get HIPAA certified — free',
+    `<p>Go to <a href="https://hipaatraining.us" target="_blank" rel="noopener">HIPAA Training US</a>. Training is free and the certificate is free. Takes about an hour, self-paced, on your phone.</p>
+     <p>Save the certificate file somewhere you can find it — you'll upload it in Step 1's spot under <a href="${docsUrl}">My documents</a> as a training document.</p>`,
+    'you hold a HIPAA certificate with your name on it.')}
+  ${step(5, 'Get bloodborne-pathogens certified — about $8–10',
+    `<p>Go to <a href="https://acebloodbornepathogenstraining.com/?p=2636" target="_blank" rel="noopener">ACE Bloodborne Pathogens Training</a>. It's OSHA-compliant (the 29 CFR 1910.1030 standard employers recognize), takes under an hour, and your certificate downloads instantly.</p>
+     <p><strong>Don't substitute a random free certificate here.</strong> Employers check for the OSHA standard by name — a non-compliant cert gets your application tossed and wastes everyone's time, including yours. The $8–10 is the cheapest insurance on this list.</p>
+     <p>Save the certificate and upload it under <a href="${docsUrl}">My documents</a> as a training document.</p>`,
+    'you hold an OSHA-compliant bloodborne-pathogens certificate.')}
+  ${step(6, 'Open your hiring list',
+    `<p>Back on your <a href="${dashUrl}">dashboard</a>, your hiring list shows medical courier companies, labs, and delivery services hiring now — verified fresh when you joined. Start at the top of the list.</p>`,
+    'you have 3–5 target companies picked out.')}
+  ${step(7, 'Apply using the scripts — don\'t wing it',
+    `<p>For every application, use the follow-up toolkit on your dashboard: the scripts, email templates, and per-application checklists. They exist because the wording matters — "I have a car" gets ignored, the script gets answered.</p>`,
+    'every application went out with the toolkit wording, not off the top of your head.')}
+  ${step(8, 'Follow up until you\'re hired',
+    `<p>One application is not the job. Follow up with each company using the follow-up scripts. If the answer is no, run the "why wasn't I picked" script — a no educates you for the next one.</p>`,
+    'every company on your list has heard from you at least twice.')}
+  <div class="card highlight-card">
+    <h3>Stuck on a step?</h3>
+    <p>Email <a href="mailto:transitnowservices@gmail.com">transitnowservices@gmail.com</a> — tell us which step and what's going on, and we'll get you unstuck.</p>
+  </div>
+  <p class="microcopy">Application guidance and hiring intel only — TransitNow does not promise or guarantee routes, loads, contracts, work, hiring, earnings, or income. Whether a company approves you depends on your qualifications, availability, and their needs.</p>
+  <p><a href="${dashUrl}">&larr; Back to dashboard</a></p>
+</section>`;
+}
+
 // --- Private operations assistant (Complete tier) ---------------------------------
 // Only rendered for ACTIVE Complete subscribers — Basic and unpaid drivers
 // never see it. Public copy never names the AI or any vendor/model.
@@ -316,6 +371,7 @@ function dashboardPage({ site, driver, dashUrl, hiringInfo = null, assistantInfo
   };
   const step = nextSteps[driver.status] || nextSteps.new;
   const cards = [
+    ['Start-here cheat list', '/d/' + driver.access_token + '/cheat-list', 'Your step-by-step onboarding — work it alone, no waiting.', true],
     ['My route', '/d/' + driver.access_token + '/route', 'Your assigned route and stops.', driver.status === 'active'],
     ['Packages', '/d/' + driver.access_token + '/packages', 'Packages assigned to you.', true],
     ['Scan a package', '/d/' + driver.access_token + '/scan', 'Scan barcodes at pickup and delivery.', true],
@@ -814,7 +870,7 @@ function planPage({ driver, plans, settings, currentPlanId, pendingRequest, hist
 </section>`;
 }
 
-module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, planPage, selectField, textField, checkboxGroup, driverApplyPage, driverApplyDonePage, goLivePage, liveSessionPage, providerBannerHtml };
+module.exports = { onboardPage, onboardDonePage, dashboardPage, driverRoutePage, driverPackagesPage, scanPage, scanResultPage, driverPackagePage, exceptionFormPage, supportPage, ticketDetailPage, communityPage, communityPostPage, planPage, selectField, textField, checkboxGroup, driverApplyPage, driverApplyDonePage, goLivePage, liveSessionPage, providerBannerHtml, cheatListPage };
 
 // --- Phase 2: extended driver application (/drivers/apply/:token) -----------------
 // Token-scoped: operations shares this link with a specific candidate once an
