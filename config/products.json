@@ -32,9 +32,9 @@
           "Communication setup with brokers and shippers so nothing falls through the cracks",
           "Plus everything in TransitNow Basic: operator onboarding, carrier/business and vehicle info review, basic dispatch setup, and ongoing dispatch support"
         ],
-        "cta": "Start With Complete Dispatch — $100/month",
-        "headline": "Stay Ready So You Don't Have To Get Ready.",
-        "subhead": "Complete dispatch support for independent courier and box-truck operators: we handle the back office — lane research, load-search prep, broker verification, paperwork, and scheduling coordination — so you can focus on the road."
+        "cta": "Start With Complete Dispatch \u2014 $100/month",
+        "headline": "Dispatch that hunts while you drive.",
+        "subhead": "Complete dispatch support for independent courier and box-truck operators: we handle the back office \u2014 lane research, load-search prep, broker verification, paperwork, and scheduling coordination \u2014 so you can focus on the road."
       },
       "stripeLink": "https://buy.stripe.com/4gM4gA3qR6Ws5wt4gR0480o",
       "upsell1": {
@@ -55,7 +55,7 @@
       }
     },
     {
-      "_exampleNote": "WORKED EXAMPLE — this entry shows how to add a second offer. It is real TransitNow data (TransitNow Basic Dispatch, $50/month recurring), flagged \"example\": true so the app can treat it as a reference copy of the pattern. To add a real second offer: copy this object, change the id and fields, and set or remove the \"example\" flag according to the app's convention.",
+      "_exampleNote": "WORKED EXAMPLE \u2014 this entry shows how to add a second offer. It is real TransitNow data (TransitNow Basic Dispatch, $50/month recurring), flagged \"example\": true so the app can treat it as a reference copy of the pattern. To add a real second offer: copy this object, change the id and fields, and set or remove the \"example\" flag according to the app's convention.",
       "billing": "recurring-monthly",
       "example": true,
       "id": "transitnow-basic",
@@ -82,7 +82,7 @@
           "Basic dispatch setup for your first routes",
           "Ongoing dispatch support while you run"
         ],
-        "cta": "Start With Basic Dispatch — $50/month",
+        "cta": "Start With Basic Dispatch \u2014 $50/month",
         "headline": "Dispatch Support That Starts With the Basics.",
         "subhead": "A lighter-touch monthly plan for independent couriers who want help getting set up and supported without the full Complete package."
       },
@@ -125,7 +125,7 @@
           "Private community: questions, wins, and support",
           "Direct announcements and teaching from Davena"
         ],
-        "cta": "Join the Room — $49/month"
+        "cta": "Join the Room \u2014 $49/month"
       },
       "orderBump": {
         "enabled": false,
