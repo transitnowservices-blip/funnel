@@ -662,7 +662,7 @@ app.get('/trial', ah(async (req, res) => {
   // leads. Lead/cart tracking happens on form submit (POST /trial).
   const body = `<section>
     <h1>Start your $1/day trial</h1>
-    <p>Full Complete access — guided applications, follow-up coaching, the live hiring directory, and bid board access. Pick the runway that fits you:</p>
+    <p>Complete access — guided applications, follow-up coaching, the live hiring directory, and bid-board access. Pick the runway that fits you:</p>
     <div class="trial-tiers">
       ${['7', '14', '30'].map(t => {
         const d = Number(t);
@@ -672,7 +672,7 @@ app.get('/trial', ah(async (req, res) => {
           <h3>${t} days — $${t}</h3>
           <p>$${t} today. Then $100/month starting ${r} unless you cancel.</p>
           ${t === tier
-            ? `<p class="microcopy"><strong>Selected.</strong> Full Complete access while your trial days are active.</p>`
+            ? `<p class="microcopy"><strong>Selected.</strong> Full access while your trial days are active.</p>`
             : `<p><a class="btn" href="/trial?tier=${t}">Choose ${t} days</a></p>`}
         </div>`;
       }).join('')}
@@ -680,7 +680,7 @@ app.get('/trial', ah(async (req, res) => {
     <div class="card">
       <h2>$1/Day Trial — Complete Access (${tier} days)</h2>
       <p class="price-line">$${tier} today. Then $100/month starting ${renewal} unless you cancel.</p>
-      <p class="microcopy"><strong>How billing works:</strong> you pay $${tier} today and put a card on file. If you do nothing, your plan continues at $100/month from ${renewal}. Cancel anytime before then and you pay nothing more — you keep your full ${tier} days either way.</p>
+      <p class="microcopy"><strong>How billing works:</strong> You pay $${tier} today and put a card on file. If you do nothing, your plan continues at $100/month from ${renewal}. Cancel anytime before then and you pay nothing more — you keep your full ${tier} days either way.</p>
     </div>
     <form method="POST" action="/trial" class="form">
       <input type="hidden" name="tier" value="${esc(tier)}">
