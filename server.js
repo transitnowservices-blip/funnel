@@ -1958,6 +1958,98 @@ app.get('/free-bid/show', ah(async (req, res) => {
     phase6Views.freeBidShowHtml({ opp, isSample }), config.getSite());
 }));
 
+// --- Training Academy completion intake: /training/complete (additive) --------
+// Drivers paste their scored completion summary here instead of relying only
+// on a screenshot + text to dispatch. The submission lands in the SAME lead
+// store as /free-bid and /grow (opportunity_leads, lead_type 'GROW'): a new
+// lead is created with source 'training'; an existing lead is NEVER
+// overwritten — the completion is appended to lead_communications and the
+// TRAINING tag is added instead. Scores >= 80% earn a certificate for the
+// driver's personnel file (dispatch prepares it from the stored summary).
+const TRAINING_MODULES = [
+  'Module 1 — Medical Courier Readiness',
+  'Module 2 — HIPAA & Patient Privacy Essentials',
+  'Module 3 — Bloodborne Pathogens & Safe Handling',
+  'Module 4 — Pre-Trip Inspection & Vehicle Readiness',
+  'Module 5 — Defensive Driving & Road Safety',
+  'Module 6 — Dispatch Communication & Professional Conduct',
+  'Module 7 — Pilot Car Escort — Chase Driver',
+];
+
+app.get('/training/complete', (req, res) => {
+  page(res, 'Send your completion summary — Training Academy',
+    phase6Views.trainingCompleteFormHtml({}), config.getSite());
+});
+
+app.post('/training/complete', growLimiter, ah(async (req, res) => {
+  const b = req.body || {};
+  const fullName = grow.str(b.full_name, 160);
+  const rawEmail = String(b.email || '').trim().toLowerCase().slice(0, 254);
+  const phone = grow.str(b.phone, 40);
+  const moduleName = TRAINING_MODULES.includes(String(b.module || '')) ? String(b.module) : '';
+  const scoreText = String(b.score == null ? '' : b.score).trim();
+  const score = /^\d{1,3}$/.test(scoreText) ? Number(scoreText) : NaN;
+  const summary = grow.str(b.summary, 8000);
+  const consent = b.marketing_consent === '1' || b.marketing_consent === 'on';
+  const values = {
+    full_name: fullName, email: String(b.email || '').slice(0, 254), phone,
+    module: moduleName, score: scoreText, summary, marketing_consent: consent,
+  };
+  const errors = [];
+  if (!fullName) errors.push('Please enter your full name.');
+  if (!grow.EMAIL_RE.test(rawEmail)) errors.push('Please enter a valid email address.');
+  if (!phone) errors.push('Please enter your phone number.');
+  if (!moduleName) errors.push('Please choose the module you completed.');
+  if (!Number.isInteger(score) || score < 0 || score > 100) errors.push('Please enter your score as a whole number from 0 to 100.');
+  if (summary.length < 10) errors.push('Please paste your full completion summary.');
+  if (errors.length) {
+    res.status(400);
+    return page(res, 'Send your completion summary — Training Academy',
+      phase6Views.trainingCompleteFormHtml({ error: errors.join(' '), values }), config.getSite());
+  }
+  const nameParts = fullName.split(/\s+/);
+  const firstName = nameParts[0];
+  const lastName = nameParts.slice(1).join(' ');
+  // Same guard as /free-bid: never call upsertLead on an existing lead — its
+  // update branch would blank fields this form does not collect.
+  let lead = await grow.findLeadByEmail(rawEmail, 'GROW');
+  if (!lead) {
+    const r = await grow.upsertLead('GROW', {
+      first_name: firstName, last_name: lastName, email: rawEmail, phone,
+      source: 'training', marketing_consent: consent,
+    });
+    lead = r.lead;
+  } else if (consent && !lead.marketing_consent) {
+    try {
+      await db.run('UPDATE opportunity_leads SET marketing_consent = 1, marketing_consent_ts = ? WHERE id = ?',
+        [Date.now(), lead.id]);
+    } catch (e) { /* non-blocking */ }
+  }
+  const passed = score >= 80;
+  try {
+    await db.run(
+      `INSERT INTO lead_communications (lead_id, kind, subject, body, direction, ts)
+       VALUES (?, 'note', ?, ?, 'inbound', ?)`,
+      [lead.id,
+        `Training completion — ${moduleName} (${score}%)`,
+        `Module: ${moduleName}\nScore: ${score}% (${passed ? 'PASS — certificate to prepare for personnel file' : 'below 80% — module re-run needed'})\nSubmitted via /training/complete.\n\n--- Completion summary ---\n${summary}`,
+        Date.now()]
+    );
+  } catch (e) { /* the lead itself is saved; the note is best-effort */ }
+  try { await grow.addLeadTags(lead.id, ['TRAINING']); } catch (e) { /* best-effort */ }
+  try {
+    const src = await db.get('SELECT * FROM lead_sources WHERE lead_id = ? ORDER BY id DESC LIMIT 1', [lead.id]);
+    if (!src) {
+      await db.run('INSERT INTO lead_sources (lead_id, source, created_at) VALUES (?, ?, ?)',
+        [lead.id, 'training', Date.now()]);
+    }
+    // Existing attribution rows are left alone — training never overwrites
+    // where a lead originally came from.
+  } catch (e) { /* attribution link is best-effort here */ }
+  page(res, 'Summary received — Training Academy',
+    phase6Views.trainingCompleteThanksHtml({ passed, module: moduleName, firstName }), config.getSite());
+}));
+
 // --- /business funnel (spec section 29) ---
 app.get('/business', (req, res) => {
   page(res, 'Businesses — TransitNow', growViews.businessPage({ query: req.query }), config.getSite(), { seo: seo.seoFor('/business') });

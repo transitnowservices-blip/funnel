@@ -514,11 +514,105 @@ function freeBidShowHtml({ opp, isSample = false }) {
 </section>`;
 }
 
+// --- Driver Training Academy completion intake (public) -----------------------
+// A driver who finished a module pastes their completion summary here instead
+// of (or in addition to) screenshotting + texting it. The submission is stored
+// on their funnel lead (tagged source 'training'); an 80%+ score earns a
+// print-ready certificate for their personnel file.
+const TRAINING_MODULES = [
+  'Module 1 — Medical Courier Readiness',
+  'Module 2 — HIPAA & Patient Privacy Essentials',
+  'Module 3 — Bloodborne Pathogens & Safe Handling',
+  'Module 4 — Pre-Trip Inspection & Vehicle Readiness',
+  'Module 5 — Defensive Driving & Road Safety',
+  'Module 6 — Dispatch Communication & Professional Conduct',
+  'Module 7 — Pilot Car Escort — Chase Driver',
+];
+
+function trainingCompleteFormHtml({ error = '', values = {} } = {}) {
+  const v = values || {};
+  const options = TRAINING_MODULES.map((m) =>
+    `<option value="${escAttr(m)}"${v.module === m ? ' selected' : ''}>${esc(m)}</option>`).join('');
+  return `
+<section>
+  <p class="eyebrow">TransitNow Driver Training Academy</p>
+  <h1>Send dispatch your completion summary</h1>
+  <div class="card">
+    <p class="lede">Finished a module? Paste your completion summary below and it goes straight onto your driver file — no screenshot needed. Score 80% or better and we prepare your print-ready certificate for your personnel file.</p>
+    ${error ? `<p class="form-error" role="alert">${esc(error)}</p>` : ''}
+    <form method="POST" action="/training/complete" class="form">
+      <div class="grow-field">
+        <label for="tc-name">Full name</label>
+        <input id="tc-name" type="text" name="full_name" required maxlength="160"
+          value="${escAttr(v.full_name || '')}" placeholder="Your name as it appears on your summary" autocomplete="name">
+      </div>
+      <div class="grow-field">
+        <label for="tc-email">Email address</label>
+        <input id="tc-email" type="email" name="email" required maxlength="254"
+          value="${escAttr(v.email || '')}" placeholder="you@example.com" autocomplete="email">
+      </div>
+      <div class="grow-field">
+        <label for="tc-phone">Phone number</label>
+        <input id="tc-phone" type="tel" name="phone" required maxlength="40"
+          value="${escAttr(v.phone || '')}" placeholder="(414) 555-0123" autocomplete="tel">
+      </div>
+      <div class="grow-field">
+        <label for="tc-module">Module completed</label>
+        <select id="tc-module" name="module" required>
+          <option value="">Choose the module…</option>
+          ${options}
+        </select>
+      </div>
+      <div class="grow-field">
+        <label for="tc-score">Your score (%)</label>
+        <input id="tc-score" type="number" name="score" required min="0" max="100" step="1"
+          value="${escAttr(v.score == null ? '' : String(v.score))}" placeholder="e.g. 92">
+      </div>
+      <div class="grow-field">
+        <label for="tc-summary">Paste your completion summary</label>
+        <textarea id="tc-summary" name="summary" required rows="8" maxlength="8000"
+          placeholder="Paste the full completion summary from the end of your training session here…">${esc(v.summary || '')}</textarea>
+      </div>
+      <label class="marketing-consent checkbox">
+        <input type="checkbox" name="marketing_consent" value="1"${v.marketing_consent ? ' checked' : ''}>
+        <span>Also email me when new bids and routes post (optional).</span>
+      </label>
+      <button type="submit" class="btn btn-large">Send my summary to dispatch</button>
+    </form>
+    <p class="microcopy">Rather text it? Screenshot your summary and send it to (414) 897-3282 — either way lands on your file. Training summaries are readiness records, not certifications.</p>
+  </div>
+</section>`;
+}
+
+function trainingCompleteThanksHtml({ passed = false, module = '', firstName = '' } = {}) {
+  const who = firstName ? `, ${esc(firstName)}` : '';
+  const certBlock = passed
+    ? `<p><strong>Your score passed the 80% standard.</strong> Dispatch will prepare your print-ready certificate for <strong>${esc(module)}</strong> and add it to your personnel file.</p>`
+    : `<p><strong>Your summary is on file.</strong> This score is below the 80% pass standard, so this module doesn't earn its certificate yet — no problem: just re-run the module in a fresh AI chat, beat 80%, and send the new summary the same way.</p>`;
+  return `
+<section>
+  <p class="eyebrow">TransitNow Driver Training Academy</p>
+  <h1>Summary received${who}</h1>
+  <div class="card" style="margin-bottom:12px">
+    ${certBlock}
+    <p class="microcopy">You can close this page — dispatch has everything. Questions? Call or text (414) 897-3282.</p>
+  </div>
+  <div class="card highlight-card">
+    <h3>Turn your training into income</h3>
+    <p>The training is free — the <strong>work</strong> goes to members. Start your $1/day trial and get cleared to run: bids, dedicated routes, and STAT runs go to board members first.</p>
+    <p><a class="btn btn-large" href="/trial">Start my $1/day trial</a></p>
+    <p class="microcopy">$7 for 7 days · $14 for 14 days · $30 for 30 days — full Complete access. Auto-converts to $100/month unless you cancel. TransitNow does not promise or guarantee hires, routes, loads, contracts, work, earnings, or income.</p>
+  </div>
+</section>`;
+}
+
 module.exports = {
   referralsAdminHtml,
   refGateHtml,
   freeBidGateHtml,
   freeBidShowHtml,
+  trainingCompleteFormHtml,
+  trainingCompleteThanksHtml,
   alertsAdminHtml,
   documentsAdminHtml,
   leadFollowupHtml,
