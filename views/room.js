@@ -33,6 +33,7 @@ function roomLayout({ title, member, body }) {
     ? `<nav class="room-nav">
         <a href="/room">Dashboard</a>
         <a href="/room/classroom">Classroom</a>
+        <a href="/room/howto">How To</a>
         <a href="/room/plan">90-Day Plan</a>
         <a href="/room/progress">My Progress</a>
         <a href="/room/community">Community</a>
@@ -765,9 +766,54 @@ ${accountabilityHtml(accountability)}
 <p class="muted">Lesson content: edit the Markdown files in <code>content/room/lessons/</code> (one per pillar) and the 90-day plan in <code>content/room/plan.json</code>. Changes go live on the next page load — no restart needed.</p>`;
 }
 
+// --- How To tab (additive, Nov 1 2026) -------------------------------------------
+// The How To Room shelves inside the Wealth Builder's Room. Plays are
+// listed by upgrade shelf ($49 / $99 / $199, one-time). The upgrade
+// chance is shown on every shelf, always. Checkout buttons render only
+// when Davena has configured that shelf's Stripe link (HOWTO_SHELF*_URL);
+// otherwise an honest "opens shortly" note — never a dead button.
+function howtoPage({ member, shelves }) {
+  const shelfCards = (shelves || []).map((s) => {
+    const plays = (s.plays || []).map((p) => `
+      <div class="check-item"${p.featured ? '' : ''}>
+        <div>
+          <label style="font-weight:700">${esc(p.title)}</label>
+          <p class="muted" style="margin:2px 0 0">${esc(p.note || '')}</p>
+        </div>
+      </div>`).join('');
+    const cta = s.checkoutUrl
+      ? `<p><a class="btn ${s.id === 'shelf-199' ? 'btn-gold' : ''}" href="${esc(s.checkoutUrl)}">Upgrade — ${esc(s.priceDisplay)} one-time</a></p>`
+      : `<p class="muted">Checkout for this shelf opens shortly — members will get the upgrade link by email. The chance to upgrade stays right here, always.</p>`;
+    return `<div class="card">
+      <p class="pillar-num">${esc(s.priceDisplay)} · one-time upgrade</p>
+      <h3 style="margin-top:2px">${esc(s.name)}</h3>
+      <p>${esc(s.tagline)}</p>
+      ${plays}
+      ${cta}
+    </div>`;
+  }).join('');
+  return roomLayout({
+    title: 'How To',
+    member,
+    body: `<h1>The How To Room</h1>
+<p>Live sessions that teach one money play at a time, start to finish — taught the way Davena learned them: <em>“I did it like this, and that's how it turned out. Then I did it like that, and this is how that turned out. The one I like better is the one that got better results.”</em></p>
+<p>Everything lives here in tabs for you to choose from. Learning a shelf of plays is an upgrade — and the chance to upgrade is always in front of you. Pick your shelf:</p>
+<div class="pillar-grid">
+${shelfCards}
+</div>
+<div class="card">
+  <h3>Next live session</h3>
+  <p><strong>Session 1: How to Make Amazon Books for This 4th Quarter</strong> — Thursday, November 5, 2026, 7:00 PM CT. Free to attend live; the replay and workbook unlock on the $99 shelf, and the $199 shelf adds hand-holding until your book is live.</p>
+  <p><a class="btn" href="/howto">Register free for Session 1</a></p>
+</div>
+<p class="muted">Education only — no income, earnings, sales, or specific results are promised or guaranteed. Each upgrade is a one-time charge; your Room membership stays $49/month.</p>`,
+  });
+}
+
 module.exports = {
   esc,
   roomLayout,
+  howtoPage,
   loginPage,
   claimPage,
   forgotPage,

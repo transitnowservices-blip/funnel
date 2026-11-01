@@ -34,6 +34,7 @@ const content = require('./lib/content');
 const subscriptions = require('./lib/subscriptions');
 const trials = require('./lib/trials');
 const trialCheckout = require('./lib/trialCheckout');
+const howto = require('./lib/howto');
 const tracking = require('./lib/tracking');
 const automation = require('./lib/automation');
 const room = require('./lib/room');
@@ -772,6 +773,115 @@ app.get('/trial/success', ah(async (req, res) => {
 }));
 
 /**
+ * The How To Room — Session 1 front door (additive, Nov 1 2026).
+ * Free registration for the live session "How to Make Amazon Books for
+ * This 4th Quarter" (Thu Nov 5, 2026, 7:00 PM CT). Mirrors the /trial
+ * capture pattern: email + first name -> lead (source 'howto-session-1')
+ * -> the 'howtoRegistered' confirmation email is queued and the three
+ * event-anchored reminders follow from the scheduler
+ * (automation.queueHowtoReminders). Confirmation page follows the
+ * pattern Davena chose: 80% progress bar, welcome-video slot, and
+ * Step 1 "Add the Event to Your Calendar" (meeting link inside the
+ * calendar event). No charge, nothing promised — education only.
+ */
+app.get('/howto', ah(async (req, res) => {
+  const site = config.getSite();
+  const s = howto.SESSION;
+  const body = `<section>
+    <h1>The How To Room — Session 1</h1>
+    <p class="price-line">${esc(s.title)}</p>
+    <p><strong>${esc(s.whenText)}</strong> · Live on video · Free to attend</p>
+    <div class="card">
+      <h2>What you will learn</h2>
+      <ul>
+        <li>Which books actually sell in the 4th quarter — planners, prayer journals, gratitude journals, devotionals, kids' activity books</li>
+        <li>How to pick YOUR book: one niche, one buyer, one promise — your book comes out of your own journey</li>
+        <li>Building the inside free in Canva, and a cover that sells it</li>
+        <li>Uploading to Amazon KDP step by step — Amazon prints and ships every order; you stock nothing</li>
+        <li>Keywords, categories, and gift-season pricing, plus the Q4 deadline calendar</li>
+      </ul>
+      <p class="microcopy">This is a live training and there are <strong>no replays</strong> — register now and add it to your calendar on the next page so you don't miss it.</p>
+    </div>
+    <form method="POST" action="/howto" class="form">
+      <label>Email
+        <input type="email" name="email" required placeholder="you@example.com" autocomplete="email">
+      </label>
+      <label>First name
+        <input type="text" name="first_name" placeholder="First name" autocomplete="given-name">
+      </label>
+      <button type="submit" class="btn btn-large">Save my seat</button>
+    </form>
+    <p class="microcopy">Showing you, through the will of God, how to create your own book. No two are the same — each journey will be, and is, different. If that's you — this is the room for you.</p>
+    <p class="microcopy">Education only. Nothing here promises income, sales, or results — your book's outcome depends on your own work and the market.</p>
+  </section>`;
+  page(res, 'How To Room — Session 1: Amazon Books for Q4', body, site, { seo: seo.seoFor('/howto') });
+}));
+
+app.post('/howto', ah(async (req, res) => {
+  const site = config.getSite();
+  const emailAddr = (req.body.email || '').trim().toLowerCase();
+  const firstName = (req.body.first_name || '').trim();
+  if (!EMAIL_RE.test(emailAddr)) {
+    res.status(400);
+    return page(res, 'How To Room — Session 1',
+      `<section><h1>Save your seat</h1><p class="error">Please provide a valid email address to continue.</p><p><a class="btn" href="/howto">Back</a></p></section>`,
+      site);
+  }
+  const howtoProduct = { id: howto.SESSION.id, name: 'How To Room — Session 1' };
+  const lead = await identifyLead(req, res, { first_name: firstName, email: emailAddr, source: howto.SESSION.source }, howtoProduct, null);
+  await tags.addTag(lead.id, 'HOWTO_SESSION_1');
+  await db.recordEvent({
+    visitor_id: req.vid, lead_id: lead.id, type: 'howto_registered',
+    product_id: howto.SESSION.id, meta: { source: howto.SESSION.source },
+  });
+  await automation.scheduleSequence(lead.id, howto.SESSION.id, 'howtoRegistered');
+  return res.redirect(302, '/howto/confirm');
+}));
+
+app.get('/howto/confirm', ah(async (req, res) => {
+  const site = config.getSite();
+  const s = howto.SESSION;
+  const videoUrl = howto.welcomeVideoUrl();
+  const videoHtml = videoUrl
+    ? (/\.mp4($|\?)/i.test(videoUrl)
+        ? `<video controls playsinline style="width:100%;border-radius:12px;background:#000" src="${esc(videoUrl)}"></video>`
+        : `<div style="position:relative;padding-top:56.25%"><iframe src="${esc(videoUrl)}" style="position:absolute;inset:0;width:100%;height:100%;border:0;border-radius:12px" allow="accelerometer; autoplay; encrypted-media; picture-in-picture" allowfullscreen title="Welcome from Davena"></iframe></div>`)
+    : `<div class="card" style="text-align:center;padding:32px 20px">
+        <p class="price-line">Davena's welcome video is on its way</p>
+        <p>She's recording a short hello for everyone registered — watch for it in your email before Thursday.</p>
+      </div>`;
+  const body = `<section>
+    <p style="letter-spacing:.12em;font-weight:700;color:#6b7280;margin-bottom:4px">YOU'RE ALMOST DONE!</p>
+    <p style="text-align:right;font-weight:800;margin:0 0 6px">80% Complete</p>
+    <div style="background:#e9e2d2;border-radius:8px;height:18px;overflow:hidden;margin:0 0 24px">
+      <div style="background:#1c2430;height:100%;width:80%"></div>
+    </div>
+    <h1>You're registered — one step left</h1>
+    <h2>Watch This Video Now</h2>
+    ${videoHtml}
+    <div class="card" style="margin-top:28px">
+      <p class="pillar-num" style="font-size:28px;font-weight:800">1</p>
+      <h2 style="margin-top:0">Add the Event to Your Calendar</h2>
+      <p><strong>${esc(s.title)}</strong><br>${esc(s.whenText)}</p>
+      <p>This is a live virtual training and there are <strong>no replays</strong> — so make sure you add the event to your calendar right now. (The meeting link is also inside the calendar event.)</p>
+      <p>
+        <a class="btn btn-large" href="/howto/calendar.ics">📅 Add to Your Calendar (.ics)</a>
+        <a class="btn" href="${esc(howto.googleCalendarUrl())}" target="_blank" rel="noopener">Add to Google Calendar</a>
+      </p>
+      <p class="microcopy">Your confirmation email is on its way too, with reminders the day before, an hour before, and when we go live.</p>
+    </div>
+    <p class="microcopy">Education only — no income, sales, or results are promised or guaranteed.</p>
+  </section>`;
+  page(res, "You're almost done — How To Room Session 1", body, site, { seo: seo.seoFor('/howto/confirm') });
+}));
+
+app.get('/howto/calendar.ics', (req, res) => {
+  res.setHeader('Content-Type', 'text/calendar; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="howto-session-1.ics"');
+  res.send(howto.buildIcs());
+});
+
+/**
  * Self-serve subscription management. With a Stripe customer id on file and
  * the API key configured, redirects to the Stripe customer portal (cancel /
  * update card). Otherwise shows the "text Davena" fallback — never a dead end.
@@ -1342,6 +1452,13 @@ app.get('/room', requireRoomMember(async (req, res) => {
 // Classroom
 app.get('/room/classroom', requireRoomMember(async (req, res) => {
   res.send(roomViews.classroomIndexPage({ member: req.roomMember, pillars: room.getPillars() }));
+}));
+
+// How To tab — the How To Room shelves inside the Wealth Builder's Room
+// (additive, Nov 1 2026). Lists the plays by upgrade shelf; shelf
+// checkout buttons appear only when the shelf's Stripe link is set.
+app.get('/room/howto', requireRoomMember(async (req, res) => {
+  res.send(roomViews.howtoPage({ member: req.roomMember, shelves: howto.shelvesWithCheckout() }));
 }));
 
 app.get('/room/classroom/:pillar', requireRoomMember(async (req, res) => {

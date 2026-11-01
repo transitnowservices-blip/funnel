@@ -2,6 +2,34 @@
   "fromEmail": "transitnowservices@gmail.com",
   "fromName": "TransitNow Logistics Services",
   "sequences": {
+    "howtoRegistered": [
+      {
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>You're registered for <strong>How To Room — Session 1: How to Make Amazon Books for This 4th Quarter</strong>.</p><p><strong>Thursday, November 5, 2026 · 7:00–8:30 PM CT.</strong> Live on video — and there are no replays, so the one thing left to do is simple: <strong>add the event to your calendar</strong> from your confirmation page. The meeting link rides inside the calendar event, so one tap puts you in the room on Thursday.</p><p>What we'll do together: pick the right book, build the inside free, make the cover, upload it to Amazon KDP step by step, and set keywords and gift-season pricing. Showing you, through the will of God, how to create your <em>own</em> book — no two are the same, because each journey is different.</p><p>Bring a notebook, and the book idea that's been sitting in your spirit.</p><p>— Davena Blue, The How To Room · {{business_phone}}</p>",
+        "delayHours": 0,
+        "id": "howto-registered",
+        "subject": "You're registered — Session 1: How to Make Amazon Books for This 4th Quarter"
+      }
+    ],
+    "howtoReminders": [
+      {
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>Tomorrow night — <strong>Thursday, 7:00 PM CT</strong> — we build Amazon books live in the How To Room.</p><p>Two minutes of prep tonight:</p><ul><li>Open your calendar event and check the meeting link is there — that's your door into the room.</li><li>Have a free Canva account ready (canva.com) — we build the book's inside there.</li><li>Settle on your idea: one niche, one buyer, one promise. A prayer journal, a gratitude journal, a 2027 planner, a kids' activity book — your book comes out of your journey.</li></ul><p>There are no replays. See you tomorrow, live.</p><p>— Davena Blue, The How To Room · {{business_phone}}</p>",
+        "delayHours": -24,
+        "id": "howto-day-before",
+        "subject": "Tomorrow night: your Amazon book session"
+      },
+      {
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>One hour out. <strong>Session 1 starts at 7:00 PM CT.</strong></p><p>Open the calendar event you added — the meeting link is inside it. Notebook out, Canva tab open, water nearby. We start on time.</p><p>— Davena Blue, The How To Room</p>",
+        "delayHours": -1,
+        "id": "howto-hour-before",
+        "subject": "1 hour to Session 1 — How to Make Amazon Books"
+      },
+      {
+        "bodyHtml": "<p>Hi {{first_name}},</p><p>The How To Room is <strong>live right now</strong>. Join through the meeting link in your calendar event — once the teaching starts, we don't stop to let latecomers catch up, and there are no replays.</p><p>Come on in: your book is tonight.</p><p>— Davena Blue, The How To Room</p>",
+        "delayHours": 0,
+        "id": "howto-live-now",
+        "subject": "We're live — Session 1 starts now"
+      }
+    ],
     "abandonedCart": [
       {
         "bodyHtml": "<p>Hi {{first_name}},</p><p>You started the checkout for <strong>{{product_name}}</strong> ({{price}}/month) but didn't finish — that happens.</p><p>Quick reminder of what you were getting: the live hiring list of 150+ companies (re-verified when you join), the certification and readiness checklist, and coaching through your applications.</p><p>If you still want in, you can pick up right where you left off:</p><p><a href='{{checkout_url}}'>Return to checkout</a></p><p>Questions before you decide? Just reply to this email or call {{business_phone}}.</p><p>— The TransitNow team</p>",
@@ -251,6 +279,12 @@
     "testimonialSlot": "TESTIMONIAL_SLOT (add real customer quotes here)"
   },
   "sequenceBranding": {
+    "howtoRegistered": {
+      "fromName": "The How To Room"
+    },
+    "howtoReminders": {
+      "fromName": "The How To Room"
+    },
     "roomWelcome": {
       "fromName": "Wealth Builder's Room"
     },
